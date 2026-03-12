@@ -1,0 +1,1976 @@
+'use client';
+
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import {
+  Plus,
+  Minus,
+  Trash2,
+  UserPlus,
+  CreditCard,
+  DollarSign,
+  ShoppingBasket,
+  Package,
+  Wallet,
+  Smartphone,
+  CheckCircle,
+  Loader2,
+  Printer,
+} from 'lucide-react';
+import type { CartItem, PaymentMethod } from '@/app/dashboard/pos/page';
+import type { InventoryItem, Order, TaxRate } from '@/lib/db';
+import { useIsMobile } from '@/hooks/use-mobile';
+import { useCurrency } from '@/hooks/use-currency';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardFooter,
+} from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogClose,
+  DialogFooter,
+  DialogDescription,
+} from '@/components/ui/dialog';
+import { cn } from '@/lib/utils';
+import { Input } from '../ui/input';
+import { Receipt } from './receipt';
+import { PrinterConfigModal } from './printer-config-modal';
+import { db } from '@/lib/db';
+import { useToast } from '@/hooks/use-toast';
+import { getOfflineBusinessProfile } from '@/lib/business-profile';
+import { PRINTER_CONFIG_UPDATED_EVENT, type PrinterSettings } from '@/lib/services/printer-service';
+import { getNextReceiptCopyNumber, markReceiptPrinted } from '@/lib/services/receipt-copy-service';
+
+
+export type BuyerDetails = {
+  name?: string;
+  phone?: string;
+  tin?: string;
+};
+
+export interface PosProps {
+  inventory: InventoryItem[];
+  displayItems?: InventoryItem[];
+  cart: CartItem[];
+  onAddToCart: (item: InventoryItem, quantity?: number, price?: number) => Promise<void>;
+  onUpdateQuantity: (itemId: string, quantity: number) => void;
+  onClearCart: () => void;
+  onCheckout: (paymentMethod: PaymentMethod, tip: number, buyerDetails?: BuyerDetails) => Promise<Order | null>;
+  productIcon?: React.ReactNode;
+  viewMode?: 'grid' | 'list';
+  defaultTaxRate?: TaxRate;
+  eisEnabled?: boolean;
+  blockSalesIfTaxMappingMissing?: boolean;
+  branchId?: string;
+}
+
+type ReceiptDisplaySettings = {
+  showHeader: boolean;
+  showFooter: boolean;
+  showQRCode: boolean;
+  showItemDetails: boolean;
+  showTaxBreakdown: boolean;
+};
+
+const DEFAULT_RECEIPT_DISPLAY_SETTINGS: ReceiptDisplaySettings = {
+  showHeader: true,
+  showFooter: true,
+  showQRCode: true,
+  showItemDetails: true,
+  showTaxBreakdown: true,
+};
+
+const normalizeBuyerDetails = (details?: BuyerDetails | null): BuyerDetails | undefined => {
+  if (!details) {
+    return undefined;
+  }
+
+  const name = details.name?.trim();
+  const phone = details.phone?.trim();
+  const tin = details.tin?.trim();
+
+  if (!name && !phone && !tin) {
+    return undefined;
+  }
+
+  return {
+    name: name || undefined,
+    phone: phone || undefined,
+    tin: tin || undefined,
+  };
+};
+
+const extractFiscalInvoiceNumber = (order: Partial<Order> | null | undefined): string => {
+  return String((order as any)?.fiscalInvoiceNumber ?? (order as any)?.fiscal_invoice_number ?? '').trim();
+};
+
+const hasCompleteFiscalInvoiceNumber = (value: string | null | undefined): boolean => {
+  const fiscal = String(value ?? '').trim();
+  if (!fiscal) {
+    return false;
+  }
+
+  const suffix = fiscal.split('-').pop() ?? '';
+  if (!/^\d+$/.test(suffix)) {
+    return true;
+  }
+
+  if (suffix.length < 8) {
+    return false;
+  }
+
+  return Number.parseInt(suffix, 10) > 0;
+};
+
+const normalizeInventoryReference = (value: unknown): string => {
+  if (value === undefined || value === null) {
+    return '';
+  }
+
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const nestedValue =
+      obj.id ??
+      obj.pk ??
+      obj.uuid ??
+      obj.inventory_item_id ??
+      obj.inventoryItemId;
+
+    return String(nestedValue ?? '').trim();
+  }
+
+  return String(value).trim();
+};
+
+const resolveMappingInventoryItemId = (mapping: any): string => {
+  if (!mapping || typeof mapping !== 'object') {
+    return '';
+  }
+
+  const candidates = [
+    mapping.inventoryItemId,
+    mapping.inventory_item_id,
+    mapping.inventoryItem,
+    mapping.inventory_item,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeInventoryReference(candidate);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return '';
+};
+
+const resolveCartInventoryItemId = (cartItem: { id?: string; inventoryItemId?: string }): string => {
+  const explicitInventoryId = String(cartItem.inventoryItemId || '').trim();
+  if (explicitInventoryId) {
+    return explicitInventoryId;
+  }
+
+  const rawLineId = String(cartItem.id || '').trim();
+  if (!rawLineId) {
+    return '';
+  }
+
+  // Backward compatibility for legacy synthetic line ids like "<inventoryId>::cart::<ts>".
+  return rawLineId.split('::cart::')[0] || rawLineId;
+};
+
+const mappingReadinessRank = (mapping: any): number => {
+  if (!mapping) {
+    return -1;
+  }
+
+  const approved = Boolean(mapping.isApproved ?? mapping.is_approved);
+  const synced = Boolean(mapping.mraSynced ?? mapping.mra_synced);
+
+  if (approved && synced) {
+    return 3;
+  }
+  if (approved) {
+    return 2;
+  }
+  if (synced) {
+    return 1;
+  }
+  return 0;
+};
+
+const choosePreferredMapping = (current: any, candidate: any): any => {
+  if (!current) {
+    return candidate;
+  }
+
+  const currentRank = mappingReadinessRank(current);
+  const candidateRank = mappingReadinessRank(candidate);
+  if (candidateRank > currentRank) {
+    return candidate;
+  }
+
+  if (candidateRank < currentRank) {
+    return current;
+  }
+
+  const currentUpdatedAt = new Date(current.updatedAt || current.updated_at || current.lastSyncedAt || current.last_synced_at || current.createdAt || current.created_at || 0).getTime();
+  const candidateUpdatedAt = new Date(candidate.updatedAt || candidate.updated_at || candidate.lastSyncedAt || candidate.last_synced_at || candidate.createdAt || candidate.created_at || 0).getTime();
+
+  return candidateUpdatedAt >= currentUpdatedAt ? candidate : current;
+};
+
+const buildMappingLookup = (mappings: any[]): Map<string, any> => {
+  const lookup = new Map<string, any>();
+
+  for (const mapping of mappings) {
+    const key = resolveMappingInventoryItemId(mapping);
+    if (!key) {
+      continue;
+    }
+
+    lookup.set(key, choosePreferredMapping(lookup.get(key), mapping));
+  }
+
+  return lookup;
+};
+
+const normalizeBranchIdentifier = (value: unknown): string => {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) return '';
+
+  const brnMatch = /^BRN-(\d+)$/i.exec(normalized);
+  if (brnMatch) return brnMatch[1];
+
+  const legacyMatch = /^branch-(\d+)$/i.exec(normalized);
+  if (legacyMatch) return legacyMatch[1];
+
+  return normalized;
+};
+
+type NormalizedTaxType = 'standard' | 'zero' | 'exempt' | 'unmapped';
+type NormalizedTaxCalculationMethod = 'inclusive' | 'exclusive' | 'not_applicable' | 'unmapped';
+type MappingStatus = 'ready' | 'pending' | 'unmapped';
+type TaxCalculationBasis = 'gross_inclusive' | 'net_exclusive' | 'not_applicable' | 'unmapped';
+
+type ProductTaxMappingDetail = {
+  rate: number;
+  taxAmount: number;
+  netAmount: number;
+  grossAmount: number;
+  lineAmount: number;
+  taxType: NormalizedTaxType;
+  taxCalculationMethod: NormalizedTaxCalculationMethod;
+  taxCalculationBasis: TaxCalculationBasis;
+  taxableAmount: number;
+  mappingStatus: MappingStatus;
+};
+
+const normalizeMappedTaxType = (value: unknown): NormalizedTaxType => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (
+    normalized === 'zero' ||
+    normalized === 'zero_rated' ||
+    normalized === 'zero-rated' ||
+    normalized === 'vat_zero'
+  ) {
+    return 'zero';
+  }
+  if (normalized === 'exempt' || normalized === 'vat_exempt') {
+    return 'exempt';
+  }
+  return 'standard';
+};
+
+const normalizeTaxCalculationMethod = (value: unknown): 'inclusive' | 'exclusive' => {
+  return String(value || '').trim().toLowerCase() === 'exclusive' ? 'exclusive' : 'inclusive';
+};
+
+const formatTaxTypeLabel = (taxType: NormalizedTaxType): string => {
+  if (taxType === 'zero') return 'Zero Rated';
+  if (taxType === 'exempt') return 'Exempt';
+  if (taxType === 'standard') return 'Standard';
+  return 'Not Mapped';
+};
+
+const formatTaxMethodLabel = (method: NormalizedTaxCalculationMethod): string => {
+  if (method === 'inclusive') return 'Inclusive';
+  if (method === 'exclusive') return 'Exclusive';
+  return 'N/A';
+};
+
+const formatTaxBasisLabel = (basis: TaxCalculationBasis): string => {
+  if (basis === 'gross_inclusive') return 'Gross Price (Tax Included)';
+  if (basis === 'net_exclusive') return 'Net Price (Tax Added)';
+  if (basis === 'not_applicable') return 'Not Applicable';
+  return 'Not Available';
+};
+
+const formatMappingStatusLabel = (status: MappingStatus): string => {
+  if (status === 'ready') return 'Ready';
+  if (status === 'pending') return 'Pending Approval/Sync';
+  return 'No Mapping';
+};
+
+const formatTaxConditionLabel = (
+  taxType: NormalizedTaxType,
+  method: NormalizedTaxCalculationMethod,
+  status: MappingStatus
+): string => {
+  if (status !== 'ready') {
+    return formatMappingStatusLabel(status);
+  }
+
+  if (taxType === 'standard') {
+    return `${formatTaxTypeLabel(taxType)} • ${formatTaxMethodLabel(method)}`;
+  }
+
+  return `${formatTaxTypeLabel(taxType)} • N/A`;
+};
+
+const ProductCard = ({
+  item,
+  onAddToCart,
+  productIcon,
+  currencyFormatter,
+  isAvailable,
+  stockInfo,
+}: {
+  item: InventoryItem;
+  onAddToCart: (item: InventoryItem) => void;
+  productIcon: React.ReactNode;
+  currencyFormatter: (amount: number) => string;
+  isAvailable: boolean;
+  stockInfo: string;
+}) => {
+  const price = item.price || 0;
+  
+  return (
+    <Card
+      className={cn(
+        "flex cursor-pointer flex-col overflow-hidden transition-all hover:shadow-md",
+        !isAvailable && "opacity-50 cursor-not-allowed"
+      )}
+      role="button"
+    >
+      <div className="flex h-24 items-center justify-center bg-muted">
+        {productIcon}
+      </div>
+      <CardContent className="flex-1 p-3">
+        <p className="font-semibold">{item.name}</p>
+        <p className="text-sm text-muted-foreground">{item.category}</p>
+        <p className={cn(
+          "text-xs mt-1 font-medium",
+          isAvailable ? "text-green-600" : "text-red-600"
+        )}>
+          {stockInfo}
+        </p>
+      </CardContent>
+      <CardFooter className="flex items-center justify-between p-3 pt-0">
+        <p className="text-base font-bold text-primary">
+          {currencyFormatter(price)}
+          {item.isVariablePrice && <span className="text-xs font-normal text-muted-foreground">/{item.unitType}</span>}
+        </p>
+        {item.isVariablePrice && <Badge variant="outline">By Weight</Badge>}
+      </CardFooter>
+    </Card>
+  );
+};
+
+const CartItemView = ({
+  item,
+  onUpdateQuantity,
+  currencyFormatter,
+}: {
+  item: CartItem;
+  onUpdateQuantity: (itemId: string, quantity: number) => void;
+  currencyFormatter: (amount: number) => string;
+}) => {
+  const total = item.isVariablePrice ? item.price : item.price * item.quantity;
+  const isVariable = item.isVariablePrice;
+
+  return (
+    <div className="flex items-center gap-4 py-3">
+      <div className="flex-1">
+        <p className="font-medium">{item.name}</p>
+        <p className="text-sm text-muted-foreground">
+          {isVariable
+            ? `${item.quantity.toFixed(3)} ${item.unitType} @ ${currencyFormatter(item.price / item.quantity)}/${item.unitType}`
+            : currencyFormatter(item.price)}
+        </p>
+      </div>
+      {!isVariable && (
+        <div className="flex items-center gap-2">
+          <Button
+            size="icon"
+            variant="outline"
+            className="h-7 w-7"
+            onClick={() => onUpdateQuantity(item.id, item.quantity - 1)}
+          >
+            <Minus className="h-4 w-4" />
+          </Button>
+          <span className="w-6 text-center font-bold">{item.quantity}</span>
+          <Button
+            size="icon"
+            variant="outline"
+            className="h-7 w-7"
+            onClick={() => onUpdateQuantity(item.id, item.quantity + 1)}
+          >
+            <Plus className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
+      <p className="w-16 text-right font-semibold">{currencyFormatter(total)}</p>
+      <Button
+        size="icon"
+        variant="ghost"
+        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+        onClick={() => onUpdateQuantity(item.id, 0)}
+      >
+        <Trash2 className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+};
+
+const PaymentDialog = ({
+    subtotal,
+    tax,
+    taxLabel,
+    defaultTaxRate,
+    onCheckout,
+    onClose,
+    currencyFormatter,
+    resetToken,
+    cart,
+    eisEnabled,
+    blockSalesIfTaxMappingMissing,
+    branchId,
+    onConfigurePrinter,
+}: {
+    subtotal: number;
+    tax: number;
+    taxLabel: string;
+    onCheckout: (paymentMethod: PaymentMethod, tip: number, buyerDetails?: BuyerDetails) => Promise<Order | null>;
+    onClose: () => void;
+    currencyFormatter: (amount: number) => string;
+    resetToken: number;
+    cart?: CartItem[];
+    eisEnabled?: boolean;
+    blockSalesIfTaxMappingMissing?: boolean;
+    branchId?: string;
+    onConfigurePrinter: () => void;
+    defaultTaxRate?: TaxRate | null;
+}) => {
+    const { toast } = useToast();
+    const [tip, setTip] = useState(0);
+    const [customTip, setCustomTip] = useState<number | string>('');
+    const [step, setStep] = useState<'payment' | 'confirmation'>('payment');
+    const [completedOrder, setCompletedOrder] = useState<Order | null>(null);
+    const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod | null>(null);
+    const [cashPaid, setCashPaid] = useState<number | string>('');
+    const [buyerName, setBuyerName] = useState('');
+    const [buyerPhone, setBuyerPhone] = useState('');
+    const [buyerTin, setBuyerTin] = useState('');
+    const [calculatedTax, setCalculatedTax] = useState(tax);
+    const [calculatedNetAmount, setCalculatedNetAmount] = useState(subtotal);
+    const [calculatedGrossAmount, setCalculatedGrossAmount] = useState(subtotal + tax);
+    const [calculatedTaxLabel, setCalculatedTaxLabel] = useState(taxLabel);
+    const [productTaxMappings, setProductTaxMappings] = useState<Record<string, ProductTaxMappingDetail>>({});
+    const [unmappedProducts, setUnmappedProducts] = useState<string[]>([]);
+    const [isProcessingPayment, setIsProcessingPayment] = useState(false);
+    const shouldEnforceTaxMapping = blockSalesIfTaxMappingMissing === true;
+    const defaultTaxRateDecimal = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
+
+    useEffect(() => {
+        setStep('payment');
+        setCompletedOrder(null);
+        setSelectedPaymentMethod(null);
+        setCashPaid('');
+        setTip(0);
+        setCustomTip('');
+        setBuyerName('');
+        setBuyerPhone('');
+        setBuyerTin('');
+        setCalculatedTax(tax);
+        setCalculatedNetAmount(subtotal);
+        setCalculatedGrossAmount(subtotal + tax);
+        setCalculatedTaxLabel(taxLabel);
+        setProductTaxMappings({});
+        setUnmappedProducts([]);
+        setIsProcessingPayment(false);
+    }, [resetToken, subtotal, tax, taxLabel]);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const calculateCorrectTax = async () => {
+            const effectiveTaxLabel = eisEnabled && shouldEnforceTaxMapping
+                ? 'VAT Amount (MRA Rules Applied)'
+                : taxLabel;
+            console.log('[PaymentDialog] Starting tax calculation, cart items:', cart?.length);
+            if (!cart || cart.length === 0) {
+                console.log('[PaymentDialog] No cart items, using default tax:', tax);
+                if (!cancelled) {
+                    setCalculatedTax(tax);
+                    setCalculatedNetAmount(subtotal);
+                    setCalculatedGrossAmount(subtotal + tax);
+                    setCalculatedTaxLabel(effectiveTaxLabel);
+                    setProductTaxMappings({});
+                    setUnmappedProducts([]);
+                }
+                return;
+            }
+
+            if (!eisEnabled) {
+                if (!cancelled) {
+                    setCalculatedTax(tax);
+                    setCalculatedNetAmount(subtotal);
+                    setCalculatedGrossAmount(subtotal + tax);
+                    setCalculatedTaxLabel(effectiveTaxLabel);
+                    setProductTaxMappings({});
+                    setUnmappedProducts([]);
+                }
+                return;
+            }
+
+            try {
+                const activeBranchId = normalizeBranchIdentifier(
+                    branchId ?? (
+                        typeof window !== 'undefined'
+                            ? localStorage.getItem('handypos-active-branch')
+                            : ''
+                    )
+                );
+                const shouldScopeByBranch =
+                    Boolean(activeBranchId) &&
+                    !['main', 'main-branch', 'main_branch'].includes(activeBranchId.toLowerCase());
+                const localMappings = await db.mraMappings.toArray();
+                const scopedMappings = localMappings.filter((mapping) => {
+                    const mappingBranchId = normalizeBranchIdentifier(
+                        (mapping as any).branchId ??
+                        (mapping as any).branch_id ??
+                        (mapping as any).branch
+                    );
+
+                    // Backward compatibility: keep unscoped local mappings,
+                    // but prefer branch-scoped mappings when metadata exists.
+                    if (!mappingBranchId) {
+                        return true;
+                    }
+                    if (!shouldScopeByBranch) {
+                        return true;
+                    }
+                    return mappingBranchId === activeBranchId;
+                });
+
+                const mappingByItemId = buildMappingLookup(scopedMappings);
+
+                let totalTax = 0;
+                let totalNet = 0;
+                let totalGross = 0;
+                const mappings: Record<string, ProductTaxMappingDetail> = {};
+                const unmapped: string[] = [];
+                
+                for (const cartItem of cart) {
+                    const itemId = String(cartItem.id);
+                    const primaryInventoryItemId = String(cartItem.inventoryItemId || '').trim();
+                    const fallbackInventoryItemId = resolveCartInventoryItemId(cartItem) || String(cartItem.id || '').trim();
+
+                    // Prefer the canonical inventory item id from cart metadata,
+                    // then fall back to cart line id for legacy entries.
+                    const preferredMappingKey = primaryInventoryItemId || fallbackInventoryItemId;
+                    let localMapping = mappingByItemId.get(preferredMappingKey);
+                    if (!localMapping && fallbackInventoryItemId && fallbackInventoryItemId !== preferredMappingKey) {
+                        localMapping = mappingByItemId.get(fallbackInventoryItemId);
+                    }
+                    const lineAmount = cartItem.isVariablePrice
+                        ? Number(cartItem.price || 0)
+                        : Number(cartItem.price || 0) * Number(cartItem.quantity || 0);
+                    let itemTax = 0;
+                    let itemNet = lineAmount;
+                    let itemGross = lineAmount;
+                    let taxRate = 0;
+                    let taxCalculationBasis: TaxCalculationBasis = 'not_applicable';
+                    const isApproved = Boolean(localMapping?.isApproved ?? localMapping?.is_approved);
+                    const isSynced = Boolean(localMapping?.mraSynced ?? localMapping?.mra_synced);
+                    
+                    if (localMapping && isApproved && isSynced) {
+                        const taxType = normalizeMappedTaxType(localMapping.mraTaxType || localMapping.mra_tax_type);
+                        taxRate = Number(localMapping.mraTaxRate ?? localMapping.mra_tax_rate ?? 0);
+                        const normalizedRate = Number.isFinite(taxRate) ? taxRate : 0;
+                        let taxCalculationMethod: NormalizedTaxCalculationMethod = 'not_applicable';
+
+                        if (taxType === 'zero' || taxType === 'exempt') {
+                            itemTax = 0;
+                            itemNet = lineAmount;
+                            itemGross = lineAmount;
+                            taxCalculationBasis = 'not_applicable';
+                            console.log(`[PaymentDialog] ✓ Product ${cartItem.name} is ${taxType.toUpperCase()} - no tax applied`);
+                        } else {
+                            taxCalculationMethod = normalizeTaxCalculationMethod(
+                                localMapping.taxCalculationMethod || localMapping.tax_calculation_method
+                            );
+                            const effectiveTaxRate = normalizedRate / 100;
+                            
+                            if (taxCalculationMethod === 'exclusive') {
+                                itemTax = lineAmount * effectiveTaxRate;
+                                itemNet = lineAmount;
+                                itemGross = lineAmount + itemTax;
+                                taxCalculationBasis = 'net_exclusive';
+                                console.log(`[PaymentDialog] ✓ Using EXCLUSIVE tax for ${cartItem.name}: ${normalizedRate}% (added tax: ${itemTax})`);
+                            } else {
+                                itemTax = effectiveTaxRate > 0
+                                    ? lineAmount * effectiveTaxRate / (1 + effectiveTaxRate)
+                                    : 0;
+                                itemGross = lineAmount;
+                                itemNet = lineAmount - itemTax;
+                                taxCalculationBasis = 'gross_inclusive';
+                                console.log(`[PaymentDialog] ✓ Using INCLUSIVE tax for ${cartItem.name}: ${normalizedRate}% (extracted tax: ${itemTax})`);
+                            }
+                        }
+                        
+                        totalTax += itemTax;
+                        totalNet += itemNet;
+                        totalGross += itemGross;
+                        mappings[itemId] = {
+                            rate: normalizedRate,
+                            taxAmount: itemTax,
+                            netAmount: itemNet,
+                            grossAmount: itemGross,
+                            lineAmount,
+                            taxType,
+                            taxCalculationMethod,
+                            taxCalculationBasis,
+                            taxableAmount: itemNet,
+                            mappingStatus: 'ready',
+                        };
+                    } else {
+                        const hasLocalMapping = Boolean(localMapping);
+                        const mappingStatus: MappingStatus = hasLocalMapping ? 'pending' : 'unmapped';
+                        const reasonSuffix = hasLocalMapping ? ' (mapping pending approval/sync)' : '';
+                        console.log(`[PaymentDialog] ✗ Mapping not ready for ${cartItem.name}${reasonSuffix}`);
+                        if (shouldEnforceTaxMapping) {
+                            unmapped.push(`${cartItem.name}${reasonSuffix}`);
+                        }
+                        if (!shouldEnforceTaxMapping && defaultTaxRateDecimal > 0) {
+                            itemTax = lineAmount * defaultTaxRateDecimal / (1 + defaultTaxRateDecimal);
+                            itemGross = lineAmount;
+                            itemNet = lineAmount - itemTax;
+                            taxCalculationBasis = 'gross_inclusive';
+                            totalTax += itemTax;
+                            totalNet += itemNet;
+                            totalGross += itemGross;
+                            mappings[itemId] = {
+                                rate: defaultTaxRateDecimal * 100,
+                                taxAmount: itemTax,
+                                netAmount: itemNet,
+                                grossAmount: itemGross,
+                                lineAmount,
+                                taxType: 'standard',
+                                taxCalculationMethod: 'inclusive',
+                                taxCalculationBasis,
+                                taxableAmount: itemNet,
+                                mappingStatus,
+                            };
+                        } else {
+                            totalNet += lineAmount;
+                            totalGross += lineAmount;
+                            mappings[itemId] = {
+                                rate: 0, 
+                                taxAmount: 0,
+                                netAmount: lineAmount,
+                                grossAmount: lineAmount,
+                                lineAmount,
+                                taxType: 'unmapped',
+                                taxCalculationMethod: 'unmapped',
+                                taxCalculationBasis: 'unmapped',
+                                taxableAmount: lineAmount,
+                                mappingStatus,
+                            };
+                        }
+                    }
+                }
+                console.log('[PaymentDialog] FINAL CALCULATED TAX:', totalTax);
+                console.log('[PaymentDialog] FINAL NET/GROSS:', { totalNet, totalGross });
+                console.log('[PaymentDialog] Tax breakdown by product:', mappings);
+                console.log('[PaymentDialog] Unmapped products:', unmapped);
+                if (!cancelled) {
+                    setCalculatedTax(totalTax);
+                    setCalculatedNetAmount(totalNet);
+                    setCalculatedGrossAmount(totalGross);
+                    setCalculatedTaxLabel(effectiveTaxLabel);
+                    setProductTaxMappings(mappings);
+                    setUnmappedProducts(shouldEnforceTaxMapping ? unmapped : []);
+                }
+            } catch (error) {
+                console.error('[PaymentDialog] Error calculating tax:', error);
+                if (!cancelled) {
+                    setCalculatedTax(tax);
+                    setCalculatedNetAmount(subtotal);
+                    setCalculatedGrossAmount(subtotal + tax);
+                    setCalculatedTaxLabel(effectiveTaxLabel);
+                    setProductTaxMappings({});
+                    setUnmappedProducts([]);
+                }
+            }
+        };
+
+        calculateCorrectTax();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [cart, subtotal, tax, taxLabel, eisEnabled, shouldEnforceTaxMapping, defaultTaxRateDecimal]);
+
+    const total = calculatedGrossAmount + tip;
+    const hasBlockingUnmapped = shouldEnforceTaxMapping && unmappedProducts.length > 0;
+    const businessSettings = useLiveQuery(async () => getOfflineBusinessProfile(), []);
+    const change = typeof cashPaid === 'number' && cashPaid > 0 ? cashPaid - total : 0;
+    const receiptStyleTaxBreakdown = useMemo(() => {
+        const breakdown = new Map<string, {
+            rate: number;
+            method: 'inclusive' | 'exclusive' | 'not_applicable';
+            taxableValue: number;
+            vatAmount: number;
+            count: number;
+        }>();
+
+        for (const item of cart || []) {
+            const mapping = productTaxMappings[String(item.id)];
+            if (!mapping || mapping.mappingStatus !== 'ready') {
+                continue;
+            }
+
+            const rate = Number.isFinite(mapping.rate) ? mapping.rate : 0;
+            const method: 'inclusive' | 'exclusive' | 'not_applicable' =
+                mapping.taxCalculationMethod === 'exclusive'
+                    ? 'exclusive'
+                    : mapping.taxCalculationMethod === 'inclusive'
+                        ? 'inclusive'
+                        : 'not_applicable';
+            const key = `${rate}-${method}`;
+            const taxableValue = Number.isFinite(mapping.taxableAmount)
+                ? mapping.taxableAmount
+                : mapping.netAmount;
+
+            const existing = breakdown.get(key);
+            if (existing) {
+                existing.taxableValue += taxableValue;
+                existing.vatAmount += mapping.taxAmount;
+                existing.count += 1;
+                continue;
+            }
+
+            breakdown.set(key, {
+                rate,
+                method,
+                taxableValue,
+                vatAmount: mapping.taxAmount,
+                count: 1,
+            });
+        }
+
+        return Array.from(breakdown.values()).sort((a, b) => b.rate - a.rate);
+    }, [cart, productTaxMappings]);
+
+    const handleSetTip = (percentage: number) => {
+        setTip(calculatedNetAmount * percentage);
+        setCustomTip('');
+    }
+    
+    const handleCustomTipChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const value = e.target.value;
+        setCustomTip(value);
+        const parsedValue = parseFloat(value);
+        if (!isNaN(parsedValue) && parsedValue >= 0) {
+            setTip(parsedValue);
+        } else if (value === '') {
+            setTip(0);
+        }
+    }
+    
+    const handlePayment = async (method: PaymentMethod) => {
+        if (isProcessingPayment) {
+            return;
+        }
+
+        setIsProcessingPayment(true);
+        try {
+            const buyerDetails = normalizeBuyerDetails({
+                name: buyerName,
+                phone: buyerPhone,
+                tin: buyerTin,
+            });
+            const order = await onCheckout(method, tip, buyerDetails);
+            if (order) {
+                const normalizedCashPaid =
+                    typeof cashPaid === 'number'
+                        ? cashPaid
+                        : Number.parseFloat(String(cashPaid ?? ''));
+                const hasCashPaid = Number.isFinite(normalizedCashPaid) && normalizedCashPaid > 0;
+                const cashChange = hasCashPaid ? Math.max(0, normalizedCashPaid - total) : 0;
+
+                const orderWithPaymentDetails: Order =
+                    method === 'Cash' && hasCashPaid
+                        ? ({
+                              ...order,
+                              cashPaid: normalizedCashPaid,
+                              cash_paid: normalizedCashPaid,
+                              amountTendered: normalizedCashPaid,
+                              amount_tendered: normalizedCashPaid,
+                              amountReceived: normalizedCashPaid,
+                              amount_received: normalizedCashPaid,
+                              change: cashChange,
+                              changeAmount: cashChange,
+                              change_amount: cashChange,
+                          } as Order)
+                        : order;
+
+                if (method === 'Cash' && hasCashPaid) {
+                    try {
+                        await db.orders.update(order.id, {
+                            cashPaid: normalizedCashPaid,
+                            cash_paid: normalizedCashPaid,
+                            amountTendered: normalizedCashPaid,
+                            amount_tendered: normalizedCashPaid,
+                            amountReceived: normalizedCashPaid,
+                            amount_received: normalizedCashPaid,
+                            change: cashChange,
+                            changeAmount: cashChange,
+                            change_amount: cashChange,
+                        } as any);
+                    } catch (paymentMetaError) {
+                        console.warn('[PaymentDialog] Failed to persist cash payment metadata on order:', paymentMetaError);
+                    }
+                }
+
+                setCompletedOrder(orderWithPaymentDetails);
+                setStep('confirmation');
+            }
+        } finally {
+            setIsProcessingPayment(false);
+        }
+    }
+    
+    const [isPrinting, setIsPrinting] = useState(false);
+    const [autoPrintHandled, setAutoPrintHandled] = useState(false);
+    const [isAutoPrintRunning, setIsAutoPrintRunning] = useState(false);
+    const [hasDefaultPrinter, setHasDefaultPrinter] = useState<boolean | null>(null);
+    const [receiptPaperWidth, setReceiptPaperWidth] = useState<'80mm' | '58mm'>('80mm');
+    const [receiptDisplaySettings, setReceiptDisplaySettings] = useState<ReceiptDisplaySettings>(DEFAULT_RECEIPT_DISPLAY_SETTINGS);
+    const [receiptCopyNumber, setReceiptCopyNumber] = useState(1);
+    const isPrintBusy = isPrinting || isAutoPrintRunning;
+    const autoPrintOrderRef = useRef<string | null>(null);
+    const printJobLockRef = useRef(false);
+    const onCloseRef = useRef(onClose);
+
+    useEffect(() => {
+        onCloseRef.current = onClose;
+    }, [onClose]);
+
+    useEffect(() => {
+        setHasDefaultPrinter(null);
+        autoPrintOrderRef.current = null;
+        setReceiptPaperWidth('80mm');
+        setReceiptDisplaySettings(DEFAULT_RECEIPT_DISPLAY_SETTINGS);
+        setReceiptCopyNumber(1);
+    }, [resetToken]);
+
+    const applyPrinterSettingsToReceipt = useCallback(
+        (
+            settings?: Partial<PrinterSettings> | null,
+            fallbackPaperWidth: '80mm' | '58mm' = '80mm'
+        ): '80mm' | '58mm' => {
+            const resolvedPaperWidth: '80mm' | '58mm' =
+                settings?.receiptPaperWidth === '58mm' || settings?.receiptPaperWidth === '80mm'
+                    ? settings.receiptPaperWidth
+                    : fallbackPaperWidth;
+
+            setReceiptPaperWidth(resolvedPaperWidth);
+            setReceiptDisplaySettings({
+                showHeader: settings?.printHeader ?? true,
+                showFooter: settings?.printFooter ?? true,
+                showQRCode: settings?.printQRCode ?? true,
+                showItemDetails: settings?.printItemDetails ?? true,
+                showTaxBreakdown: settings?.printTaxBreakdown ?? true,
+            });
+
+            return resolvedPaperWidth;
+        },
+        []
+    );
+
+    const refreshPrinterState = useCallback(async () => {
+        const { printerService } = await import('@/lib/services/printer-service');
+        const activeBranchId = localStorage.getItem('handypos-active-branch') || 'main';
+        const [defaultPrinter, currentSettings] = await Promise.all([
+            printerService.getDefaultPrinter(activeBranchId),
+            printerService.getPrinterSettings(activeBranchId),
+        ]);
+
+        setHasDefaultPrinter(!!defaultPrinter);
+        applyPrinterSettingsToReceipt(
+            currentSettings,
+            (defaultPrinter?.paperWidth as '80mm' | '58mm') || '80mm'
+        );
+    }, [applyPrinterSettingsToReceipt]);
+
+    const waitForFiscalInvoiceNumber = useCallback(
+        async (orderToPrint: Order, timeoutMs: number = 15000): Promise<Order> => {
+            if (!orderToPrint?.id) {
+                return orderToPrint;
+            }
+
+            if (hasCompleteFiscalInvoiceNumber(extractFiscalInvoiceNumber(orderToPrint))) {
+                return orderToPrint;
+            }
+
+            const startedAt = Date.now();
+            let latestKnownOrder: Order = orderToPrint;
+
+            while (Date.now() - startedAt < timeoutMs) {
+                const latestOrder = await db.orders.get(orderToPrint.id);
+                if (latestOrder) {
+                    latestKnownOrder = latestOrder as Order;
+                    if (hasCompleteFiscalInvoiceNumber(extractFiscalInvoiceNumber(latestKnownOrder))) {
+                        return latestKnownOrder;
+                    }
+                }
+
+                await new Promise((resolve) => setTimeout(resolve, 300));
+            }
+
+            return latestKnownOrder;
+        },
+        []
+    );
+
+    const handlePrintReceipt = useCallback(async (): Promise<boolean> => {
+        if (printJobLockRef.current) {
+            console.log('[Print] Print job already running, skipping duplicate trigger');
+            return false;
+        }
+
+        printJobLockRef.current = true;
+        try {
+            setIsPrinting(true);
+            const { printerService } = await import('@/lib/services/printer-service');
+            const { silentPrintService } = await import('@/lib/services/silent-print-service');
+
+            const activeOrder = completedOrder as Order | null;
+            if (!activeOrder) {
+                toast({
+                    variant: 'destructive',
+                    title: 'Print Failed',
+                    description: 'No completed order found to print.',
+                });
+                return false;
+            }
+            const activeOrderId = String((activeOrder as any)?.id ?? '').trim();
+
+            if (eisEnabled) {
+                const currentFiscal = extractFiscalInvoiceNumber(activeOrder);
+                if (!hasCompleteFiscalInvoiceNumber(currentFiscal)) {
+                    toast({
+                        title: 'Preparing Fiscal Receipt',
+                        description: 'Waiting for fiscal invoice number assignment...',
+                    });
+
+                    const latestOrder = await waitForFiscalInvoiceNumber(activeOrder);
+                    const resolvedFiscal = extractFiscalInvoiceNumber(latestOrder);
+
+                    if (!hasCompleteFiscalInvoiceNumber(resolvedFiscal)) {
+                        toast({
+                            variant: 'destructive',
+                            title: 'Fiscal Number Pending',
+                            description: 'Invoice number is not assigned yet. Please try printing again in a moment.',
+                        });
+                        return false;
+                    }
+
+                    setCompletedOrder(latestOrder);
+                    // Give React a moment to render updated receipt data before capturing HTML.
+                    await new Promise((resolve) => setTimeout(resolve, 150));
+                }
+            }
+
+            const activeBranchId = localStorage.getItem('handypos-active-branch') || 'main';
+            const [settings, defaultPrinter] = await Promise.all([
+                printerService.getPrinterSettings(activeBranchId),
+                printerService.getDefaultPrinter(activeBranchId),
+            ]);
+            const selectedPaperWidth = applyPrinterSettingsToReceipt(
+                settings,
+                (defaultPrinter?.paperWidth as '80mm' | '58mm') || '80mm'
+            );
+            
+            if (!defaultPrinter) {
+                console.error('No default printer configured');
+                toast({
+                    variant: 'destructive',
+                    title: 'No Printer Configured',
+                    description: 'Configure a printer from the POS printer button or in Settings → Printers.',
+                });
+                return false;
+            }
+
+            const configuredCopies = Number.isFinite(Number(settings.printCopies))
+                ? Number(settings.printCopies)
+                : 1;
+            const copiesToPrint = Math.max(1, Math.floor(configuredCopies));
+            const startingCopyNumber = getNextReceiptCopyNumber(activeOrderId);
+            const isBluetoothPrinter =
+                defaultPrinter.connectionType === 'bluetooth' ||
+                String(defaultPrinter.id || '').toLowerCase().startsWith('bt:');
+            const printAttemptTimeoutMs = isBluetoothPrinter ? 45000 : 20000;
+
+            toast({
+                title: 'Printing...',
+                description: `Sending ${copiesToPrint} receipt${copiesToPrint > 1 ? 's' : ''} to ${defaultPrinter.name}`,
+            });
+
+            // Try silent printing first (works with Tauri/Electron or auto-submit)
+            const availableMethods = silentPrintService.getAvailableMethods();
+            console.log('[Print] Available print methods:', availableMethods);
+
+            let printedCopies = 0;
+            let failedResult: { timedOut: boolean } | null = null;
+
+            for (let copyIndex = 0; copyIndex < copiesToPrint; copyIndex += 1) {
+                const currentCopyNumber = startingCopyNumber + copyIndex;
+                setReceiptCopyNumber(currentCopyNumber);
+
+                // Wait for receipt component to re-render with updated ORIGINAL/COPY marker.
+                await new Promise((resolve) => setTimeout(resolve, 100));
+
+                const receiptElement = document.getElementById('receipt-printable-area');
+                const printContents = receiptElement?.innerHTML;
+
+                if (!printContents || printContents.trim().length === 0) {
+                    console.error('Receipt content not found or empty');
+                    failedResult = { timedOut: false };
+                    break;
+                }
+
+                const printOptions = {
+                    printerName: defaultPrinter.name,
+                    printerId: defaultPrinter.id,
+                    copies: 1,
+                    paperSize: selectedPaperWidth,
+                    printerPaperSize: defaultPrinter.paperWidth as '80mm' | '58mm',
+                };
+
+                // Never keep the UI busy forever if native printing hangs.
+                const printAttempt = Promise.race([
+                    silentPrintService
+                        .printSilentlyViaSystem(printContents, printOptions)
+                        .then((success) => ({ success, timedOut: false })),
+                    new Promise<{ success: false; timedOut: true }>((resolve) =>
+                        setTimeout(() => resolve({ success: false, timedOut: true }), printAttemptTimeoutMs)
+                    ),
+                ]);
+
+                const result = await printAttempt;
+                if (!result.success) {
+                    failedResult = { timedOut: result.timedOut };
+                    break;
+                }
+
+                printedCopies += 1;
+            }
+
+            if (printedCopies > 0) {
+                markReceiptPrinted(activeOrderId, printedCopies);
+            }
+
+            const isCompleteSuccess = printedCopies === copiesToPrint && failedResult === null;
+            if (isCompleteSuccess) {
+                const printedTypeLabel = startingCopyNumber > 1 ? 'Receipt copy printed' : 'Original receipt printed';
+                toast({
+                    title: 'Print Successful',
+                    description: copiesToPrint > 1
+                        ? `${printedCopies} receipts sent to ${defaultPrinter.name}`
+                        : `${printedTypeLabel} to ${defaultPrinter.name}`,
+                });
+                return true;
+            }
+
+            console.warn('Print failed');
+            const failedDescription = failedResult?.timedOut
+                ? 'Printer did not respond in time. Check printer connection and try again.'
+                : 'Failed to send receipt to printer. Please try again.';
+            toast({
+                variant: 'destructive',
+                title: failedResult?.timedOut ? 'Print Timed Out' : 'Print Failed',
+                description: printedCopies > 0
+                    ? `${printedCopies} receipt${printedCopies > 1 ? 's were' : ' was'} printed, then printing stopped. ${failedDescription}`
+                    : failedDescription,
+            });
+            return false;
+        } catch (error) {
+            console.error('Error printing receipt:', error);
+            toast({
+                variant: 'destructive',
+                title: 'Print Error',
+                description: error instanceof Error ? error.message : 'An unknown error occurred',
+            });
+            return false;
+        } finally {
+            setIsPrinting(false);
+            printJobLockRef.current = false;
+        }
+    }, [toast, applyPrinterSettingsToReceipt, completedOrder, eisEnabled, waitForFiscalInvoiceNumber]);
+
+    useEffect(() => {
+        if (step !== 'confirmation' || !completedOrder || autoPrintHandled) {
+            return;
+        }
+
+        const orderId = String((completedOrder as any)?.id || '');
+        if (!orderId) {
+            return;
+        }
+
+        // Guard against effect re-runs (StrictMode + parent re-renders): auto-print once per order.
+        if (autoPrintOrderRef.current === orderId) {
+            return;
+        }
+        autoPrintOrderRef.current = orderId;
+
+        let cancelled = false;
+
+        const maybeAutoPrint = async () => {
+            try {
+                setIsAutoPrintRunning(true);
+                const { printerService } = await import('@/lib/services/printer-service');
+                const activeBranchId = localStorage.getItem('handypos-active-branch') || 'main';
+                const settings = await printerService.getPrinterSettings(activeBranchId);
+
+                if (cancelled) {
+                    return;
+                }
+                applyPrinterSettingsToReceipt(settings);
+
+                if (settings.autoprint) {
+                    const success = await handlePrintReceipt();
+                    if (success && !cancelled) {
+                        onCloseRef.current();
+                    }
+                }
+            } catch (error) {
+                console.error('[Print] Failed to evaluate auto-print settings:', error);
+            } finally {
+                // Always clear busy state, even if this run was cancelled by a re-render.
+                setIsAutoPrintRunning(false);
+                if (!cancelled) {
+                    setAutoPrintHandled(true);
+                }
+            }
+        };
+
+        maybeAutoPrint();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [step, completedOrder, autoPrintHandled, handlePrintReceipt, applyPrinterSettingsToReceipt]);
+
+    useEffect(() => {
+        if (step === 'payment') {
+            setAutoPrintHandled(false);
+            setIsAutoPrintRunning(false);
+            autoPrintOrderRef.current = null;
+        }
+    }, [step]);
+
+    useEffect(() => {
+        if (step !== 'confirmation' || !completedOrder) {
+            return;
+        }
+
+        let cancelled = false;
+
+        const checkDefaultPrinter = async () => {
+            try {
+                await refreshPrinterState();
+            } catch (error) {
+                console.warn('[Print] Failed to check default printer:', error);
+                if (!cancelled) {
+                    setHasDefaultPrinter(null);
+                }
+            }
+        };
+
+        checkDefaultPrinter();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [step, completedOrder, refreshPrinterState]);
+
+    useEffect(() => {
+        if (step !== 'confirmation' || !completedOrder) {
+            return;
+        }
+
+        const handlePrinterUpdate = (event: Event) => {
+            const customEvent = event as CustomEvent<{ branchId?: string }>;
+            const activeBranchId = localStorage.getItem('handypos-active-branch') || 'main';
+            const updatedBranchId = String(customEvent.detail?.branchId || '').trim();
+            if (updatedBranchId && updatedBranchId !== activeBranchId) {
+                return;
+            }
+
+            void refreshPrinterState().catch((error) => {
+                console.warn('[Print] Failed to refresh printer state after settings update:', error);
+            });
+        };
+
+        window.addEventListener(PRINTER_CONFIG_UPDATED_EVENT, handlePrinterUpdate);
+        return () => window.removeEventListener(PRINTER_CONFIG_UPDATED_EVENT, handlePrinterUpdate);
+    }, [step, completedOrder, refreshPrinterState]);
+    
+    if (step === 'confirmation' && completedOrder) {
+        const displayOrderNumber = (completedOrder as any).orderNumber ?? (completedOrder as any).order_number ?? '-';
+
+        // Ensure completedOrder has all tax data from cart items
+        const sourceItems = Array.isArray((completedOrder as any).items) ? (completedOrder as any).items : [];
+        const enrichedOrder = {
+            ...completedOrder,
+            orderNumber: (completedOrder as any).orderNumber ?? (completedOrder as any).order_number,
+            createdAt: (completedOrder as any).createdAt ?? (completedOrder as any).created_at,
+            sessionId: (completedOrder as any).sessionId ?? (completedOrder as any).session_id ?? (completedOrder as any).session,
+            paymentMethod: (completedOrder as any).paymentMethod ?? (completedOrder as any).payment_method,
+            subtotal: (completedOrder as any).subtotal ?? (completedOrder as any).net_amount ?? 0,
+            total: (completedOrder as any).total ?? (completedOrder as any).gross_amount ?? 0,
+            tip: (completedOrder as any).tip ?? 0,
+            fiscalInvoiceNumber: (completedOrder as any).fiscalInvoiceNumber ?? (completedOrder as any).fiscal_invoice_number,
+            eisStatus: (completedOrder as any).eisStatus ?? (completedOrder as any).eis_status,
+            eisUuid: (completedOrder as any).eisUuid ?? (completedOrder as any).eis_uuid,
+            eisSubmittedAt: (completedOrder as any).eisSubmittedAt ?? (completedOrder as any).eis_submitted_at,
+            qrCodePayload: (completedOrder as any).qrCodePayload ?? (completedOrder as any).qr_code_payload,
+            digitalSignature: (completedOrder as any).digitalSignature ?? (completedOrder as any).digital_signature,
+            items: sourceItems.map((item: any) => ({
+                ...item,
+                // Ensure all tax fields are present
+                tax_rate: item.tax_rate || item.taxRate || 0,
+                tax_type: item.tax_type || item.taxType || 'standard',
+                tax_calculation_method: item.tax_calculation_method || item.taxCalculationMethod || 'inclusive',
+                subtotal: item.subtotal || 0,
+                tax_amount: item.tax_amount || item.taxAmount || 0,
+                total: item.total || 0,
+            })) || []
+        };
+
+        return (
+             <DialogContent>
+                <DialogHeader>
+                    <DialogTitle className="flex items-center justify-center text-center">
+                        <CheckCircle className="h-12 w-12 text-green-500" />
+                    </DialogTitle>
+                </DialogHeader>
+                <div className="text-center py-4">
+                    <h2 className="text-xl font-semibold">Payment Successful</h2>
+                    <p className="text-muted-foreground">Order #{displayOrderNumber} has been created.</p>
+                    {hasDefaultPrinter === false && (
+                        <p className="mt-2 text-sm text-amber-700">
+                            No default printer configured. Configure one to print receipts.
+                        </p>
+                    )}
+                </div>
+                 <div className="hidden">
+                    <Receipt
+                        order={enrichedOrder}
+                        business={businessSettings}
+                        currencyFormatter={currencyFormatter}
+                        paperWidth={receiptPaperWidth}
+                        showHeader={receiptDisplaySettings.showHeader}
+                        showFooter={receiptDisplaySettings.showFooter}
+                        showQRCode={receiptDisplaySettings.showQRCode}
+                        showItemDetails={receiptDisplaySettings.showItemDetails}
+                        showTaxBreakdown={receiptDisplaySettings.showTaxBreakdown}
+                        copyNumber={receiptCopyNumber}
+                    />
+                 </div>
+                <DialogFooter className="sm:justify-center pt-4 border-t">
+                    <Button variant="outline" onClick={onClose} disabled={isPrintBusy}>New Order</Button>
+                    {hasDefaultPrinter === false && (
+                        <Button variant="secondary" onClick={onConfigurePrinter} disabled={isPrintBusy}>
+                            <Printer className="mr-2 h-4 w-4" />
+                            Configure Printer
+                        </Button>
+                    )}
+                    <Button onClick={handlePrintReceipt} disabled={isPrintBusy || hasDefaultPrinter === false} className="bg-blue-600 hover:bg-blue-700">
+                        {isPrintBusy ? (
+                            <>
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                Printing...
+                            </>
+                        ) : (
+                            <>
+                                <DollarSign className="mr-2 h-4 w-4" />
+                                Print Receipt
+                            </>
+                        )}
+                    </Button>
+                </DialogFooter>
+             </DialogContent>
+        )
+    }
+
+    return (
+        <DialogContent className="max-h-[90vh] flex flex-col">
+            <DialogHeader>
+                <DialogTitle className="text-xl">Complete Payment</DialogTitle>
+                <DialogDescription>Select the payment method</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-3 overflow-y-auto flex-1 hide-scrollbar">
+                <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
+                    <div className="flex justify-between text-xs"><span>Net Amount (Before VAT)</span><span>{currencyFormatter(calculatedNetAmount)}</span></div>
+                    <div className="flex justify-between text-xs"><span>{calculatedTaxLabel || 'VAT Amount'}</span><span className="text-green-600 font-semibold">{currencyFormatter(calculatedTax)}</span></div>
+                    <div className="flex justify-between text-sm font-semibold"><span>Gross Amount (Including VAT)</span><span>{currencyFormatter(calculatedGrossAmount)}</span></div>
+                    <Separator className="my-1" />
+                    <div className="flex justify-between text-lg font-bold text-primary"><span>Total Amount Due</span><span>{currencyFormatter(total)}</span></div>
+                </div>
+
+                {Object.keys(productTaxMappings).length > 0 && cart && cart.length > 0 && (
+                    <div className="rounded-lg border bg-amber-50 dark:bg-amber-950/20 p-3">
+                        <h4 className="text-sm font-semibold mb-2 text-amber-900 dark:text-amber-100">MRA Tax Details</h4>
+                        <div className="space-y-2 text-xs">
+                            {cart?.map((item) => {
+                                const mapping = productTaxMappings[String(item.id)];
+                                if (!mapping) return null;
+                                const taxRate = Number.isFinite(mapping.rate) ? mapping.rate : 0;
+                                const statusLabel = formatMappingStatusLabel(mapping.mappingStatus);
+                                const taxTypeLabel = formatTaxTypeLabel(mapping.taxType);
+                                const taxMethodLabel = formatTaxMethodLabel(mapping.taxCalculationMethod);
+                                const taxBasisLabel = formatTaxBasisLabel(mapping.taxCalculationBasis);
+                                const rateLabel =
+                                    mapping.mappingStatus === 'ready'
+                                        ? (mapping.taxType === 'standard' ? `${taxRate.toFixed(2)}%` : '0%')
+                                        : 'N/A';
+                                const amountLabel = mapping.mappingStatus === 'ready'
+                                    ? currencyFormatter(mapping.taxAmount)
+                                    : 'Blocked';
+                                return (
+                                    <div key={item.id} className="rounded border border-amber-200/80 bg-white/70 p-2 dark:bg-transparent dark:border-amber-900/50">
+                                        <div className="flex justify-between items-center gap-2">
+                                            <span className="font-medium text-amber-900 dark:text-amber-100">
+                                                {item.name}
+                                            </span>
+                                            <span
+                                                className={cn(
+                                                    "font-semibold",
+                                                    mapping.mappingStatus === 'ready'
+                                                        ? "text-amber-900 dark:text-amber-100"
+                                                        : "text-red-700 dark:text-red-300"
+                                                )}
+                                            >
+                                                {amountLabel}
+                                            </span>
+                                        </div>
+                                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-amber-800 dark:text-amber-200">
+                                            <span>Type: {taxTypeLabel}</span>
+                                            <span>Method: {taxMethodLabel}</span>
+                                            <span>Basis: {taxBasisLabel}</span>
+                                            <span>Rate: {rateLabel}</span>
+                                            <span>Status: {statusLabel}</span>
+                                        </div>
+                                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-amber-900 dark:text-amber-100">
+                                            <span>Net: {currencyFormatter(mapping.netAmount)}</span>
+                                            <span>Tax: {currencyFormatter(mapping.taxAmount)}</span>
+                                            <span>Gross: {currencyFormatter(mapping.grossAmount)}</span>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        {receiptStyleTaxBreakdown.length > 0 && (
+                            <div className="mt-3 border-t border-amber-200/70 pt-2 space-y-1 text-xs">
+                                <p className="font-semibold text-amber-900 dark:text-amber-100">Tax Summary</p>
+                                {receiptStyleTaxBreakdown.map((tax, index) => {
+                                    const methodShortLabel =
+                                        tax.method === 'exclusive'
+                                            ? 'EXC'
+                                            : tax.method === 'inclusive'
+                                                ? 'INC'
+                                                : 'N/A';
+                                    const displayTaxRate = (Number.isFinite(tax.rate) ? tax.rate : 0).toFixed(2);
+
+                                    return (
+                                        <div key={`${displayTaxRate}-${tax.method}-${index}`} className="space-y-0.5 text-amber-900 dark:text-amber-100">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <span>VAT {displayTaxRate}% ({methodShortLabel})</span>
+                                                <span className="font-semibold">{currencyFormatter(tax.vatAmount)}</span>
+                                            </div>
+                                            <div className="flex items-center justify-between gap-3 text-[11px] text-amber-800 dark:text-amber-200 pl-2">
+                                                <span>Taxable:</span>
+                                                <span>{currencyFormatter(tax.taxableValue)}</span>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
+                    <h4 className="text-sm font-medium">Buyer Details (optional)</h4>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <div className="space-y-1">
+                            <label className="text-xs font-medium text-muted-foreground">Buyer Name</label>
+                            <Input
+                                placeholder="Enter buyer name"
+                                value={buyerName}
+                                onChange={(e) => setBuyerName(e.target.value)}
+                                disabled={isProcessingPayment}
+                            />
+                        </div>
+                        <div className="space-y-1">
+                            <label className="text-xs font-medium text-muted-foreground">Phone</label>
+                            <Input
+                                placeholder="Enter phone number"
+                                value={buyerPhone}
+                                onChange={(e) => setBuyerPhone(e.target.value)}
+                                disabled={isProcessingPayment}
+                                inputMode="tel"
+                            />
+                        </div>
+                    </div>
+                    <div className="space-y-1">
+                        <label className="text-xs font-medium text-muted-foreground">Buyer TIN</label>
+                        <Input
+                            placeholder="Enter buyer TIN"
+                            value={buyerTin}
+                            onChange={(e) => setBuyerTin(e.target.value)}
+                            disabled={isProcessingPayment}
+                        />
+                    </div>
+                </div>
+
+                <div>
+                    <h4 className="text-sm font-medium mb-2">Payment Method</h4>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                       <Button size="md" variant={selectedPaymentMethod === 'Cash' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Cash')} className="text-sm h-11" disabled={isProcessingPayment}><Wallet className="mr-1 h-4 w-4"/>Cash</Button>
+                       <Button size="md" variant={selectedPaymentMethod === 'Card' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Card')} className="text-sm h-11" disabled={isProcessingPayment}><CreditCard className="mr-1 h-4 w-4"/>Card</Button>
+                       <Button size="md" variant={selectedPaymentMethod === 'Mobile Money' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Mobile Money')} className="text-sm h-11" disabled={isProcessingPayment}><Smartphone className="mr-1 h-4 w-4"/>Mobile</Button>
+                       <Button size="md" variant={selectedPaymentMethod === 'On Account' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('On Account')} className="text-sm h-11" disabled={isProcessingPayment}><UserPlus className="mr-1 h-4 w-4"/>Account</Button>
+                    </div>
+                </div>
+
+                {shouldEnforceTaxMapping && unmappedProducts.length > 0 && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 dark:bg-red-950/20 p-3">
+                        <h4 className="text-sm font-semibold mb-2 text-red-900 dark:text-red-100">⚠️ Unmapped / Inactive Mappings</h4>
+                        <p className="text-xs text-red-800 dark:text-red-200 mb-2">
+                            The following products are missing mapping or not yet approved/synced and cannot be sold:
+                        </p>
+                        <ul className="text-xs text-red-800 dark:text-red-200 space-y-1">
+                            {unmappedProducts.map((productName, idx) => (
+                                <li key={idx}>• {productName}</li>
+                            ))}
+                        </ul>
+                        <p className="text-xs text-red-700 dark:text-red-300 mt-2 font-medium">
+                            Please map these items, approve/sync mappings, or remove them from cart before proceeding.
+                        </p>
+                    </div>
+                )}
+
+                {selectedPaymentMethod === 'Cash' && (
+                    <div className="space-y-3 rounded-lg border bg-blue-50 dark:bg-blue-950/30 p-4">
+                        <div>
+                            <label className="text-sm font-medium">Cash Paid</label>
+                            <Input 
+                                type="number" 
+                                step="0.01" 
+                                placeholder="Enter amount paid" 
+                                value={cashPaid} 
+                                onChange={(e) => setCashPaid(e.target.value ? parseFloat(e.target.value) : '')}
+                                className="mt-2 text-lg font-semibold h-11"
+                                disabled={hasBlockingUnmapped || isProcessingPayment}
+                            />
+                        </div>
+                        <Separator />
+                        <div className="space-y-2">
+                            <div className="flex justify-between text-sm">
+                                <span>Amount Due</span>
+                                <span className="font-semibold">{currencyFormatter(total)}</span>
+                            </div>
+                            <div className={cn("flex justify-between text-lg font-bold", change >= 0 ? 'text-green-600' : 'text-red-600')}>
+                                <span>Change</span>
+                                <span>{currencyFormatter(Math.max(0, change))}</span>
+                            </div>
+                        </div>
+                        <Button 
+                            size="lg" 
+                            className="w-full bg-green-600 hover:bg-green-700 text-base h-12" 
+                            onClick={() => handlePayment('Cash')} 
+                            disabled={typeof cashPaid !== 'number' || cashPaid < total || hasBlockingUnmapped || isProcessingPayment}
+                            title={hasBlockingUnmapped ? 'Cannot complete payment: unmapped products in cart' : ''}
+                        >
+                            {isProcessingPayment ? (
+                                <>
+                                    <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                                    Processing Payment...
+                                </>
+                            ) : (
+                                <>
+                                    <CreditCard className="mr-2 h-5 w-5" />
+                                    Complete Payment
+                                </>
+                            )}
+                        </Button>
+                    </div>
+                )}
+
+                {selectedPaymentMethod && selectedPaymentMethod !== 'Cash' && (
+                    <Button 
+                        size="lg" 
+                        className="w-full bg-green-600 hover:bg-green-700 text-base h-12" 
+                        onClick={() => handlePayment(selectedPaymentMethod)} 
+                        disabled={hasBlockingUnmapped || isProcessingPayment}
+                        title={hasBlockingUnmapped ? 'Cannot complete payment: unmapped products in cart' : ''}
+                    >
+                        {isProcessingPayment ? (
+                            <>
+                                <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                                Processing Payment...
+                            </>
+                        ) : (
+                            <>
+                                <CreditCard className="mr-2 h-5 w-5" />
+                                Complete Payment
+                            </>
+                        )}
+                    </Button>
+                )}
+            </div>
+        </DialogContent>
+    )
+}
+
+export const GenericPos = ({
+  inventory,
+  displayItems,
+  cart,
+  onAddToCart,
+  onUpdateQuantity,
+  onClearCart,
+  onCheckout,
+  productIcon = <Package className="h-8 w-8 text-muted-foreground" />,
+  viewMode = 'grid',
+  defaultTaxRate,
+  eisEnabled = false,
+  blockSalesIfTaxMappingMissing = false,
+  branchId,
+}: PosProps) => {
+  const isMobile = useIsMobile();
+  const [isPaymentDialogOpen, setPaymentDialogOpen] = useState(false);
+  const [showPrinterConfig, setShowPrinterConfig] = useState(false);
+  const [paymentSessionId, setPaymentSessionId] = useState(0);
+  const { format: formatCurrency } = useCurrency();
+  const shouldEnforceTaxMapping = blockSalesIfTaxMappingMissing === true;
+  
+  const taxRate = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
+  const taxLabel = defaultTaxRate ? `${defaultTaxRate.name} (${defaultTaxRate.rate}%)` : 'Tax';
+
+  const total = cart.reduce((acc, item) => acc + (item.isVariablePrice ? item.price : item.price * item.quantity), 0);
+  const tax = taxRate > 0 ? (total / (1 + taxRate)) * taxRate : 0;
+  const subtotal = total - tax;
+  const hasItemsInCart = cart.length > 0;
+
+  const mraMappings = useLiveQuery(() => db.mraMappings.toArray());
+
+  // Log all MRA mappings and their status for debugging
+  useEffect(() => {
+    if (mraMappings && mraMappings.length > 0) {
+      console.log('[POS] ========== LOCAL DB MRA MAPPINGS STATUS ==========');
+      console.log(`[POS] Total mappings in local DB: ${mraMappings.length}`);
+      
+      mraMappings.forEach((mapping, index) => {
+        console.log(`[POS] Mapping ${index + 1}:`);
+        console.log(`  - ID: ${mapping.id}`);
+        console.log(`  - Product ID: ${mapping.inventoryItemId}`);
+        console.log(`  - Product Name: ${mapping.mraProductName}`);
+        console.log(`  - MRA Code: ${mapping.mraProductCode}`);
+        console.log(`  - Is Approved: ${mapping.isApproved}`);
+        console.log(`  - MRA Synced: ${mapping.mraSynced}`);
+        console.log(`  - Tax Type: ${mapping.mraTaxType}`);
+        console.log(`  - Tax Rate: ${mapping.mraTaxRate}%`);
+        console.log(`  - Valid for Sale: ${mapping.isApproved && mapping.mraSynced ? '✓ YES' : '✗ NO'}`);
+      });
+      
+      const approved = mraMappings.filter(m => m.isApproved).length;
+      const synced = mraMappings.filter(m => m.mraSynced).length;
+      const valid = mraMappings.filter(m => m.isApproved && m.mraSynced).length;
+      
+      console.log(`[POS] ========== SUMMARY ==========`);
+      console.log(`[POS] Approved: ${approved}/${mraMappings.length}`);
+      console.log(`[POS] Synced: ${synced}/${mraMappings.length}`);
+      console.log(`[POS] Valid for Sale: ${valid}/${mraMappings.length}`);
+      console.log(`[POS] ====================================`);
+    } else {
+      console.log('[POS] No MRA mappings found in local database');
+    }
+  }, [mraMappings]);
+
+  const mappingByItemId = useMemo(() => {
+    const activeBranchId = normalizeBranchIdentifier(
+      branchId ?? (
+        typeof window !== 'undefined'
+          ? localStorage.getItem('handypos-active-branch')
+          : ''
+      )
+    );
+    const shouldScopeByBranch =
+      Boolean(activeBranchId) &&
+      !['main', 'main-branch', 'main_branch'].includes(activeBranchId.toLowerCase());
+
+    const scopedMappings = (mraMappings || []).filter((mapping) => {
+      const mappingBranchId = normalizeBranchIdentifier(
+        (mapping as any).branchId ??
+        (mapping as any).branch_id ??
+        (mapping as any).branch
+      );
+
+      if (!mappingBranchId) {
+        return true;
+      }
+      if (!shouldScopeByBranch) {
+        return true;
+      }
+      return mappingBranchId === activeBranchId;
+    });
+
+    return buildMappingLookup(scopedMappings);
+  }, [branchId, mraMappings]);
+
+  const getMRAMappingStatus = useCallback((itemId: string): {
+    hasMapping: boolean;
+    isApproved: boolean;
+    isSynced: boolean;
+    isValid: boolean;
+    mapping?: any;
+  } => {
+    const mapping = mappingByItemId.get(String(itemId));
+    if (!mapping) {
+      return {
+        hasMapping: false,
+        isApproved: false,
+        isSynced: false,
+        isValid: false,
+      };
+    }
+
+    const isApproved = Boolean(mapping.isApproved ?? mapping.is_approved);
+    const isSynced = Boolean(mapping.mraSynced ?? mapping.mra_synced);
+    return {
+      hasMapping: true,
+      isApproved,
+      isSynced,
+      isValid: isApproved && isSynced,
+      mapping,
+    };
+  }, [mappingByItemId]);
+
+  const hasValidMRAMapping = (itemId: string): boolean => {
+    const status = getMRAMappingStatus(itemId);
+
+    if (!status.hasMapping) {
+      console.log(`[POS] Product ${itemId} has NO MRA mapping`);
+      return false;
+    }
+
+    if (!status.isValid) {
+      console.log(`[POS] Product ${itemId} mapping found but NOT valid:`, {
+        isApproved: status.isApproved,
+        mraSynced: status.isSynced,
+        reason: !status.isApproved ? 'Not approved' : 'Not synced'
+      });
+      return false;
+    }
+
+    console.log(`[POS] Product ${itemId} has VALID MRA mapping:`, {
+      mraProductCode: status.mapping?.mraProductCode || status.mapping?.mra_product_code,
+      isApproved: status.isApproved,
+      mraSynced: status.isSynced
+    });
+    return true;
+  };
+
+  const canProduceItem = (item: InventoryItem): boolean => {
+    if (!item.isProduced || !item.recipe || item.recipe.length === 0) {
+      return true;
+    }
+    
+    const canProduce = item.recipe.every((recipeItem: any) => {
+      const ingredientId = recipeItem.ingredientId;
+      const requiredQuantity = recipeItem.quantity || 0;
+      
+      const ingredient = inventory.find(i => i.id === ingredientId);
+      
+      if (!ingredient) {
+        console.warn(`Ingredient not found in inventory: ${recipeItem.name} (ID: ${ingredientId})`);
+        return false;
+      }
+      
+      const availableStock = ingredient.stockUnits || 0;
+      const hasSufficientStock = availableStock >= requiredQuantity;
+      
+      return hasSufficientStock;
+    });
+    
+    return canProduce;
+  };
+
+  const getStockInfo = (item: InventoryItem): { text: string; isAvailable: boolean; hasMRAMapping: boolean } => {
+    // First check stock/availability regardless of MRA mapping
+    let stockText = '';
+    let hasStock = false;
+    
+    if (item.itemType === 'sellable' && item.isProduced && item.recipe && item.recipe.length > 0) {
+      const available = canProduceItem(item);
+      stockText = available ? '✓ Available' : '✗ Out of Stock';
+      hasStock = available;
+    } else {
+      const remaining = item.stockUnits || 0;
+      hasStock = remaining > 0;
+      stockText = `${remaining} ${item.unitType || 'units'} remaining`;
+    }
+    
+    if (!shouldEnforceTaxMapping) {
+      return {
+        text: stockText,
+        isAvailable: hasStock,
+        hasMRAMapping: true,
+      };
+    }
+
+    // Then check MRA mapping (only when enforcement is enabled)
+    const mraStatus = getMRAMappingStatus(item.id);
+    const hasMRAMapping = mraStatus.isValid;
+
+    if (!hasMRAMapping) {
+      const mappingWarning = !mraStatus.hasMapping
+        ? '⚠️ No MRA Mapping'
+        : (!mraStatus.isApproved ? '⚠️ MRA Pending Approval' : '⚠️ MRA Not Synced');
+      return {
+        text: mappingWarning,
+        isAvailable: false,
+        hasMRAMapping: false,
+      };
+    }
+    
+    // If has MRA mapping, show stock info
+    return {
+      text: stockText,
+      isAvailable: hasStock,
+      hasMRAMapping: true,
+    };
+  };
+
+  const renderProductGrid = () => {
+    const itemsToDisplay = displayItems || inventory.filter(item => item.itemType === 'sellable');
+    
+    return (
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+        {itemsToDisplay.map((item) => {
+          const { text: stockInfo, isAvailable } = getStockInfo(item);
+          return (
+            <div
+              key={item.id}
+              onClick={async (e) => {
+                e.stopPropagation();
+                if (isAvailable) {
+                  await onAddToCart(item);
+                }
+              }}
+              role="button"
+              tabIndex={0}
+              onKeyDown={async (e) => {
+                if ((e.key === 'Enter' || e.key === ' ') && isAvailable) {
+                  e.preventDefault();
+                  await onAddToCart(item);
+                }
+              }}
+            >
+              <ProductCard
+                item={item}
+                onAddToCart={() => {}}
+                productIcon={productIcon}
+                currencyFormatter={formatCurrency}
+                isAvailable={isAvailable}
+                stockInfo={stockInfo}
+              />
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderProductList = () => {
+    const itemsToDisplay = displayItems || inventory.filter(item => item.itemType === 'sellable');
+    
+    return (
+      <div className="space-y-2">
+        {itemsToDisplay.map((item) => {
+          const { text: stockInfo, isAvailable } = getStockInfo(item);
+          return (
+            <div 
+              key={item.id} 
+              className={cn(
+                "flex items-center gap-4 rounded-md border p-2 cursor-pointer hover:bg-muted",
+                !isAvailable && "opacity-50 cursor-not-allowed"
+              )} 
+              onClick={async () => isAvailable && await onAddToCart(item)}
+            >
+              <div className="flex h-12 w-12 items-center justify-center rounded-md bg-muted/50">
+                 {productIcon}
+              </div>
+              <div className="flex-1">
+                <p className="font-semibold">{item.name}</p>
+                <p className="text-sm text-muted-foreground">{item.category}</p>
+                <p className={cn(
+                  "text-xs mt-1 font-medium",
+                  isAvailable ? "text-green-600" : "text-red-600"
+                )}>
+                  {stockInfo}
+                </p>
+              </div>
+              <p className="font-bold text-primary">{formatCurrency(item.price || 0)}</p>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderCartItems = () => {
+    if (cart.length === 0) {
+      return (
+        <div className="flex flex-col items-center justify-center text-center h-full">
+          <ShoppingBasket className="h-16 w-16 text-muted-foreground/30" />
+          <p className="mt-4 text-muted-foreground">Select products to start a new sale.</p>
+        </div>
+      );
+    }
+    return (
+      <div className="space-y-2">
+        {cart.map((item) => <CartItemView key={item.id} item={item} onUpdateQuantity={onUpdateQuantity} currencyFormatter={formatCurrency} />)}
+      </div>
+    );
+  };
+
+  const renderCartFooter = () => (
+    <div className="flex flex-col gap-4 bg-muted/50 p-4">
+      <div className="flex w-full items-center justify-between gap-2 text-lg font-bold">
+        <span className="flex-shrink-0">Total</span>
+        <span className="flex-shrink-0 text-right">{formatCurrency(total)}</span>
+      </div>
+      <Button size="lg" className="bg-green-600 hover:bg-green-700" onClick={() => { setPaymentSessionId((id) => id + 1); setPaymentDialogOpen(true); }}>
+        <CreditCard className="mr-2 h-5 w-5" /> Payment
+      </Button>
+    </div>
+  );
+
+  const renderDesktopCart = () => (
+    <Card className="flex h-full flex-col overflow-hidden">
+      <CardHeader className="flex flex-row items-center justify-between border-b p-2 shrink-0">
+        <CardTitle className="text-base">Current Order</CardTitle>
+        <div className="flex items-center gap-2">
+            <Button variant="ghost" size="icon" className="text-muted-foreground h-8 w-8"><UserPlus className="h-4 w-4" /></Button>
+            <Button variant="ghost" size="icon" className="text-destructive h-8 w-8" onClick={onClearCart}><Trash2 className="h-4 w-4" /></Button>
+        </div>
+      </CardHeader>
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <div className="h-full overflow-y-scroll hide-scrollbar p-4">
+          {renderCartItems()}
+        </div>
+      </div>
+      <div className="shrink-0 border-t">{renderCartFooter()}</div>
+    </Card>
+  );
+
+  const renderMobileCartDialog = () => (
+    <Dialog>
+      <DialogTrigger asChild>
+        <Button size="lg" className="fixed bottom-4 right-4 z-10 h-14 w-auto rounded-full shadow-lg">
+          <span>View Cart ({cart.reduce((acc, item) => acc + item.quantity, 0)})</span>
+          <Separator orientation="vertical" className="mx-3 h-6" />
+          <span className="font-bold">{formatCurrency(total)}</span>
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="tauri-android-sidebar-safe-top m-0 flex h-full max-h-full w-full max-w-full flex-col gap-0 p-0 sm:max-w-full">
+        <DialogHeader className="p-4 border-b">
+          <div className="flex items-center justify-between">
+            <DialogTitle>Current Order</DialogTitle>
+            <DialogClose asChild>
+              <Button variant="ghost" size="icon" onClick={onClearCart}><Trash2 className="text-destructive" /></Button>
+            </DialogClose>
+          </div>
+        </DialogHeader>
+        <div className="flex-1 overflow-y-auto p-4">{renderCartItems()}</div>
+        <div className="mt-auto border-t">{renderCartFooter()}</div>
+      </DialogContent>
+    </Dialog>
+  );
+  
+  const handlePaymentDialogClose = () => {
+    setPaymentDialogOpen(false);
+  }
+
+  return (
+    <>
+    <div
+      className={cn(
+        'grid h-full w-full grid-cols-1 gap-6 transition-all duration-300 min-h-0',
+        hasItemsInCart && 'lg:grid-cols-[1fr_420px]'
+      )}
+    >
+      <Card className="h-full w-full overflow-hidden min-h-0">
+        <CardContent className="h-full w-full overflow-y-scroll overflow-x-hidden hide-scrollbar p-4 min-h-0">
+          {viewMode === 'grid' ? renderProductGrid() : renderProductList()}
+        </CardContent>
+      </Card>
+      
+      {hasItemsInCart && (
+        <div className="hidden lg:flex lg:flex-col h-full w-full min-h-0">
+          {renderDesktopCart()}
+        </div>
+      )}
+
+      {isMobile && hasItemsInCart && renderMobileCartDialog()}
+    </div>
+    <Dialog open={isPaymentDialogOpen} onOpenChange={setPaymentDialogOpen}>
+        <PaymentDialog 
+            subtotal={subtotal}
+            tax={tax}
+            taxLabel={taxLabel}
+            defaultTaxRate={defaultTaxRate}
+            onCheckout={onCheckout}
+            onClose={handlePaymentDialogClose}
+            currencyFormatter={formatCurrency}
+            resetToken={paymentSessionId}
+            cart={cart}
+            eisEnabled={eisEnabled}
+            blockSalesIfTaxMappingMissing={blockSalesIfTaxMappingMissing}
+            branchId={branchId}
+            onConfigurePrinter={() => setShowPrinterConfig(true)}
+        />
+    </Dialog>
+    <PrinterConfigModal isOpen={showPrinterConfig} onOpenChange={setShowPrinterConfig} />
+    </>
+  );
+};

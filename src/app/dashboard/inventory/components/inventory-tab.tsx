@@ -1,0 +1,498 @@
+'use client';
+
+import React, { useState } from 'react';
+import Link from 'next/link';
+import Papa from 'papaparse';
+import {
+  MoreHorizontal,
+  PlusCircle,
+  Upload,
+  Download,
+  Edit,
+  History,
+  Trash2,
+  ClipboardList,
+  AlertCircle,
+  Package,
+  ShoppingBasket,
+  Pill,
+  Utensils,
+  GlassWater,
+  Apple,
+  Beef,
+  Sparkles,
+  Eye,
+} from 'lucide-react';
+
+import { toast } from '@/hooks/use-toast';
+import { type InventoryItem, type RecipeIngredient } from '@/lib/db';
+import { type BusinessType } from '@/lib/inventory/config';
+import { deleteProduct } from '@/lib/services/product-service';
+import { useAuth } from '@/hooks/use-auth';
+import { useCurrency } from '@/hooks/use-currency';
+import { ProductDetailsModal } from './product-details-modal';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+} from '@/components/ui/card';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Badge } from '@/components/ui/badge';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu';
+import { Separator } from '@/components/ui/separator';
+
+const statusBadgeVariant = {
+  'In Stock': 'secondary',
+  'Low Stock': 'default',
+  'Out of Stock': 'destructive',
+} as const;
+
+const toCsvBoolean = (value: boolean | undefined): string => (value ? 'true' : 'false');
+const toSafeNumber = (value: unknown): number => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const toExportCsvRow = (item: InventoryItem) => ({
+    id: item.id,
+    name: item.name || '',
+    itemType: item.itemType || 'sellable',
+    category: item.category || '',
+    stockUnits: Number(item.stockUnits || 0),
+    unitType: item.unitType || 'unit',
+    reorderLevel: Number(item.reorderLevel || 0),
+    cost: item.cost ?? '',
+    price: item.price ?? '',
+    value: item.value ?? '',
+    status: item.status || '',
+    supplier: item.supplier || '',
+    manufacturer: item.manufacturer || '',
+    brand: item.brand || '',
+    batch: item.batch || '',
+    packSize: item.packSize ?? '',
+    productCode: item.productCode || '',
+    barcode: item.barcode || '',
+    sku: item.sku || '',
+    expiry: item.expiry || '',
+    isVariablePrice: toCsvBoolean(item.isVariablePrice),
+    isProduced: toCsvBoolean(item.isProduced),
+    onMenu: toCsvBoolean(item.onMenu),
+    isSoldInPortions: toCsvBoolean(item.isSoldInPortions),
+    portionName: item.portionName || '',
+    portionsPerUnit: item.portionsPerUnit ?? '',
+    recipe: JSON.stringify(item.recipe || []),
+});
+
+interface InventoryTabProps {
+    inventoryData: InventoryItem[];
+    isMobile: boolean;
+    currentBusinessType: BusinessType;
+    onAddItem: () => void;
+    onEditItem: (item: InventoryItem) => void;
+    onImport: () => void;
+    onTransfer: () => void;
+}
+
+export function InventoryTab({ 
+    inventoryData, 
+    isMobile,
+    currentBusinessType,
+    onAddItem,
+    onEditItem,
+    onImport,
+    onTransfer
+}: InventoryTabProps) {
+    const { user } = useAuth();
+    const { currencyCode } = useCurrency();
+    
+    // Get currency symbol based on currency code
+    const getCurrencySymbol = () => {
+        const symbols: Record<string, string> = {
+            'USD': '$',
+            'EUR': '€',
+            'GBP': '£',
+            'JPY': '¥',
+            'MWK': 'MWK',
+            'ZAR': 'R',
+            'KES': 'KSh',
+            'UGX': 'USh',
+            'TZS': 'TSh',
+        };
+        return symbols[currencyCode] || currencyCode;
+    };
+
+    const currencySymbol = getCurrencySymbol();
+    const showItemTypeBadge =
+      currentBusinessType === 'Restaurant' || currentBusinessType === 'Bar & Liquor';
+    
+    // Product details modal state
+    const [selectedProduct, setSelectedProduct] = useState<InventoryItem | null>(null);
+    const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
+
+    const handleViewDetails = (item: InventoryItem) => {
+        setSelectedProduct(item);
+        setIsDetailsModalOpen(true);
+    };
+
+    const handleEditFromDetails = (item: InventoryItem) => {
+        setIsDetailsModalOpen(false);
+        onEditItem(item);
+    };
+
+    const handleExport = () => {
+        if (!inventoryData || inventoryData.length === 0) {
+            toast({ variant: 'destructive', title: 'No data to export' });
+            return;
+        }
+
+        const rows = inventoryData.map(toExportCsvRow);
+        const csv = Papa.unparse(rows);
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        if (link.download !== undefined) {
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'inventory-export.csv');
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+        toast({ title: 'Export Complete', description: `${inventoryData.length} items have been exported.` });
+    };
+
+    const handleDeleteItem = async (itemId: string) => {
+        if (confirm('Are you sure you want to delete this item? This action cannot be undone.')) {
+            try {
+                if (!user) {
+                    toast({ variant: 'destructive', title: 'Not authenticated' });
+                    return;
+                }
+
+                // Get the item to get branchId
+                const item = inventoryData.find(i => i.id === itemId);
+                if (!item) {
+                    toast({ variant: 'destructive', title: 'Item not found' });
+                    return;
+                }
+
+                // Use product-service which handles marking for deletion and sync queueing
+                await deleteProduct(
+                    itemId,
+                    user.uid,
+                    user.displayName || user.email || 'Unknown',
+                    item.branchId
+                );
+
+                toast({
+                    title: 'Item Deleted',
+                    description: 'The item has been removed from your inventory and queued for sync with the backend.',
+                    variant: 'destructive',
+                });
+            } catch (error) {
+                console.error('Failed to delete item:', error);
+                toast({
+                    variant: 'destructive',
+                    title: 'Error',
+                    description: 'Failed to delete item. Please try again.',
+                });
+            }
+        }
+    };
+
+
+    const renderIcon = (item: InventoryItem) => {
+        // For sellable items, use business-type-specific icons
+        if (item.itemType === 'sellable') {
+            switch (currentBusinessType) {
+            case 'Pharmacy': return <Pill className="h-6 w-6 text-muted-foreground" data-ai-hint="pharmacy medicine" />;
+            case 'Restaurant': return <Utensils className="h-6 w-6 text-muted-foreground" data-ai-hint="restaurant food" />;
+            case 'Bar & Liquor': return <GlassWater className="h-6 w-6 text-muted-foreground" data-ai-hint="bar liquor bottle" />;
+            case 'Supermarket': return <ShoppingBasket className="h-6 w-6 text-muted-foreground" data-ai-hint="supermarket product" />;
+            case 'Grocery': return <Apple className="h-6 w-6 text-muted-foreground" data-ai-hint="grocery produce" />;
+            case 'Beauty Salon and Spa': return <Sparkles className="h-6 w-6 text-muted-foreground" data-ai-hint="beauty salon product" />;
+            default: return <Package className="h-6 w-6 text-muted-foreground" />;
+            }
+        }
+        // For ingredients, use business-type-specific icons
+        switch (currentBusinessType) {
+        case 'Pharmacy': return <Pill className="h-6 w-6 text-muted-foreground" data-ai-hint="pharmacy medicine" />;
+        case 'Restaurant': return <Beef className="h-6 w-6 text-muted-foreground" data-ai-hint="restaurant ingredient" />;
+        case 'Bar & Liquor': return <GlassWater className="h-6 w-6 text-muted-foreground" data-ai-hint="bar liquor bottle" />;
+        case 'Supermarket': return <ShoppingBasket className="h-6 w-6 text-muted-foreground" data-ai-hint="supermarket product" />;
+        case 'Grocery': return <Apple className="h-6 w-6 text-muted-foreground" data-ai-hint="grocery produce" />;
+        case 'Beauty Salon and Spa': return <Sparkles className="h-6 w-6 text-muted-foreground" data-ai-hint="beauty salon product" />;
+        default: return <Package className="h-6 w-6 text-muted-foreground" />;
+        }
+    };
+
+    const calculateCost = (recipe: RecipeIngredient[] | undefined) => {
+        if (!recipe || !inventoryData) return 0;
+        return recipe.reduce((totalCost, recipeItem) => {
+            const inventoryItem = inventoryData.find(i => i.id === recipeItem.ingredientId);
+            if (!inventoryItem) return totalCost;
+            return totalCost + toSafeNumber(inventoryItem.cost) * toSafeNumber(recipeItem.quantity);
+        }, 0);
+    };
+
+    const getDisplayValue = (item: InventoryItem) => {
+        const storedValue = toSafeNumber(item.value);
+        if (storedValue > 0) return storedValue;
+
+        const stockUnits = toSafeNumber(item.stockUnits);
+        const costPerUnit = toSafeNumber(item.cost);
+        return stockUnits * costPerUnit;
+    };
+
+    const renderTableHeader = () => (
+        <TableRow>
+            <TableHead className="w-[40px]"><Checkbox /></TableHead>
+            <TableHead className="min-w-[250px]">Item</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead className="text-right">Stock/Price</TableHead>
+            <TableHead>Unit</TableHead>
+            <TableHead>Supplier</TableHead>
+            <TableHead className="text-right">Remaining</TableHead>
+            <TableHead className="text-right">Value/Cost</TableHead>
+            <TableHead className="w-[50px]"><span className="sr-only">Actions</span></TableHead>
+        </TableRow>
+    );
+
+    const renderTableRow = (item: InventoryItem) => {
+        const isSellable = item.itemType === 'sellable';
+        const portionLabel = item.portionName || 'portion';
+        const estimatedRecipeCost = calculateCost(item.recipe);
+        const cost = isSellable && estimatedRecipeCost > 0
+            ? estimatedRecipeCost
+            : toSafeNumber(item.cost);
+        const displayValue = getDisplayValue(item);
+        
+        return (
+            <TableRow key={item.id}>
+                <TableCell><Checkbox /></TableCell>
+                <TableCell>
+                    <div className="flex items-center gap-4">
+                    <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-md flex items-center justify-center bg-muted">
+                        {renderIcon(item)}
+                    </div>
+                    <div className='grid gap-0.5'>
+                        <div className="flex items-center gap-2">
+                        <span className="font-medium">{item.name}</span>
+                        {item.isVariablePrice && <Badge variant="outline">By Weight</Badge>}
+                        </div>
+                        <span className="text-xs text-muted-foreground">{item.category}</span>
+                    </div>
+                    </div>
+                </TableCell>
+                <TableCell>
+                    {item.status && <Badge variant={statusBadgeVariant[item.status]}>{item.status === 'Low Stock' && <AlertCircle className="mr-1 h-3 w-3" />}{item.status}</Badge>}
+                </TableCell>
+                <TableCell className="text-right font-medium">
+                    {isSellable ? `${currencySymbol}${(Number(item.price) || 0).toFixed(2)}` : item.stockUnits}
+                </TableCell>
+                <TableCell className="text-muted-foreground">{item.unitType || 'N/A'}</TableCell>
+                <TableCell>{item.isProduced ? 'In-house' : (item.supplier || (isSellable ? 'In-house' : 'N/A'))}</TableCell>
+                <TableCell className="text-right">
+                    {isSellable && item.isSoldInPortions && item.portionsPerUnit ? (
+                        <div className="text-sm">
+                            <div className="font-semibold">{item.stockUnits} {item.unitType}</div>
+                            <div className="text-xs text-muted-foreground">
+                                {Math.floor((item.stockUnits || 0) * item.portionsPerUnit)} {portionLabel}
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="font-semibold">{item.stockUnits} {item.unitType}</div>
+                    )}
+                </TableCell>
+                <TableCell className="text-right font-semibold">
+                        {isSellable ? `${currencySymbol}${toSafeNumber(cost).toFixed(2)}` : `${currencySymbol}${toSafeNumber(displayValue).toFixed(2)}`}
+                </TableCell>
+                <TableCell>
+                    <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon">
+                        <MoreHorizontal />
+                        </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                        <DropdownMenuItem onSelect={() => handleViewDetails(item)}><Eye className="mr-2"/> View Details</DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => onEditItem(item)}><Edit className="mr-2"/> Edit Item</DropdownMenuItem>
+                        <DropdownMenuItem><History className="mr-2"/> View History</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onSelect={() => handleDeleteItem(item.id)} className="text-destructive"><Trash2 className="mr-2"/> Delete Item</DropdownMenuItem>
+                    </DropdownMenuContent>
+                    </DropdownMenu>
+                </TableCell>
+            </TableRow>
+        );
+    };
+
+    const renderMobileCard = (item: InventoryItem) => {
+        const isSellable = item.itemType === 'sellable';
+        const portionLabel = item.portionName || 'portion';
+        const estimatedRecipeCost = calculateCost(item.recipe);
+        const cost = isSellable && estimatedRecipeCost > 0
+            ? estimatedRecipeCost
+            : toSafeNumber(item.cost);
+        const displayValue = getDisplayValue(item);
+
+        return (
+            <Card key={item.id} className="mb-4">
+                <CardContent className="p-4">
+                    <div className="flex items-start gap-4">
+                        <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-md flex items-center justify-center bg-muted">
+                            {renderIcon(item)}
+                        </div>
+                        <div className="flex-1 grid gap-0.5">
+                            <div className="flex items-center gap-2">
+                            <p className="font-semibold">{item.name}</p>
+                            {item.isVariablePrice && <Badge variant="outline">By Weight</Badge>}
+                            </div>
+                            <p className="text-sm text-muted-foreground">{item.category}</p>
+                            <div className="flex items-center gap-2 mt-1">
+                                {showItemTypeBadge && (
+                                    <Badge variant={isSellable ? 'default' : 'outline'} className="w-fit">
+                                        {item.itemType}
+                                    </Badge>
+                                )}
+                                {item.status && (
+                                    <Badge variant={statusBadgeVariant[item.status]} className="w-fit">
+                                        {item.status === 'Low Stock' && <AlertCircle className="mr-1 h-3 w-3" />}
+                                        {item.status}
+                                    </Badge>
+                                )}
+                            </div>
+                        </div>
+                        <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" size="icon" className="-mt-2 -mr-2">
+                                    <MoreHorizontal />
+                                </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                                <DropdownMenuItem onSelect={() => handleViewDetails(item)}><Eye className="mr-2" /> View Details</DropdownMenuItem>
+                                <DropdownMenuItem onSelect={() => onEditItem(item)}><Edit className="mr-2" /> Edit Item</DropdownMenuItem>
+                                <DropdownMenuItem><History className="mr-2" /> View History</DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem onSelect={() => handleDeleteItem(item.id)} className="text-destructive"><Trash2 className="mr-2" /> Delete Item</DropdownMenuItem>
+                            </DropdownMenuContent>
+                        </DropdownMenu>
+                    </div>
+                    <Separator className="my-4" />
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                        {isSellable ? (
+                            <>
+                                <div>
+                                    <p className="text-muted-foreground">{item.isVariablePrice ? 'Price/Unit' : 'Price'}</p>
+                                    <p className="font-medium">{currencySymbol}{(Number(item.price) || 0).toFixed(2)}</p>
+                                </div>
+                                <div>
+                                    <p className="text-muted-foreground">Est. Cost</p>
+                                    <p className="font-medium">{currencySymbol}{(Number(cost) || 0).toFixed(2)}</p>
+                                </div>
+                                <div>
+                                    <p className="text-muted-foreground">Remaining</p>
+                                    <p className="font-medium">
+                                        {item.stockUnits ?? 0} <span className="text-muted-foreground">{item.unitType || 'unit'}</span>
+                                    </p>
+                                    {item.isSoldInPortions && item.portionsPerUnit && (
+                                        <p className="text-xs text-muted-foreground mt-1">
+                                            {Math.floor((item.stockUnits || 0) * item.portionsPerUnit)} {portionLabel}
+                                        </p>
+                                    )}
+                                </div>
+                            </>
+                        ) : (
+                            <>
+                                <div>
+                                    <p className="text-muted-foreground">Stock</p>
+                                    <p className="font-medium">{item.stockUnits} <span className="text-muted-foreground">{item.unitType}</span></p>
+                                </div>
+                                <div>
+                                    <p className="text-muted-foreground">Value</p>
+                                    <p className="font-medium">{currencySymbol}{toSafeNumber(displayValue).toFixed(2)}</p>
+                                </div>
+                                <div>
+                                    <p className="text-muted-foreground">Supplier</p>
+                                    <p className="font-medium">{item.supplier}</p>
+                                </div>
+                                <div>
+                                    <p className="text-muted-foreground">Cost/Unit</p>
+                                    <p className="font-medium">{currencySymbol}{(Number(item.cost) || 0).toFixed(2)}</p>
+                                </div>
+                            </>
+                        )}
+                    </div>
+                </CardContent>
+            </Card>
+        );
+    };
+
+    return (
+         <CardContent>
+            <div className="flex w-full flex-col items-stretch gap-2 mb-6 sm:flex-row">
+                <Button onClick={onAddItem}>
+                    <PlusCircle className="mr-2 h-4 w-4" /> Add Item
+                </Button>
+                {/* <Button variant="outline" onClick={onTransfer}>
+                    <Repeat className="mr-2 h-4 w-4" /> Transfer Stock
+                </Button> */}
+                <div className="ml-auto flex items-center gap-2">
+                <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                    <Button variant="outline" className='h-10 w-10 p-0'>
+                        <MoreHorizontal className="h-4 w-4" />
+                    </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={onImport}><Upload className="mr-2" /> Import Products</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={handleExport}><Download className="mr-2" /> Export Stock File</DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                        <Link href="/dashboard/inventory/audit"><ClipboardList className="mr-2" /> Full Stock Audit</Link>
+                    </DropdownMenuItem>
+                    </DropdownMenuContent>
+                </DropdownMenu>
+                </div>
+            </div>
+            {isMobile ? (
+                <div>
+                        {inventoryData?.map(renderMobileCard)}
+                </div>
+            ) : (
+                <div className="overflow-x-auto">
+                    <Table>
+                        <TableHeader>
+                            {renderTableHeader()}
+                        </TableHeader>
+                        <TableBody>
+                            {inventoryData?.map(renderTableRow)}
+                        </TableBody>
+                    </Table>
+                </div>
+            )}
+
+            {/* Product Details Modal */}
+            <ProductDetailsModal
+                product={selectedProduct}
+                isOpen={isDetailsModalOpen}
+                onOpenChange={setIsDetailsModalOpen}
+                onEdit={handleEditFromDetails}
+                currentBusinessType={currentBusinessType}
+            />
+        </CardContent>
+    )
+}

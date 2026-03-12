@@ -38,7 +38,6 @@ import { db, type Business } from '@/lib/db';
 import { authFetch } from '@/lib/auth-fetch';
 import { Loader2, RefreshCw, Clock } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Badge } from '@/components/ui/badge';
 
 const LOCAL_STORAGE_KEYS = {
     BUSINESS_SETTINGS: 'handypos-business-settings',
@@ -69,6 +68,19 @@ const resolveFiscalYearStartMonth = (value: unknown, fallback = 1): number => {
   return fallback;
 };
 
+const normalizePumpList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const entry of value) {
+    const pump = String(entry ?? '').trim();
+    if (!pump || seen.has(pump)) continue;
+    seen.add(pump);
+    normalized.push(pump);
+  }
+  return normalized;
+};
+
 // Schemas
 const businessSettingsSchema = z.object({
   businessName: z.string().min(2, 'Business name must be at least 2 characters.'),
@@ -89,6 +101,7 @@ const businessSettingsSchema = z.object({
   eisEnvironment: z.enum(['TEST', 'PROD']).default('TEST'),
   blockSalesIfEisDown: z.boolean().default(true),
   blockSalesIfTaxMappingMissing: z.boolean().default(false),
+  fuelPumps: z.array(z.string().trim().min(1)).default([]),
 });
 
 type BusinessSettingsFormValues = z.infer<typeof businessSettingsSchema>;
@@ -102,9 +115,11 @@ interface Branch {
 
 export default function BusinessSettingsPage() {
   const [isClient, setIsClient] = useState(false);
-  const { business } = useAuth();
+  const { business, user } = useAuth();
   const [branches, setBranches] = useState<Branch[]>([]);
   const [isSyncingBranches, setIsSyncingBranches] = useState(false);
+  const [newPumpName, setNewPumpName] = useState('');
+  const isAdminUser = user?.role === 'Admin';
   
   useEffect(() => {
     setIsClient(true);
@@ -130,8 +145,10 @@ export default function BusinessSettingsPage() {
       eisEnvironment: 'TEST',
       blockSalesIfEisDown: true,
       blockSalesIfTaxMappingMissing: false,
+      fuelPumps: [],
     },
   });
+  const fuelPumps = businessForm.watch('fuelPumps');
 
   // Load business settings from backend
   useEffect(() => {
@@ -139,6 +156,7 @@ export default function BusinessSettingsPage() {
         const loadSettings = async () => {
             console.log('[DEBUG SETTINGS] Loading business settings for ID:', business.id);
             let cachedFiscalYearStartMonth = 1;
+            let cachedFuelPumps: string[] = [];
             try {
               try {
                 const cachedSettingsRaw = localStorage.getItem(LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS);
@@ -147,6 +165,9 @@ export default function BusinessSettingsPage() {
                   cachedFiscalYearStartMonth = resolveFiscalYearStartMonth(
                     cachedSettings?.fiscalYearStartMonth,
                     cachedFiscalYearStartMonth
+                  );
+                  cachedFuelPumps = normalizePumpList(
+                    cachedSettings?.fuelPumps ?? cachedSettings?.fuel_pumps
                   );
                 }
               } catch (cacheError) {
@@ -211,6 +232,11 @@ export default function BusinessSettingsPage() {
                     eisEnvironment: backendBusiness.eis_environment || 'TEST',
                     blockSalesIfEisDown: blockSalesValue,
                     blockSalesIfTaxMappingMissing: blockTaxMappingValue,
+                    fuelPumps: normalizePumpList(
+                      backendBusiness.settings?.fuel_pumps ??
+                        backendBusiness.settings?.fuelPumps ??
+                        cachedFuelPumps
+                    ),
                 };
                 console.log('[DEBUG SETTINGS] Form data to reset:', formData);
                 businessForm.reset(formData);
@@ -246,6 +272,7 @@ export default function BusinessSettingsPage() {
                     eisEnvironment: 'TEST',
                     blockSalesIfEisDown: true,
                     blockSalesIfTaxMappingMissing: false,
+                    fuelPumps: cachedFuelPumps,
                 });
               }
             } catch (error) {
@@ -274,6 +301,7 @@ export default function BusinessSettingsPage() {
                     eisEnvironment: 'TEST',
                     blockSalesIfEisDown: true,
                     blockSalesIfTaxMappingMissing: false,
+                    fuelPumps: cachedFuelPumps,
                 };
                 businessForm.reset(formData);
               } else {
@@ -295,6 +323,7 @@ export default function BusinessSettingsPage() {
                     eisEnvironment: 'TEST',
                     blockSalesIfEisDown: true,
                     blockSalesIfTaxMappingMissing: false,
+                    fuelPumps: cachedFuelPumps,
                 });
               }
             }
@@ -383,6 +412,19 @@ export default function BusinessSettingsPage() {
     }
   };
 
+  const handleAddPump = () => {
+    const trimmed = newPumpName.trim();
+    if (!trimmed) return;
+    const next = normalizePumpList([...(fuelPumps || []), trimmed]);
+    businessForm.setValue('fuelPumps', next, { shouldDirty: true });
+    setNewPumpName('');
+  };
+
+  const handleRemovePump = (pump: string) => {
+    const next = (fuelPumps || []).filter((entry) => entry !== pump);
+    businessForm.setValue('fuelPumps', next, { shouldDirty: true });
+  };
+
   async function onBusinessSubmit(data: BusinessSettingsFormValues) {
     if (!business?.id) {
       toast({
@@ -393,6 +435,7 @@ export default function BusinessSettingsPage() {
       return;
     }
 
+    const resolvedFuelPumps = normalizePumpList(fuelPumps ?? data.fuelPumps);
     const businessData: Business = {
         id: business.id,
         name: data.businessName,
@@ -412,7 +455,13 @@ export default function BusinessSettingsPage() {
       console.log('[DEBUG SETTINGS] Business data saved to IndexedDB successfully');
       
       // Step 2: Update localStorage for immediate reflection in hooks like useCurrency
-      localStorage.setItem(LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS, JSON.stringify(data));
+      localStorage.setItem(
+        LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS,
+        JSON.stringify({
+          ...data,
+          fuelPumps: resolvedFuelPumps,
+        })
+      );
 
       // Step 3: Attempt to sync with backend
       const isOnline = authFetch.getOnlineStatus();
@@ -445,6 +494,7 @@ export default function BusinessSettingsPage() {
         eis_environment: data.eisEnvironment,
         block_sales_if_eis_down: data.blockSalesIfEisDown,
         block_sales_if_tax_mapping_missing: data.blockSalesIfTaxMappingMissing,
+        fuel_pumps: resolvedFuelPumps,
       };
 
       console.log('[DEBUG SETTINGS] Attempting to sync to backend:', backendPayload);
@@ -494,6 +544,9 @@ export default function BusinessSettingsPage() {
             eisEnvironment: eisEnvironmentValue,
             blockSalesIfEisDown: blockSalesValue,
             blockSalesIfTaxMappingMissing: blockTaxMappingValue,
+            fuelPumps: normalizePumpList(
+              response.settings?.fuel_pumps ?? response.fuel_pumps ?? data.fuelPumps
+            ),
           });
           console.log('[DEBUG SETTINGS] Form reloaded with backend response values');
         }
@@ -754,6 +807,71 @@ export default function BusinessSettingsPage() {
               </div>
             )}
           </CardContent>
+        </Card>
+
+        <Card className="mt-6">
+          <CardHeader>
+            <CardTitle>Fuel Pumps</CardTitle>
+            <CardDescription>
+              Add the pump names your attendants can select when starting a session.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {isAdminUser ? (
+              <>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Input
+                    placeholder="e.g. Pump 1"
+                    value={newPumpName}
+                    onChange={(event) => setNewPumpName(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        handleAddPump();
+                      }
+                    }}
+                  />
+                  <Button type="button" onClick={handleAddPump}>
+                    Add Pump
+                  </Button>
+                </div>
+                {fuelPumps && fuelPumps.length > 0 ? (
+                  <div className="space-y-2">
+                    {fuelPumps.map((pump) => (
+                      <div
+                        key={pump}
+                        className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"
+                      >
+                        <span>{pump}</span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleRemovePump(pump)}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No pumps added yet.</p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  The selected pump is stored on the session and attached to each sale.
+                </p>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Only admins can manage fuel pump settings.
+              </p>
+            )}
+          </CardContent>
+          {isAdminUser && (
+            <CardFooter className="border-t px-6 py-4">
+              <Button type="submit">Save Pump Settings</Button>
+            </CardFooter>
+          )}
         </Card>
 
               </form>

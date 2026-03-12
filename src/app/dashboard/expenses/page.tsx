@@ -145,7 +145,7 @@ const ExpenseForm = ({
       amount: data.amount,
       date: data.date.toISOString(),
       notes: data.notes,
-      status: 'Pending',
+      status: defaultValues?.status ?? 'Approved',
       createdBy: user.displayName || user.email,
     };
 
@@ -174,7 +174,7 @@ const ExpenseForm = ({
         
         // Update local DB
         await db.expenses.update(defaultValues.id, expenseData);
-        toast({ title: 'Expense Updated', description: 'Your changes have been submitted for approval.' });
+        toast({ title: 'Expense Updated', description: 'Your changes have been saved.' });
       } else {
         // Create new expense
         console.log('[Expenses] Creating new expense for branch:', activeBranchId);
@@ -204,7 +204,7 @@ const ExpenseForm = ({
           
           // Save to local DB with backend ID
           await db.expenses.add(expenseWithId);
-          toast({ title: 'Expense Submitted', description: 'Your expense has been submitted for approval.' });
+          toast({ title: 'Expense Added', description: 'Expense saved successfully.' });
           
           // Trigger refresh to fetch latest data from backend
           if (onExpenseCreated) {
@@ -441,20 +441,11 @@ export default function ExpensesPage() {
   ) || [];
 
   const handleEdit = (expense: Expense) => {
-    if (expense.status !== 'Pending') {
-        toast({ variant: 'destructive', title: 'Cannot edit', description: 'Only pending expenses can be edited.' });
-        return;
-    }
     setEditingExpense(expense);
     setFormOpen(true);
   };
 
   const handleDelete = async (id: string) => {
-    const expenseToDelete = await db.expenses.get(id);
-    if (expenseToDelete?.status !== 'Pending') {
-        toast({ variant: 'destructive', title: 'Cannot delete', description: 'Only pending expenses can be deleted.' });
-        return;
-    }
     if (confirm('Are you sure you want to delete this expense?')) {
       await db.expenses.delete(id);
       toast({ title: 'Expense deleted', variant: 'destructive' });
@@ -520,7 +511,7 @@ export default function ExpensesPage() {
               <DialogDescription>
                 {editingExpense
                   ? 'Update the details for this expense.'
-                  : 'Record a new business expense for approval.'}
+                  : 'Record a new business expense.'}
               </DialogDescription>
             </DialogHeader>
             <ExpenseForm

@@ -134,6 +134,11 @@ const toBoolean = (value: unknown, fallback = false): boolean => {
   return fallback;
 };
 
+const normalizeText = (value: unknown): string => String(value ?? '').trim().toLowerCase();
+
+const isAllProductType = (value: string): boolean =>
+  value === '' || value === 'all' || value === 'all products' || value === 'all items';
+
 const resolveBlockSalesIfTaxMappingMissing = (source: any): boolean | null => {
   if (!source || typeof source !== 'object') return null;
 
@@ -288,30 +293,32 @@ export default function PosPage() {
     loadBusinessType();
   }, [business?.id]);
 
+  const resolveActiveSessionForUser = async (): Promise<Session | null> => {
+    if (!activeBranchId || !user?.uid) return null;
+
+    const normalizedActiveBranchId = normalizeBranchId(activeBranchId);
+    const currentUserId = String(user.uid);
+    const currentUserEmail = String(user.email || '').trim().toLowerCase();
+    const activeSessions = await db.sessions
+      .where('status')
+      .equals('active')
+      .toArray();
+
+    return activeSessions
+      .filter((session) => {
+        if (normalizeBranchId(session.branchId) !== normalizedActiveBranchId) {
+          return false;
+        }
+
+        const sessionUserId = String(session.userId || '');
+        const sessionUserEmail = String(session.userEmail || '').trim().toLowerCase();
+        return sessionUserId === currentUserId || (currentUserEmail !== '' && sessionUserEmail === currentUserEmail);
+      })
+      .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0] ?? null;
+  };
+
   const activeSession = useLiveQuery(
-    async () => {
-        if (!activeBranchId || !user?.uid) return null;
-
-        const normalizedActiveBranchId = normalizeBranchId(activeBranchId);
-        const currentUserId = String(user.uid);
-        const currentUserEmail = String(user.email || '').trim().toLowerCase();
-        const activeSessions = await db.sessions
-          .where('status')
-          .equals('active')
-          .toArray();
-
-        return activeSessions
-          .filter((session) => {
-            if (normalizeBranchId(session.branchId) !== normalizedActiveBranchId) {
-              return false;
-            }
-
-            const sessionUserId = String(session.userId || '');
-            const sessionUserEmail = String(session.userEmail || '').trim().toLowerCase();
-            return sessionUserId === currentUserId || (currentUserEmail !== '' && sessionUserEmail === currentUserEmail);
-          })
-          .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0] ?? null;
-    },
+    async () => resolveActiveSessionForUser(),
     [activeBranchId, user?.uid, user?.email],
     null
   );
@@ -349,10 +356,19 @@ export default function PosPage() {
   const sellableItems = useMemo(
     () => {
       if (!allInventory) return [];
+      const isCashier = user?.role === 'Cashier';
+      const isFuelAttendant = Boolean(user?.isFuelAttendant);
+
       // Show all sellable items regardless of onMenu status
-      return allInventory.filter((item) => item.itemType === 'sellable');
+      return allInventory.filter((item) => {
+        if (item.itemType !== 'sellable') return false;
+        const isFuelItem = Boolean(item.isFuel);
+        if (isFuelAttendant && !isFuelItem) return false;
+        if (!isFuelAttendant && isFuelItem) return false;
+        return true;
+      });
     },
-    [allInventory, currentBusinessType]
+    [allInventory, currentBusinessType, user?.role, user?.isFuelAttendant]
   );
   
   const resolveInventoryItemId = (cartItem: CartItem): string => {
@@ -630,13 +646,14 @@ export default function PosPage() {
       toast({ variant: 'destructive', title: 'Cart is empty' });
       return null;
     }
-    if (!activeSession) {
-      toast({ variant: 'destructive', title: 'No active session', description: 'Please start a session to record sales.' });
-      return null;
-    }
     if (!activeBranchId) {
        toast({ variant: 'destructive', title: 'No active branch', description: 'Could not determine the active branch.' });
        return null;
+    }
+    const sessionForOrder = await resolveActiveSessionForUser();
+    if (!sessionForOrder) {
+      toast({ variant: 'destructive', title: 'No active session', description: 'Please start a session to record sales.' });
+      return null;
     }
 
     const buyerName = buyerDetails?.name?.trim();
@@ -841,7 +858,8 @@ export default function PosPage() {
           id: uuidv4(),
           orderNumber: nextOrderNumber,
           branchId: activeBranchId,
-          sessionId: activeSession.id,
+          sessionId: sessionForOrder.id,
+          pumpName: sessionForOrder.pumpName,
           orderType: 'sale',  // Mark as POS sale
           items: cart.map(item => {
             const inventoryItemId = resolveInventoryItemId(item);
@@ -898,8 +916,8 @@ export default function PosPage() {
 
         // 3. Update the session with sync flags
         const sessionUpdate: Partial<Session> = {
-            totalSales: (activeSession.totalSales || 0) + subtotal,
-            totalTips: (activeSession.totalTips || 0) + tip,
+            totalSales: (sessionForOrder.totalSales || 0) + subtotal,
+            totalTips: (sessionForOrder.totalTips || 0) + tip,
             _dirty: true,
             _operation: 'update'
         };
@@ -907,25 +925,25 @@ export default function PosPage() {
         const saleAmount = total - tip;
         switch(paymentMethod) {
             case 'Cash':
-                sessionUpdate.totalCashSales = (activeSession.totalCashSales || 0) + saleAmount;
-                sessionUpdate.expectedCash = (activeSession.expectedCash || 0) + saleAmount;
+                sessionUpdate.totalCashSales = (sessionForOrder.totalCashSales || 0) + saleAmount;
+                sessionUpdate.expectedCash = (sessionForOrder.expectedCash || 0) + saleAmount;
                 break;
             case 'Card':
-                 sessionUpdate.totalCardSales = (activeSession.totalCardSales || 0) + saleAmount;
+                 sessionUpdate.totalCardSales = (sessionForOrder.totalCardSales || 0) + saleAmount;
                  break;
             case 'Mobile Money':
-                 sessionUpdate.totalMobileMoneySales = (activeSession.totalMobileMoneySales || 0) + saleAmount;
+                 sessionUpdate.totalMobileMoneySales = (sessionForOrder.totalMobileMoneySales || 0) + saleAmount;
                  break;
             case 'On Account':
-                 sessionUpdate.totalOnAccountSales = (activeSession.totalOnAccountSales || 0) + saleAmount;
+                 sessionUpdate.totalOnAccountSales = (sessionForOrder.totalOnAccountSales || 0) + saleAmount;
                  break;
             case 'Other':
-                 sessionUpdate.totalOtherSales = (activeSession.totalOtherSales || 0) + saleAmount;
+                 sessionUpdate.totalOtherSales = (sessionForOrder.totalOtherSales || 0) + saleAmount;
                  break;
         }
 
-        await db.sessions.update(activeSession.id, sessionUpdate);
-        console.log('[Sync] Marked session as dirty:', activeSession.id);
+        await db.sessions.update(sessionForOrder.id, sessionUpdate);
+        console.log('[Sync] Marked session as dirty:', sessionForOrder.id);
       });
 
       if (finalOrder && user) {
@@ -946,21 +964,22 @@ export default function PosPage() {
       }
 
       // 4. Build backend order data AFTER transaction completes
-      if (finalOrder && activeSession) {
+      if (finalOrder && sessionForOrder) {
         orderForBackend = {
           id: finalOrder.id,
           order_number: finalOrder.orderNumber,
           order_type: finalOrder.orderType,
           status: finalOrder.status,
           payment_method: finalOrder.paymentMethod,
+          pump_name: finalOrder.pumpName,
           ...buyerPayload,
           subtotal: finalOrder.subtotal,
           tax: finalOrder.tax,
           tip: finalOrder.tip,
           total: finalOrder.total,
           cogs: finalOrder.cogs,
-          session: activeSession.id,
-          branch: activeSession.branchId, // Use session's branchId which is the UUID
+          session: sessionForOrder.id,
+          branch: sessionForOrder.branchId, // Use session's branchId which is the UUID
           // CRITICAL: Include items with prices so backend can calculate totals
           items: cart.map(item => {
             const quantity = toPositiveNumber(item.quantity, 0);

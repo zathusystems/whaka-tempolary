@@ -70,6 +70,11 @@ const toBackendBranchId = (value?: string | number | null): string => {
   return normalizeBranchId(value);
 };
 
+const normalizeText = (value: unknown): string => String(value ?? '').trim().toLowerCase();
+
+const isAllProductType = (value: string): boolean =>
+  value === '' || value === 'all' || value === 'all products' || value === 'all items';
+
 const normalizeInventoryReference = (value: unknown): string => {
   if (value === undefined || value === null) {
     return '';
@@ -438,6 +443,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       userEmail: String(response.user_email ?? response.userEmail ?? '').trim(),
       userName: response.user_name || response.userName || response.user_email || 'Unknown',
       status: String(response.status || '').toLowerCase() === 'closed' ? 'closed' : 'active',
+      pumpName: response.pump_name ?? response.pumpName ?? undefined,
       openingFloat: parseFloat(response.opening_float || 0),
       expectedCash: parseFloat(response.expected_cash || 0),
       actualCash: response.actual_cash ? parseFloat(response.actual_cash) : undefined,
@@ -480,6 +486,38 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   const isSessionActive = useCallback((sessionLike: any): boolean => {
     return String(sessionLike?.status || '').trim().toLowerCase() === 'active';
   }, []);
+
+  const resolveSessionForCheckout = useCallback(async (): Promise<Session | null> => {
+    if (!branchId || (!user?.uid && !user?.email)) {
+      return null;
+    }
+
+    if (activeSession && isSessionActive(activeSession) && isSessionOwnedByCurrentUser(activeSession)) {
+      return activeSession;
+    }
+
+    const normalizedBranchId = normalizeBranchId(branchId);
+    const currentUserId = String(user?.uid || '').trim();
+    const currentUserEmail = String(user?.email || '').trim().toLowerCase();
+    const activeSessions = await db.sessions.where('status').equals('active').toArray();
+
+    return (
+      activeSessions
+        .filter((session) => {
+          if (normalizeBranchId(session.branchId) !== normalizedBranchId) {
+            return false;
+          }
+
+          const sessionUserId = String(session.userId || '').trim();
+          const sessionUserEmail = String(session.userEmail || '').trim().toLowerCase();
+          return (
+            (currentUserId && sessionUserId === currentUserId) ||
+            (currentUserEmail !== '' && sessionUserEmail === currentUserEmail)
+          );
+        })
+        .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0] ?? null
+    );
+  }, [activeSession, branchId, isSessionActive, isSessionOwnedByCurrentUser, user?.uid, user?.email]);
 
   const closeStaleLocalActiveSessions = useCallback(async () => {
     if (!branchId || (!user?.uid && !user?.email)) {
@@ -956,6 +994,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                 portionName: item.portion_name || item.portionName || '',
                 portionsPerUnit: item.portions_per_unit || item.portionsPerUnit || 0,
                 isVariablePrice: item.is_variable_price || item.isVariablePrice || false,
+                isFuel: item.is_fuel || item.isFuel || false,
                 recipe: item.recipe || [],
               });
             }
@@ -1033,7 +1072,18 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   const sellableItems = useMemo(
     () => {
       if (!allInventory) return [];
+      const isCashier = user?.role === 'Cashier';
+      const isFuelAttendant = Boolean(user?.isFuelAttendant);
+
       let items = [...allInventory];
+      items = items.filter((item) => {
+        const isFuelItem = Boolean(item.isFuel);
+        if (isFuelAttendant) {
+          return isFuelItem;
+        }
+        return !isFuelItem;
+      });
+
       if (searchQuery.trim()) {
         const query = searchQuery.toLowerCase().trim();
         items = items.filter((item) => (
@@ -1053,7 +1103,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       }
       return items;
     },
-    [allInventory, searchQuery]
+    [allInventory, searchQuery, user?.role, user?.isFuelAttendant]
   );
   
   const handleAddToCart = useCallback(async (item: InventoryItem, quantity: number = 1, price?: number, notes?: string) => {
@@ -1444,13 +1494,14 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       toast({ variant: 'destructive', title: 'Cart is empty' });
       return null;
     }
-    if (!activeSession) {
-      toast({ variant: 'destructive', title: 'No active session', description: 'Please start a session to record sales.' });
-      return null;
-    }
     if (!branchId) {
        toast({ variant: 'destructive', title: 'No active branch', description: 'Could not determine the active branch.' });
        return null;
+    }
+    const sessionForOrder = await resolveSessionForCheckout();
+    if (!sessionForOrder) {
+      toast({ variant: 'destructive', title: 'No active session', description: 'Please start a session to record sales.' });
+      return null;
     }
 
     const buyerName = buyerDetails?.name?.trim();
@@ -1876,7 +1927,8 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
           id: uuidv4(),
           orderNumber: nextOrderNumber,
           branchId: branchId,
-          sessionId: activeSession.id,
+          sessionId: sessionForOrder.id,
+          pumpName: sessionForOrder.pumpName,
           orderType: 'sale',
           items: cart.map(item => {
             const inventoryItemId = resolveCartInventoryItemId(item) || String(item.id);
@@ -1958,31 +2010,31 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         console.log('[Sync] Marked order as dirty:', newOrder.id);
 
         const sessionUpdate: Partial<Session> = {
-            totalSales: (activeSession.totalSales || 0) + subtotal,
-            totalTips: (activeSession.totalTips || 0) + tip,
+            totalSales: (sessionForOrder.totalSales || 0) + subtotal,
+            totalTips: (sessionForOrder.totalTips || 0) + tip,
         };
 
         const saleAmount = total - tip;
         switch(paymentMethod) {
             case 'Cash':
-                sessionUpdate.totalCashSales = (activeSession.totalCashSales || 0) + saleAmount;
-                sessionUpdate.expectedCash = (activeSession.expectedCash || 0) + saleAmount;
+                sessionUpdate.totalCashSales = (sessionForOrder.totalCashSales || 0) + saleAmount;
+                sessionUpdate.expectedCash = (sessionForOrder.expectedCash || 0) + saleAmount;
                 break;
             case 'Card':
-                 sessionUpdate.totalCardSales = (activeSession.totalCardSales || 0) + saleAmount;
+                 sessionUpdate.totalCardSales = (sessionForOrder.totalCardSales || 0) + saleAmount;
                  break;
             case 'Mobile Money':
-                 sessionUpdate.totalMobileMoneySales = (activeSession.totalMobileMoneySales || 0) + saleAmount;
+                 sessionUpdate.totalMobileMoneySales = (sessionForOrder.totalMobileMoneySales || 0) + saleAmount;
                  break;
             case 'On Account':
-                 sessionUpdate.totalOnAccountSales = (activeSession.totalOnAccountSales || 0) + saleAmount;
+                 sessionUpdate.totalOnAccountSales = (sessionForOrder.totalOnAccountSales || 0) + saleAmount;
                  break;
             case 'Other':
-                 sessionUpdate.totalOtherSales = (activeSession.totalOtherSales || 0) + saleAmount;
+                 sessionUpdate.totalOtherSales = (sessionForOrder.totalOtherSales || 0) + saleAmount;
                  break;
         }
 
-        await db.sessions.update(activeSession.id, sessionUpdate);
+        await db.sessions.update(sessionForOrder.id, sessionUpdate);
       });
 
       if (finalOrder && user) {
@@ -2146,7 +2198,12 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     }
   };
 
-  if (!activeSession) {
+  const hasUserSession =
+    Boolean(activeSession) &&
+    isSessionActive(activeSession) &&
+    isSessionOwnedByCurrentUser(activeSession);
+
+  if (!hasUserSession) {
     return (
       <Dialog open={isOpen} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-md" onOpenAutoFocus={(e) => e.preventDefault()}>

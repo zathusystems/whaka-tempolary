@@ -1332,6 +1332,7 @@ export default function SessionsPage() {
         userEmail: response.user_email || '',
         userName: response.user_name || response.user_email || 'Unknown User',
         status: String(response.status).toLowerCase() === 'closed' ? 'closed' : 'active',
+        pumpName: response.pump_name ?? response.pumpName ?? undefined,
         openingFloat: parseFloat(response.opening_float || 0),
         expectedCash: parseFloat(response.expected_cash || 0),
         actualCash: response.actual_cash !== null && response.actual_cash !== undefined ? parseFloat(response.actual_cash) : undefined,
@@ -1856,6 +1857,9 @@ export default function SessionsPage() {
                                 <CardDescription>
                                     Session started by {isOwnSession(activeSession) ? 'you' : activeSession.userName} at {formatSessionDateTime(activeSession.startedAt)}
                                     {activeSession.status === 'closed' && ` and closed at ${formatSessionDateTime(activeSession.closedAt)}`}
+                                    {activeSession.pumpName && (
+                                        <span className="block text-xs text-muted-foreground">Pump: {activeSession.pumpName}</span>
+                                    )}
                                 </CardDescription>
                             </div>
                             <div className="flex items-center gap-2">

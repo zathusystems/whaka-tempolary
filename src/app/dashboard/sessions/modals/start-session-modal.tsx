@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useForm } from 'react-hook-form';
+import { Controller, useForm } from 'react-hook-form';
 import { Loader2, Package } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -21,6 +21,7 @@ import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   Table,
   TableBody,
@@ -31,11 +32,17 @@ import {
 } from '@/components/ui/table';
 
 const LOCAL_STORAGE_KEYS = {
-  ACTIVE_BRANCH: 'handypos-active-branch'
+  ACTIVE_BRANCH: 'handypos-active-branch',
+  BUSINESS_SETTINGS: 'handypos-business-settings',
 };
 
 export default function StartSessionForm({ onSessionStarted }: { onSessionStarted: () => void }) {
-    const { register, handleSubmit, formState: { errors }, getValues } = useForm<{ openingFloat: number }>();
+    const { register, handleSubmit, formState: { errors }, getValues, control } = useForm<{ openingFloat: number; pumpName?: string }>({
+        defaultValues: {
+            openingFloat: 0,
+            pumpName: '',
+        },
+    });
     const { user } = useAuth();
     const { format: formatCurrency } = useCurrency();
     const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
@@ -43,6 +50,27 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
     const [isLoading, setIsLoading] = useState(false);
     const [backendInventory, setBackendInventory] = useState<any[]>([]);
     const [isFetchingInventory, setIsFetchingInventory] = useState(false);
+    const [availablePumps, setAvailablePumps] = useState<string[]>([]);
+    const [backendIsFuelAttendant, setBackendIsFuelAttendant] = useState<boolean | null>(null);
+    const staffRecords = useLiveQuery(() => db.staff.toArray(), []);
+    const currentUserEmail = (user?.email || '').trim().toLowerCase();
+    const currentUserId = String(user?.uid || '').trim();
+    const matchedStaff = staffRecords?.find((staff) => {
+        const staffEmail = (staff.email || '').trim().toLowerCase();
+        if (currentUserEmail && staffEmail) {
+            return currentUserEmail === staffEmail;
+        }
+        if (currentUserId) {
+            return String(staff.id) === currentUserId;
+        }
+        return false;
+    });
+    const isFuelAttendant = Boolean(
+        backendIsFuelAttendant ??
+        user?.isFuelAttendant ??
+        matchedStaff?.isFuelAttendant
+    );
+    const showPumpField = isFuelAttendant;
 
     const toBackendBranchId = (branchId: string): string => {
         const normalized = String(branchId || '').trim();
@@ -71,6 +99,75 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
         const branchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
         if (branchId) setActiveBranchId(branchId);
     }, []);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+
+        try {
+            const rawSettings = localStorage.getItem(LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS);
+            if (!rawSettings) {
+                setAvailablePumps([]);
+                return;
+            }
+
+            const parsed = JSON.parse(rawSettings);
+            const rawPumps = parsed?.fuelPumps ?? parsed?.fuel_pumps ?? parsed?.pumpNames ?? [];
+            if (!Array.isArray(rawPumps)) {
+                setAvailablePumps([]);
+                return;
+            }
+
+            const seen = new Set<string>();
+            const normalized = rawPumps
+                .map((pump: unknown) => String(pump ?? '').trim())
+                .filter((pump: string) => pump.length > 0)
+                .filter((pump: string) => {
+                    if (seen.has(pump)) return false;
+                    seen.add(pump);
+                    return true;
+                });
+
+            setAvailablePumps(normalized);
+        } catch (error) {
+            console.warn('[Sessions] Failed to parse fuel pumps from settings cache:', error);
+            setAvailablePumps([]);
+        }
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const fetchStaffProfile = async () => {
+            if (!user) {
+                setBackendIsFuelAttendant(null);
+                return;
+            }
+            try {
+                const staffProfile = await authFetch.fetch<any>('/staff/me/');
+                if (cancelled) return;
+                if (staffProfile) {
+                    setBackendIsFuelAttendant(
+                        Boolean(
+                            staffProfile?.is_fuel_attendant ??
+                            staffProfile?.isFuelAttendant
+                        )
+                    );
+                } else {
+                    setBackendIsFuelAttendant(false);
+                }
+            } catch (error) {
+                if (!cancelled) {
+                    setBackendIsFuelAttendant(null);
+                }
+            }
+        };
+
+        fetchStaffProfile();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [user?.uid]);
 
     // Listen for branch changes
     useEffect(() => {
@@ -143,6 +240,9 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
 
     // Use backend inventory for form display (ensures fresh data on session creation)
     const inventory = backendInventory;
+    const openingInventory = isFuelAttendant
+        ? inventory.filter((item) => Boolean(item.isFuel))
+        : inventory.filter((item) => !Boolean(item.isFuel));
 
     const onFloatSubmit = () => {
         setStep(2);
@@ -155,6 +255,7 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
         }
         setIsLoading(true);
         const openingFloat = getValues('openingFloat');
+        const selectedPump = showPumpField ? getValues('pumpName') : '';
 
         try {
             const backendBranchId = toBackendBranchId(activeBranchId);
@@ -175,7 +276,8 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                 total_on_account_sales: 0,
                 total_other_sales: 0,
                 total_tips: 0,
-                opening_stock: inventory.map((i) => ({
+                pump_name: selectedPump || undefined,
+                opening_stock: openingInventory.map((i) => ({
                     itemId: i.id,
                     name: i.name,
                     quantity: Number(i.stockUnits ?? i.stock_units ?? 0),
@@ -207,6 +309,7 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                 userId: user.uid,
                 userName: user.displayName || user.email || 'Unknown User',
                 status: 'active',
+                pumpName: selectedPump || undefined,
                 openingFloat: openingFloat,
                 expectedCash: openingFloat,
                 openingStock: sessionData.opening_stock,
@@ -270,6 +373,42 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                     />
                     {errors.openingFloat && <p className="text-sm text-destructive">Please enter a valid opening float.</p>}
                 </div>
+                {showPumpField && (
+                    <div className="grid gap-2">
+                        <Label>Fuel Pump</Label>
+                        {availablePumps.length > 0 ? (
+                            <Controller
+                                control={control}
+                                name="pumpName"
+                                rules={{
+                                    validate: (value) =>
+                                        Boolean(value) || 'Please select a pump.',
+                                }}
+                                render={({ field }) => (
+                                    <Select value={field.value || ''} onValueChange={field.onChange}>
+                                        <SelectTrigger>
+                                            <SelectValue placeholder="Select pump" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {availablePumps.map((pump) => (
+                                                <SelectItem key={pump} value={pump}>
+                                                    {pump}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                )}
+                            />
+                        ) : (
+                            <p className="text-sm text-muted-foreground">
+                                No pumps configured. Add fuel pumps in Settings to enable selection.
+                            </p>
+                        )}
+                        {errors.pumpName && (
+                            <p className="text-sm text-destructive">{errors.pumpName.message}</p>
+                        )}
+                    </div>
+                )}
                 <DialogFooter>
                     <Button type="submit">Next: Review Stock</Button>
                 </DialogFooter>
@@ -280,6 +419,9 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                 <div className="space-y-4">
                     <div className="text-sm">
                         <p>You are starting your session with an opening float of <span className="font-bold text-xs">{formatCurrency(getValues('openingFloat'))}</span>.</p>
+                        {showPumpField && availablePumps.length > 0 && getValues('pumpName') && (
+                            <p className="text-muted-foreground">Assigned pump: <span className="font-medium">{getValues('pumpName')}</span>.</p>
+                        )}
                         <p className="text-muted-foreground">The following stock levels will be recorded for the start of your session.</p>
                     </div>
                     <Card>
@@ -302,8 +444,8 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                                                     Loading inventory...
                                                 </TableCell>
                                             </TableRow>
-                                        ) : inventory.length > 0 ? (
-                                            inventory.map(item => {
+                                        ) : openingInventory.length > 0 ? (
+                                            openingInventory.map(item => {
                                                 const quantity = Number(item.stockUnits ?? item.stock_units ?? 0);
                                                 const unitType = item.unitType || item.unit_type || 'unit';
                                                 

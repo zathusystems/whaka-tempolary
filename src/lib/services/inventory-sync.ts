@@ -139,6 +139,10 @@ function normalizeInventoryProduct(
       converted.isVariablePrice ?? backendProduct?.is_variable_price ?? existingProduct?.isVariablePrice,
       false
     ),
+    isFuel: toBoolean(
+      converted.isFuel ?? backendProduct?.is_fuel ?? existingProduct?.isFuel,
+      false
+    ),
     isProduced,
     onMenu: toBoolean(converted.onMenu ?? backendProduct?.on_menu ?? existingProduct?.onMenu, false),
     isSoldInPortions,

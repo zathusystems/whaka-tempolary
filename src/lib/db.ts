@@ -131,6 +131,7 @@ export interface InventoryItem {
     price?: number;
     recipe?: RecipeIngredient[];
     isVariablePrice?: boolean; // For items sold by weight/volume
+    isFuel?: boolean; // Fuel items for fuel attendants
     isProduced?: boolean; // For restaurant/bar: true if made in-house, false if purchased
     onMenu?: boolean;
     image?: string; // Base64 encoded image or image URL
@@ -202,6 +203,7 @@ export interface Order {
     orderNumber: number;
     branchId: string; 
     sessionId?: string; // Link to the session
+    pumpName?: string; // Fuel pump used for this order (optional)
     orderType?: 'sale' | 'return' | 'adjustment'; // Type of order
     items: OrderItem[];
     status: 'New' | 'Preparing' | 'Ready' | 'Completed' | 'Voided' | 'Cancelled';
@@ -312,6 +314,7 @@ export interface Session {
     userName: string;
     userEmail: string; // User's email for comparison
     status: 'active' | 'closed';
+    pumpName?: string; // Fuel pump used for this session (optional)
     openingFloat: number;
     openingStock?: StockRecord[];
     closingStock?: StockRecord[];
@@ -340,6 +343,8 @@ export interface Staff {
     email: string;
     role: 'Admin' | 'Manager' | 'Cashier' | 'Waiter';
     branchId: string;
+    assignedProductType?: string;
+    isFuelAttendant?: boolean;
     password: string; // For POS login
 }
 
@@ -615,6 +620,8 @@ export interface StockAudit {
 export interface BusinessSettings {
     id: string;
     enableEis: boolean;
+    fuelPumps?: string[];
+    productTypes?: string[];
     createdAt: string;
     updatedAt: string;
 }

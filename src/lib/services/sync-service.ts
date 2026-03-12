@@ -998,6 +998,7 @@ class SyncService {
       ['netAmount', 'net_amount'],
       ['vatAmount', 'vat_amount'],
       ['grossAmount', 'gross_amount'],
+      ['pumpName', 'pump_name'],
       ['customerName', 'customer_name'],
       ['customerPhone', 'customer_phone'],
       ['customerTin', 'customer_tin'],

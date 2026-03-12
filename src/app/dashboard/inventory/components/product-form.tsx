@@ -1,7 +1,7 @@
 
 'use client';
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useForm, FormProvider, useFieldArray, useWatch } from 'react-hook-form';
 import { format } from 'date-fns';
 import { Utensils, Beef, BookOpen, Plus, X, Barcode as BarcodeIcon } from 'lucide-react';
@@ -30,6 +30,7 @@ import { Label } from '@/components/ui/label';
 
 const REORDER_LEVEL_PRESETS = [5, 10, 20, 50] as const;
 const DEFAULT_REORDER_LEVEL = REORDER_LEVEL_PRESETS[0];
+const BUSINESS_SETTINGS_STORAGE_KEY = 'handypos-business-settings';
 
 const normalizeReorderLevelForForm = (value?: number | null): number => {
     const parsed = Number(value);
@@ -37,6 +38,21 @@ const normalizeReorderLevelForForm = (value?: number | null): number => {
         return parsed;
     }
     return DEFAULT_REORDER_LEVEL;
+};
+
+const normalizeProductTypeList = (value: unknown): string[] => {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const entry of value) {
+        const typeValue = String(entry ?? '').trim();
+        if (!typeValue) continue;
+        const key = typeValue.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        normalized.push(typeValue);
+    }
+    return normalized;
 };
 
 export const AddProductForm = ({
@@ -56,12 +72,38 @@ export const AddProductForm = ({
 }) => {
     const { user } = useAuth();
     const isRestaurantOrBar = businessType === 'Restaurant' || businessType === 'Bar & Liquor';
+    const [productTypeOptions, setProductTypeOptions] = useState<string[]>([]);
     
     const unitTypes = unitTypesByBusinessType[businessType] || [];
     const unitOptionsListId = `unit-options-${businessType.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        try {
+            const raw = localStorage.getItem(BUSINESS_SETTINGS_STORAGE_KEY);
+            if (!raw) {
+                setProductTypeOptions([]);
+                return;
+            }
+            const parsed = JSON.parse(raw);
+            const normalized = normalizeProductTypeList(
+                parsed?.productTypes ?? parsed?.product_types
+            );
+            setProductTypeOptions(normalized);
+        } catch (error) {
+            console.warn('[ProductForm] Failed to parse business settings:', error);
+            setProductTypeOptions([]);
+        }
+    }, [businessType]);
     
     // Determine which categories to use based on item type and produced status
     const getCategories = (type: string, produced?: boolean) => {
+        if (!isRestaurantOrBar && type === 'sellable' && productTypeOptions.length > 0) {
+            return productTypeOptions;
+        }
+        if (!isRestaurantOrBar && type === 'sellable') {
+            return [];
+        }
         if (type === 'ingredient') {
             return ingredientCategories[businessType] || [];
         }
@@ -93,6 +135,7 @@ export const AddProductForm = ({
           recipe: [],
           reorderLevel: DEFAULT_REORDER_LEVEL,
           isVariablePrice: false,
+          isFuel: false,
       }
     });
 
@@ -110,7 +153,7 @@ export const AddProductForm = ({
     const portionName = useWatch({ control, name: 'portionName' });
     const unitType = useWatch({ control, name: 'unitType' });
     const hasSelectedUnit = Boolean((unitType || '').trim());
-    
+
     // Log suppliers for debugging
     React.useEffect(() => {
         console.log('[ProductForm] Suppliers received:', suppliers.length);
@@ -176,6 +219,7 @@ export const AddProductForm = ({
                 cost: defaultValues.cost ?? 0,
                 reorderLevel: normalizeReorderLevelForForm(defaultValues.reorderLevel),
                 isVariablePrice: defaultValues.isVariablePrice ?? false,
+                isFuel: defaultValues.isFuel ?? false,
                 isProduced: defaultValues.isProduced ?? false,
                 isSoldInPortions: defaultValues.isSoldInPortions ?? false,
                 recipe: defaultValues.recipe ?? [],
@@ -195,6 +239,7 @@ export const AddProductForm = ({
                 recipe: [],
                 reorderLevel: DEFAULT_REORDER_LEVEL,
                 isVariablePrice: false,
+                isFuel: false,
                 isProduced: false,
                 isSoldInPortions: false,
             });
@@ -283,6 +328,7 @@ export const AddProductForm = ({
                 price: finalItemType === 'sellable' ? (priceValue > 0 ? priceValue : undefined) : undefined,
                 recipe: normalizedRecipe,
                 isVariablePrice: data.isVariablePrice || false,
+                isFuel: data.isFuel || false,
                 isProduced: normalizedIsProduced,
                 isSoldInPortions: normalizedIsSoldInPortions,
                 portionName: normalizedPortionName || undefined,
@@ -457,27 +503,6 @@ export const AddProductForm = ({
                 </div>
 
                 <div className="grid grid-cols-1 gap-4">
-                    {/* Category field intentionally hidden for now.
-                    <FormField
-                        control={control}
-                        name="category"
-                        render={({ field }) => (
-                            <FormItem>
-                                <FormLabel>Category</FormLabel>
-                                <Select onValueChange={field.onChange} defaultValue={field.value}>
-                                    <FormControl>
-                                        <SelectTrigger>
-                                            <SelectValue placeholder="Select a category" />
-                                        </SelectTrigger>
-                                    </FormControl>
-                                    <SelectContent className="max-h-60">
-                                        {getCategories(itemType, itemType === 'sellable' ? isProduced : undefined).map(cat => <SelectItem key={cat} value={cat}>{cat}</SelectItem>)}
-                                    </SelectContent>
-                                </Select>
-                            </FormItem>
-                        )}
-                    />
-                    */}
                     <FormField
                         control={control}
                         name="barcode"
@@ -516,6 +541,29 @@ export const AddProductForm = ({
                             <FormLabel>Variable Price</FormLabel>
                             <FormDescription>
                                 Enable if product is sold by weight/volume (e.g. kg, L).
+                            </FormDescription>
+                            </div>
+                            <FormControl>
+                            <Switch
+                                checked={field.value}
+                                onCheckedChange={field.onChange}
+                            />
+                            </FormControl>
+                        </FormItem>
+                        )}
+                    />
+                )}
+
+                {!isRestaurantOrBar && itemType === 'sellable' && (
+                     <FormField
+                        control={form.control}
+                        name="isFuel"
+                        render={({ field }) => (
+                        <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4">
+                            <div className="space-y-0.5">
+                            <FormLabel>Fuel Item</FormLabel>
+                            <FormDescription>
+                                Enable for fuel products so only fuel attendants can sell them.
                             </FormDescription>
                             </div>
                             <FormControl>

@@ -1453,7 +1453,7 @@ export default function DashboardLayout({
           onOpenChange={setIsPosModalOpen}
         />
       )}
-      <ThemeCustomizer />
+      {/* <ThemeCustomizer /> */}
     </SidebarProvider>
   );
 }

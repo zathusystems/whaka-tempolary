@@ -204,6 +204,12 @@ export const Receipt = ({
     toTrimmedString((order as any)?.createdBy ?? (order as any)?.created_by) ||
     cachedCashier ||
     'N/A';
+  const pumpName = toTrimmedString(
+    (order as any).pumpName ??
+    (order as any).pump_name ??
+    (receiptSession as any)?.pumpName ??
+    (receiptSession as any)?.pump_name
+  );
   const orderTypeRaw = toTrimmedString((order as any).orderType ?? (order as any).order_type).toLowerCase();
   const receiptType = ((): string => {
     if (order.status === 'Voided' || order.status === 'Cancelled') {
@@ -473,6 +479,7 @@ export const Receipt = ({
           <p className={`${metaTextClass} leading-snug`}>TPIN: {businessTin || 'N/A'}</p>
           {/* <p className={`${metaTextClass} leading-snug`}>Branch: {branchIdDisplay || 'N/A'}</p> */}
           <p className={`${metaTextClass} leading-snug`}>Cashier: {cashierDisplay}</p>
+          {pumpName && <p className={`${metaTextClass} leading-snug`}>Pump: {pumpName}</p>}
         </div>
       )}
 

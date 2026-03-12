@@ -119,7 +119,7 @@ const VariablePriceDialog = ({
                   {...register('price', { valueAsNumber: true, min: 0.01 })}
                   autoFocus
                 />
-                <p className="text-sm font-medium text-muted-foreground">
+                <p className="text-lg font-semibold text-foreground">
                   Calculated quantity: {calculatedQuantity > 0 ? `${calculatedQuantity.toFixed(3)} ${item.unitType}` : '—'}
                 </p>
               </div>
@@ -134,7 +134,7 @@ const VariablePriceDialog = ({
                   {...register('quantity', { valueAsNumber: true, min: 0.001 })}
                   autoFocus
                 />
-                <p className="text-sm font-medium text-muted-foreground">
+                <p className="text-lg font-semibold text-foreground">
                   Calculated total cash: {calculatedTotalPrice > 0 ? formatCurrency(calculatedTotalPrice) : '—'}
                 </p>
               </div>

@@ -67,6 +67,18 @@ const toSafeNumber = (value: unknown): number => {
     return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const getVariablePriceLabel = (unitType?: string): string => {
+    const unit = String(unitType || '').trim().toLowerCase();
+    if (!unit) return 'Variable Price';
+    if (/(^|[^a-z])l(itre|iter|iters|itres)?([^a-z]|$)/.test(unit) || unit === 'l' || unit === 'ml') {
+        return 'By Volume';
+    }
+    if (/(kg|g|gram|grams|lb|lbs|pound|pounds|oz|ounce|ounces|ton|tons)/.test(unit)) {
+        return 'By Weight';
+    }
+    return 'Variable Price';
+};
+
 const toExportCsvRow = (item: InventoryItem) => ({
     id: item.id,
     name: item.name || '',
@@ -292,7 +304,9 @@ export function InventoryTab({
                     <div className='grid gap-0.5'>
                         <div className="flex items-center gap-2">
                         <span className="font-medium">{item.name}</span>
-                        {item.isVariablePrice && <Badge variant="outline">By Weight</Badge>}
+                        {item.isVariablePrice && (
+                            <Badge variant="outline">{getVariablePriceLabel(item.unitType)}</Badge>
+                        )}
                         </div>
                         <span className="text-xs text-muted-foreground">{item.category}</span>
                     </div>
@@ -360,7 +374,9 @@ export function InventoryTab({
                         <div className="flex-1 grid gap-0.5">
                             <div className="flex items-center gap-2">
                             <p className="font-semibold">{item.name}</p>
-                            {item.isVariablePrice && <Badge variant="outline">By Weight</Badge>}
+                            {item.isVariablePrice && (
+                                <Badge variant="outline">{getVariablePriceLabel(item.unitType)}</Badge>
+                            )}
                             </div>
                             <p className="text-sm text-muted-foreground">{item.category}</p>
                             <div className="flex items-center gap-2 mt-1">

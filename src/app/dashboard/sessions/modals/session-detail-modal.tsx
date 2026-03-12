@@ -1086,6 +1086,9 @@ export default function SessionDetailDialog({ session, isOpen, onOpenChange }: {
                     <DialogTitle>Session Details</DialogTitle>
                     <DialogDescription>
                         Summary for session started on {format(new Date(session.startedAt), 'PPpp')} by {session.userName}.
+                        {session.pumpName && (
+                            <span className="block text-xs text-muted-foreground">Pump: {session.pumpName}</span>
+                        )}
                     </DialogDescription>
                 </DialogHeader>
                 <Tabs defaultValue="sales" className="flex-1 overflow-hidden flex flex-col">

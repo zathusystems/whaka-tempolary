@@ -12,7 +12,6 @@ import { MoreHorizontal, PlusCircle, Edit, Trash2, User, Loader2 } from 'lucide-
 import { db, type Staff, type Subscription } from '@/lib/db';
 import { authFetch } from '@/lib/auth-fetch';
 import { useAuth } from '@/hooks/use-auth';
-import { type BusinessType } from '@/lib/inventory/config';
 interface SubscriptionFeature {
   id: number;
   feature: number;
@@ -59,6 +58,7 @@ import {
     FormItem,
     FormLabel,
     FormMessage,
+    FormDescription,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import {
@@ -68,12 +68,14 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import { toast } from '@/hooks/use-toast';
 import { Badge } from '@/components/ui/badge';
 
 const LOCAL_STORAGE_KEYS = {
     BRANCHES: 'handypos-branches',
-    ACTIVE_BRANCH: 'handypos-active-branch'
+    ACTIVE_BRANCH: 'handypos-active-branch',
+    BUSINESS_SETTINGS: 'handypos-business-settings',
 };
 
 const STAFF_LIMIT = 5;
@@ -105,6 +107,7 @@ const createStaffSchema = (includeWaiter: boolean) => {
         password: z.string().min(6, "Password must be at least 6 characters.").optional().or(z.literal('')),
         role: z.enum(roles),
         branch: z.string().min(1, "Branch is required."),
+        isFuelAttendant: z.boolean().default(false),
     });
 };
 
@@ -114,14 +117,12 @@ const StaffForm = ({
   onFormSubmit,
   defaultValues,
   branches,
-  businessType,
   canCreate,
   staffLimit,
 }: {
   onFormSubmit: () => void;
   defaultValues?: Partial<Staff>;
   branches: Branch[];
-  businessType?: BusinessType;
   canCreate: boolean;
   staffLimit: number;
 }) => {
@@ -187,8 +188,11 @@ const StaffForm = ({
             password: '',
             role: defaultRole || 'Cashier',
             branch: normalizeBranchId(defaultValues?.branchId) || currentBranchId || '',
+            isFuelAttendant: defaultValues?.isFuelAttendant ?? false,
         },
     });
+    const selectedRole = form.watch('role');
+    const isFuelAttendant = form.watch('isFuelAttendant');
     
     // Update branch field when currentBranchId changes (for new staff)
     useEffect(() => {
@@ -196,6 +200,12 @@ const StaffForm = ({
             form.setValue('branch', normalizeBranchId(currentBranchId));
         }
     }, [currentBranchId, defaultValues?.id, form]);
+
+    useEffect(() => {
+        if (selectedRole !== 'Cashier' && isFuelAttendant) {
+            form.setValue('isFuelAttendant', false);
+        }
+    }, [selectedRole, isFuelAttendant, form]);
 
     const onSubmit = async (data: StaffFormValues) => {
         if (!defaultValues?.id && !canCreate) {
@@ -214,7 +224,6 @@ const StaffForm = ({
             if (Number.isNaN(apiBranchId)) {
                 throw new Error('Invalid branch selected. Please choose a valid branch.');
             }
-
             if (defaultValues?.id) {
                 // Update existing staff
                 const updateData: Record<string, any> = {
@@ -222,6 +231,7 @@ const StaffForm = ({
                     email: data.email,
                     role: data.role,
                     branch: apiBranchId,
+                    is_fuel_attendant: Boolean(data.isFuelAttendant),
                 };
                 if (data.password && String(data.password).trim()) {
                     updateData.password = data.password;
@@ -231,8 +241,18 @@ const StaffForm = ({
                     body: JSON.stringify(updateData),
                 });
                 await db.staff.update(defaultValues.id, {
-                    ...updatedStaff,
-                    branchId: normalizedBranchId,
+                    name: updatedStaff?.name ?? data.name,
+                    email: updatedStaff?.email ?? data.email,
+                    role: updatedStaff?.role ?? data.role,
+                    branchId: normalizeBranchId(updatedStaff?.branch ?? normalizedBranchId),
+                    assignedProductType:
+                        (updatedStaff?.assigned_product_type ??
+                            updatedStaff?.assignedProductType) ||
+                        undefined,
+                    isFuelAttendant:
+                        updatedStaff?.is_fuel_attendant ??
+                        updatedStaff?.isFuelAttendant ??
+                        Boolean(data.isFuelAttendant),
                 });
                 toast({ title: 'Staff member updated successfully' });
             } else {
@@ -243,6 +263,7 @@ const StaffForm = ({
                     password: data.password,
                     role: data.role,
                     branch: apiBranchId,
+                    is_fuel_attendant: Boolean(data.isFuelAttendant),
                 };
                 const newStaff = await authFetch.fetch('/staff/', {
                     method: 'POST',
@@ -256,6 +277,14 @@ const StaffForm = ({
                     email: newStaff?.email ?? data.email,
                     role: newStaff?.role ?? data.role,
                     branchId: normalizeBranchId(newStaff?.branch ?? normalizedBranchId),
+                    assignedProductType:
+                        (newStaff?.assigned_product_type ??
+                            newStaff?.assignedProductType) ||
+                        undefined,
+                    isFuelAttendant:
+                        newStaff?.is_fuel_attendant ??
+                        newStaff?.isFuelAttendant ??
+                        Boolean(data.isFuelAttendant),
                 });
                 toast({ title: 'Staff member added successfully' });
             }
@@ -325,7 +354,28 @@ const StaffForm = ({
                         </FormItem>
                     )} />
                 </div>
-
+                {selectedRole === 'Cashier' && (
+                    <FormField
+                        control={form.control}
+                        name="isFuelAttendant"
+                        render={({ field }) => (
+                            <FormItem className="flex items-center justify-between rounded-md border px-3 py-2">
+                                <div className="space-y-0.5">
+                                    <FormLabel>Fuel Attendant</FormLabel>
+                                    <FormDescription>
+                                        Enable if this cashier sells only fuel products.
+                                    </FormDescription>
+                                </div>
+                                <FormControl>
+                                    <Switch
+                                        checked={Boolean(field.value)}
+                                        onCheckedChange={field.onChange}
+                                    />
+                                </FormControl>
+                            </FormItem>
+                        )}
+                    />
+                )}
                 <DialogFooter>
                     <Button type="submit" disabled={isLoading || (!defaultValues?.id && !canCreate)}>
                         {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
@@ -344,7 +394,6 @@ export default function StaffPage() {
   const [staffList, setStaffList] = useState<Staff[]>([]);
   const [isLoadingStaff, setIsLoadingStaff] = useState(true);
   const [branches, setBranches] = useState<Branch[]>([]);
-  const [businessType, setBusinessType] = useState<BusinessType | undefined>(undefined);
   const frontendSubscription = useLiveQuery(() => db.subscriptions.get('sub_main-business'));
   const [subscription, setSubscription] = useState<Subscription | undefined>(undefined);
   const [subscriptionFeatures, setSubscriptionFeatures] = useState<SubscriptionFeature[]>([]);
@@ -372,6 +421,8 @@ export default function StaffPage() {
             email: s.email || '',
             role: s.role || 'Cashier',
             branchId: normalizeBranchId(s.branch || s.branchId || ''),
+            assignedProductType: s.assigned_product_type ?? s.assignedProductType ?? undefined,
+            isFuelAttendant: s.is_fuel_attendant ?? s.isFuelAttendant ?? false,
             password: '',
           }));
           
@@ -573,38 +624,6 @@ export default function StaffPage() {
     loadBranches();
   }, []);
 
-  // Load business type
-  useEffect(() => {
-    const loadBusinessType = async () => {
-      try {
-        const business = await db.business.get('main-business');
-        if (business?.type) {
-          // Map backend business type to frontend BusinessType
-          const typeMap: Record<string, BusinessType> = {
-            'pharmacy': 'Pharmacy',
-            'restaurant': 'Restaurant',
-            'bar_liquor': 'Bar & Liquor',
-            'supermarket': 'Supermarket',
-            'grocery': 'Grocery',
-            'beauty_salon': 'Beauty Salon and Spa',
-            'general_retail': 'General Retail',
-            'generic': 'Restaurant',
-          };
-          const mappedType = typeMap[business.type.toLowerCase()] || 'Restaurant';
-          console.log('Loaded business type:', mappedType);
-          setBusinessType(mappedType);
-        } else {
-          console.log('No business type found, defaulting to Restaurant');
-          setBusinessType('Restaurant');
-        }
-      } catch (error) {
-        console.error('Error loading business type:', error);
-        setBusinessType('Restaurant');
-      }
-    };
-    loadBusinessType();
-  }, []);
-
   const handleEdit = (staff: Staff) => {
     setEditingStaff(staff);
     setFormOpen(true);
@@ -647,6 +666,8 @@ export default function StaffPage() {
               email: s.email || '',
               role: s.role || 'Cashier',
               branchId: normalizeBranchId(s.branch || s.branchId || ''),
+              assignedProductType: s.assigned_product_type ?? s.assignedProductType ?? undefined,
+              isFuelAttendant: s.is_fuel_attendant ?? s.isFuelAttendant ?? false,
               password: '',
             }));
             
@@ -721,7 +742,6 @@ export default function StaffPage() {
                     onFormSubmit={() => handleFormOpenChange(false)} 
                     defaultValues={editingStaff}
                     branches={branches}
-                    businessType={businessType}
                     canCreate={!isStaffLimitReached}
                     staffLimit={STAFF_LIMIT}
                 />
@@ -770,7 +790,10 @@ export default function StaffPage() {
                                     {isCurrentUser && <Badge variant="default" className="text-xs">You</Badge>}
                                   </div>
                                   <p className="text-xs text-muted-foreground">{staff.email}</p>
-                              </div>
+                                  {staff.isFuelAttendant && (
+                                    <p className="text-xs text-muted-foreground">Fuel Attendant</p>
+                                  )}
+                                </div>
                           </div>
                       </TableCell>
                       <TableCell>

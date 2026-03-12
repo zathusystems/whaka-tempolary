@@ -15,6 +15,7 @@ export interface User {
   photoURL?: string;
   branchId?: string;
   businessId?: string;
+  isFuelAttendant?: boolean;
 }
 
 export interface Business {
@@ -163,6 +164,10 @@ const buildUserFromProfiles = (profile: any, staffProfile: any | null): User | n
     role: normalizedRole,
     branchId: branchId || undefined,
     businessId: businessId || undefined,
+    isFuelAttendant:
+      staffProfile?.is_fuel_attendant ??
+      staffProfile?.isFuelAttendant ??
+      undefined,
   };
 };
 

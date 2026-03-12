@@ -66,6 +66,7 @@ const mapBackendSessionToLocal = (session: any, fallbackBranchId: string | null)
   userName: session.user_name || session.user_email || `User ${session.user}`,
   userEmail: session.user_email || '',
   status: String(session.status).toLowerCase() === 'closed' ? 'closed' : 'active',
+  pumpName: session.pump_name ?? session.pumpName ?? undefined,
   openingFloat: parseFloat(session.opening_float || 0),
   expectedCash: parseFloat(session.expected_cash || 0),
   actualCash: session.actual_cash !== null && session.actual_cash !== undefined ? parseFloat(session.actual_cash) : undefined,

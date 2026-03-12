@@ -123,7 +123,7 @@ export default function LoginPage() {
     return parsed ? parsed : null;
   };
 
-  const normalizeBusiness = (businessResponse: any): Business | null => {
+const normalizeBusiness = (businessResponse: any): Business | null => {
     if (!businessResponse?.id || !businessResponse?.name) return null;
     return {
       id: String(businessResponse.id),
@@ -134,7 +134,20 @@ export default function LoginPage() {
       phone: businessResponse.phone,
       address: businessResponse.address,
       website: businessResponse.website,
-    };
+};
+
+const normalizePumpList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const entry of value) {
+    const pump = String(entry ?? '').trim();
+    if (!pump || seen.has(pump)) continue;
+    seen.add(pump);
+    normalized.push(pump);
+  }
+  return normalized;
+};
   };
 
   const buildAuthUser = (
@@ -142,19 +155,28 @@ export default function LoginPage() {
     userRole: AppRole,
     businessId: string,
     branchId?: string | null,
-    responseUser?: any
+    responseUser?: any,
+    staffProfile?: any
   ) => {
     const isEmail = loginValues.identifier.includes('@');
     const responseUserId =
       extractId(responseUser?.id) ||
       extractId(responseUser?.uid) ||
       extractId(responseUser?.user_id);
-    const resolvedEmail = responseUser?.email || (isEmail ? loginValues.identifier : undefined);
-    const resolvedPhone = responseUser?.phone || (!isEmail ? loginValues.identifier : undefined);
+    const resolvedEmail =
+      staffProfile?.email ||
+      responseUser?.email ||
+      (isEmail ? loginValues.identifier : undefined);
+    const resolvedPhone =
+      staffProfile?.phone ||
+      responseUser?.phone ||
+      (!isEmail ? loginValues.identifier : undefined);
     const firstName = responseUser?.first_name || responseUser?.firstName || '';
     const lastName = responseUser?.last_name || responseUser?.lastName || '';
     const nameFromProfile = `${firstName} ${lastName}`.trim();
     const displayName =
+      staffProfile?.name ||
+      staffProfile?.full_name ||
       nameFromProfile ||
       responseUser?.display_name ||
       responseUser?.name ||
@@ -163,13 +185,21 @@ export default function LoginPage() {
       loginValues.identifier;
 
     return {
-      uid: responseUserId || loginValues.identifier,
+      uid: responseUserId || staffProfile?.id || loginValues.identifier,
       email: resolvedEmail,
       phone: resolvedPhone,
       displayName,
       role: userRole || 'User',
       businessId,
-      branchId: branchId || undefined,
+      branchId:
+        extractId(staffProfile?.branch_id) ||
+        extractId(staffProfile?.branch) ||
+        branchId ||
+        undefined,
+      isFuelAttendant:
+        staffProfile?.is_fuel_attendant ??
+        staffProfile?.isFuelAttendant ??
+        undefined,
     };
   };
 
@@ -318,7 +348,15 @@ export default function LoginPage() {
       // Step 4: Process login with business and branch info
       console.log('[DEBUG LOGIN] Step 4: Processing login');
       setPendingUserRole(userRole);
-      await processBusinessSelection(selectedBiz, data, userRole, assignedBranchId, false, response?.user ?? null);
+      await processBusinessSelection(
+        selectedBiz,
+        data,
+        userRole,
+        assignedBranchId,
+        false,
+        response?.user ?? null,
+        staffProfile
+      );
     } catch (error: any) {
       console.error('Login error:', error);
       const errorMsg = error.message || 'Invalid credentials. Please try again.';
@@ -339,7 +377,8 @@ export default function LoginPage() {
     preloadedUserRole?: AppRole,
     preloadedAssignedBranchId?: string | null,
     isOfflineMode?: boolean,
-    responseUser?: any
+    responseUser?: any,
+    staffProfile?: any
   ) => {
     try {
       setIsLoading(true);
@@ -373,6 +412,7 @@ export default function LoginPage() {
       // Fetch business settings and sync to local DB (skip in offline mode)
       if (!isOfflineMode) {
         let currency = 'USD';
+        let fuelPumps: string[] = [];
         try {
           const settingsResponse = await authFetch.fetch<any>(
             `/business/businesses/${selectedBiz.id}/business_settings/`
@@ -380,6 +420,9 @@ export default function LoginPage() {
           
           if (settingsResponse) {
             currency = settingsResponse.currency || 'USD';
+            fuelPumps = Array.isArray(settingsResponse.fuel_pumps ?? settingsResponse.fuelPumps)
+              ? (settingsResponse.fuel_pumps ?? settingsResponse.fuelPumps)
+              : [];
           }
         } catch (e) {
           console.warn('[DEBUG LOGIN] Could not fetch business settings:', e);
@@ -405,6 +448,7 @@ export default function LoginPage() {
           timezone: 'UTC',
           tin: selectedBiz.tin || '',
           fiscalYearStartMonth: 1,
+          fuelPumps,
         }));
 
         // Fetch and sync all branches
@@ -436,6 +480,29 @@ export default function LoginPage() {
             businessResponse?.enableEis ??
             businessResponse?.eis_enabled ??
             businessResponse?.eisEnabled;
+          const responseFuelPumps = normalizePumpList(
+            businessResponse?.settings?.fuel_pumps ??
+            businessResponse?.fuel_pumps ??
+            businessResponse?.settings?.fuelPumps ??
+            businessResponse?.fuelPumps ??
+            []
+          );
+
+          if (responseFuelPumps.length > 0) {
+            let existingSettings: any = {};
+            try {
+              const existingSettingsRaw = localStorage.getItem('handypos-business-settings');
+              existingSettings = existingSettingsRaw ? JSON.parse(existingSettingsRaw) : {};
+            } catch {
+              existingSettings = {};
+            }
+            localStorage.setItem('handypos-business-settings', JSON.stringify({
+              ...existingSettings,
+              businessId: selectedBiz.id,
+              fuelPumps: responseFuelPumps,
+            }));
+          }
+
           if (rawEnableEis !== undefined) {
             const enableEisValue = rawEnableEis === true || rawEnableEis === 'true';
             let existingSettings: any = {};
@@ -449,6 +516,7 @@ export default function LoginPage() {
               ...existingSettings,
               businessId: selectedBiz.id,
               enableEis: enableEisValue,
+              fuelPumps: responseFuelPumps.length > 0 ? responseFuelPumps : (existingSettings.fuelPumps || []),
             }));
           }
 
@@ -473,6 +541,7 @@ export default function LoginPage() {
               ...existingSettings,
               businessId: selectedBiz.id,
               blockSalesIfTaxMappingMissing: blockTaxMappingValue,
+              fuelPumps: responseFuelPumps.length > 0 ? responseFuelPumps : (existingSettings.fuelPumps || []),
             }));
           }
           
@@ -585,11 +654,35 @@ export default function LoginPage() {
         userRole || 'User',
         selectedBiz.id,
         activeBranchId || undefined,
-        resolvedResponseUser
+        resolvedResponseUser,
+        staffProfile
       );
 
       console.log('[DEBUG LOGIN] User object being set:', user);
       login(user);
+
+      if (staffProfile?.id) {
+        try {
+          await db.staff.put({
+            id: String(staffProfile.id),
+            name: staffProfile.name || staffProfile.full_name || user.displayName || '',
+            email: staffProfile.email || user.email || '',
+            role: staffProfile.role || user.role || 'Cashier',
+            branchId:
+              extractId(staffProfile.branch_id) ||
+              extractId(staffProfile.branch) ||
+              activeBranchId ||
+              '',
+            isFuelAttendant:
+              staffProfile.is_fuel_attendant ??
+              staffProfile.isFuelAttendant ??
+              false,
+            password: '',
+          });
+        } catch (staffStoreError) {
+          console.warn('[DEBUG LOGIN] Failed to cache staff profile:', staffStoreError);
+        }
+      }
 
       toast({
         title: 'Login Successful',
@@ -645,9 +738,11 @@ export default function LoginPage() {
       let assignedBranchId: string | null = null;
       let userRole: AppRole = pendingUserRole || 'User';
 
+      let staffProfile: any = null;
       try {
         const staffResponse = await authFetch.fetch<any>('/staff/me/');
         if (staffResponse) {
+          staffProfile = staffResponse;
           userRole = normalizeRole(staffResponse.role, { fallback: userRole });
           assignedBranchId = staffResponse.branch ? String(staffResponse.branch) : null;
           console.log('[DEBUG LOGIN] Staff profile:', { role: userRole, assignedBranch: assignedBranchId });
@@ -659,7 +754,15 @@ export default function LoginPage() {
 
       setPendingUserRole(userRole);
 
-      await processBusinessSelection(selectedBiz, loginData, userRole, assignedBranchId, false, loginUser);
+      await processBusinessSelection(
+        selectedBiz,
+        loginData,
+        userRole,
+        assignedBranchId,
+        false,
+        loginUser,
+        staffProfile
+      );
     } catch (error: any) {
       console.error('Business selection error:', error);
       const errorMsg = error.message || 'Failed to select business. Please try again.';
@@ -697,9 +800,11 @@ export default function LoginPage() {
       // Reuse role resolved during initial login. Staff profile can override if available.
       let userRole: AppRole = pendingUserRole || 'User';
 
+      let staffProfile: any = null;
       try {
         const staffResponse = await authFetch.fetch<any>('/staff/me/');
         if (staffResponse) {
+          staffProfile = staffResponse;
           userRole = normalizeRole(staffResponse.role, { fallback: userRole });
         }
       } catch (e) {
@@ -713,7 +818,8 @@ export default function LoginPage() {
         userRole || 'User',
         selectedBusiness,
         selectedBranch,
-        loginUser
+        loginUser,
+        staffProfile
       );
 
       console.log('[DEBUG LOGIN] User object being set:', user);

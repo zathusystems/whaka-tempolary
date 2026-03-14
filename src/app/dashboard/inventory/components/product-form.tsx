@@ -153,6 +153,7 @@ export const AddProductForm = ({
     const portionName = useWatch({ control, name: 'portionName' });
     const unitType = useWatch({ control, name: 'unitType' });
     const hasSelectedUnit = Boolean((unitType || '').trim());
+    const categoryOptions = getCategories(itemType || 'sellable', isProduced);
 
     // Log suppliers for debugging
     React.useEffect(() => {
@@ -496,6 +497,47 @@ export const AddProductForm = ({
                                 <FormControl>
                                     <Input placeholder="e.g., PROD-001" {...field} />
                                 </FormControl>
+                                <FormMessage />
+                            </FormItem>
+                        )}
+                    />
+                </div>
+
+                <div className="grid grid-cols-1 gap-4">
+                    <FormField
+                        control={control}
+                        name="category"
+                        render={({ field }) => (
+                            <FormItem>
+                                <FormLabel>Category</FormLabel>
+                                <FormControl>
+                                    {categoryOptions.length > 0 ? (
+                                        <Select
+                                            onValueChange={field.onChange}
+                                            value={field.value || ''}
+                                        >
+                                            <SelectTrigger>
+                                                <SelectValue placeholder="Select a category" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                {categoryOptions.map((category) => (
+                                                    <SelectItem key={category} value={category}>
+                                                        {category}
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                    ) : (
+                                        <Input
+                                            placeholder="Type a category (e.g., Beverages)"
+                                            value={field.value || ''}
+                                            onChange={(event) => field.onChange(event.target.value)}
+                                        />
+                                    )}
+                                </FormControl>
+                                <FormDescription>
+                                    Helps group and filter products in inventory and POS.
+                                </FormDescription>
                                 <FormMessage />
                             </FormItem>
                         )}

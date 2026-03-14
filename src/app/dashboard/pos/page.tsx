@@ -66,6 +66,19 @@ const normalizeBranchId = (value?: string | number | null): string => {
   return normalized;
 };
 
+const getBranchIdCandidates = (branchId?: string | number | null): string[] => {
+  const normalized = normalizeBranchId(branchId);
+  if (!normalized) return [];
+
+  const candidates = new Set<string>([normalized, String(branchId ?? '').trim()]);
+  if (/^\d+$/.test(normalized)) {
+    candidates.add(`BRN-${normalized}`);
+    candidates.add(`branch-${normalized}`);
+  }
+
+  return Array.from(candidates).filter((candidate) => candidate.length > 0);
+};
+
 const normalizeInventoryReference = (value: unknown): string => {
   if (value === undefined || value === null) {
     return '';
@@ -324,7 +337,15 @@ export default function PosPage() {
   );
   
   const allInventory = useLiveQuery(
-    () => activeBranchId ? db.inventory.where({ branchId: activeBranchId }).toArray() : [], 
+    () => {
+      if (!activeBranchId) return [];
+      const candidates = getBranchIdCandidates(activeBranchId);
+      if (candidates.length === 0) return [];
+      if (candidates.length === 1) {
+        return db.inventory.where({ branchId: candidates[0] }).toArray();
+      }
+      return db.inventory.where('branchId').anyOf(candidates).toArray();
+    },
     [activeBranchId]
   );
   

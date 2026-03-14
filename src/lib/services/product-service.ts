@@ -199,7 +199,26 @@ export async function deleteProduct(
  */
 export async function getProductsByBranch(branchId: string): Promise<InventoryItem[]> {
   try {
-    return await db.inventory.where({ branchId }).toArray();
+    const normalized = String(branchId || '').trim();
+    if (!normalized) {
+      return [];
+    }
+
+    const candidates = new Set<string>([normalized]);
+    const brnMatch = /^BRN-(\d+)$/i.exec(normalized);
+    if (brnMatch) {
+      candidates.add(brnMatch[1]);
+      candidates.add(`branch-${brnMatch[1]}`);
+    } else if (/^\d+$/.test(normalized)) {
+      candidates.add(`BRN-${normalized}`);
+      candidates.add(`branch-${normalized}`);
+    }
+
+    const candidateList = Array.from(candidates);
+    if (candidateList.length === 1) {
+      return await db.inventory.where({ branchId: candidateList[0] }).toArray();
+    }
+    return await db.inventory.where('branchId').anyOf(candidateList).toArray();
   } catch (error) {
     console.error('Failed to get products:', error);
     throw error;

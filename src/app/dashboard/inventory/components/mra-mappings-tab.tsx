@@ -162,6 +162,15 @@ export function MRAMappingsTab({ inventoryData, businessId, branchId }: MRAMappi
     pending: mappings.filter(m => !m.is_approved).length,
   };
 
+  const mappedInventoryIds = new Set(
+    mappings
+      .map((mapping) => String(mapping.inventory_item || '').trim())
+      .filter((id) => id.length > 0)
+  );
+  const unmappedInventory = inventoryData.filter(
+    (item) => !mappedInventoryIds.has(String(item.id))
+  );
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -211,7 +220,7 @@ export function MRAMappingsTab({ inventoryData, businessId, branchId }: MRAMappi
       {/* Action */}
       <div className="flex justify-end">
         <ProductMappingForm
-          inventoryData={inventoryData}
+          inventoryData={unmappedInventory}
           businessId={businessId?.toString()}
           onMappingCreated={() => {
             // Refresh mappings for current branch

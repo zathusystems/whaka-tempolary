@@ -32,7 +32,7 @@ import { InventoryTab } from './components/inventory-tab';
 import { PurchasesTab } from './components/purchases-tab';
 import { TransfersTab } from './components/transfers-tab';
 import { WasteTab } from './components/waste-tab';
-// import { MRAMappingsTab } from './components/mra-mappings-tab';
+import { MRAMappingsTab } from './components/mra-mappings-tab';
 
 import {
   Card,
@@ -805,12 +805,10 @@ export default function InventoryPage() {
                             <Trash className="mr-2 h-4 w-4" />
                             Waste Log
                         </TabsTrigger>
-                        {/*
                         <TabsTrigger value="mra" className="whitespace-nowrap">
                             <Package className="mr-2 h-4 w-4" />
                             MRA Mappings
                         </TabsTrigger>
-                        */}
                     </TabsList>
                     </div>
                     <div className="ml-auto flex w-full flex-wrap items-center gap-2 md:w-auto md:flex-nowrap">
@@ -882,7 +880,6 @@ export default function InventoryPage() {
                     branchId={activeBranchId}
                  />
             </TabsContent>
-            {/*
             <TabsContent value="mra">
                 <MRAMappingsTab
                     inventoryData={inventoryData}
@@ -890,7 +887,6 @@ export default function InventoryPage() {
                     branchId={activeBranchId}
                 />
             </TabsContent>
-            */}
         </Tabs>
       </Card>
     </div>

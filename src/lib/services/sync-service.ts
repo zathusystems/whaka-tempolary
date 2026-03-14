@@ -17,7 +17,7 @@ interface SyncState {
 
 class SyncService {
   private syncState: SyncState = {
-    last_synced_at: typeof window !== 'undefined' ? localStorage.getItem('last_synced_at') : null,
+    last_synced_at: null,
     is_syncing: false,
     pending_changes: []
   };
@@ -46,6 +46,21 @@ class SyncService {
     return normalized;
   }
 
+  private getBranchIdCandidates(branchId: string): string[] {
+    const normalized = String(branchId || '').trim();
+    if (!normalized) return [];
+
+    const backendId = this.toBackendBranchId(normalized);
+    const candidates = new Set<string>([normalized, backendId]);
+
+    if (/^\d+$/.test(backendId)) {
+      candidates.add(`BRN-${backendId}`);
+      candidates.add(`branch-${backendId}`);
+    }
+
+    return Array.from(candidates).filter((candidate) => candidate.length > 0);
+  }
+
   private getBranchSyncStorageKey(branchId: string): string {
     return `last_synced_at:${this.toBackendBranchId(branchId)}`;
   }
@@ -57,9 +72,7 @@ class SyncService {
 
     const branchSyncKey = this.getBranchSyncStorageKey(branchId);
     const branchLastSyncedAt = localStorage.getItem(branchSyncKey);
-    const globalLastSyncedAt = localStorage.getItem('last_synced_at');
-
-    return branchLastSyncedAt || globalLastSyncedAt || this.syncState.last_synced_at || this.DEFAULT_SYNC_TIMESTAMP;
+    return branchLastSyncedAt || this.DEFAULT_SYNC_TIMESTAMP;
   }
 
   private resolveBusinessId(): string {
@@ -649,16 +662,44 @@ class SyncService {
   private async pullChanges(branchId: string): Promise<void> {
     const since = this.syncState.last_synced_at || this.DEFAULT_SYNC_TIMESTAMP;
     const backendBranchId = this.toBackendBranchId(branchId);
+    const inventoryCandidates = this.getBranchIdCandidates(branchId);
+    let localInventoryCount = 0;
 
     console.log(`[Sync] Pulling changes since ${since}`);
 
     try {
+      if (inventoryCandidates.length > 0) {
+        try {
+          localInventoryCount = await db.inventory.where('branchId').anyOf(inventoryCandidates).count();
+        } catch (countError) {
+          console.warn('[Sync] Failed to count local inventory for branch, continuing with default since:', countError);
+          localInventoryCount = 0;
+        }
+      }
+
       // Pull inventory changes
-      const inventoryUrl = `/inventory/sync/pull/?since=${encodeURIComponent(since)}&branch_id=${backendBranchId}`;
+      const inventorySince = localInventoryCount === 0 ? this.DEFAULT_SYNC_TIMESTAMP : since;
+      const inventoryUrl = `/inventory/sync/pull/?since=${encodeURIComponent(inventorySince)}&branch_id=${backendBranchId}`;
       console.log('[Sync] Inventory URL:', inventoryUrl);
       const inventoryResult = await authFetch.fetch(inventoryUrl);
       console.log('[Sync] Inventory pull result:', inventoryResult);
       console.log('[Sync] Inventory changes:', inventoryResult?.changes);
+      const pulledItems = inventoryResult?.changes?.inventory_items;
+      const shouldForceFullFetch = !Array.isArray(pulledItems) || pulledItems.length === 0;
+      const backfillKey = `inventory_full_pull_done:${backendBranchId}`;
+      const hasBackfill = typeof window !== 'undefined' ? localStorage.getItem(backfillKey) === '1' : false;
+
+      if (shouldForceFullFetch && !hasBackfill) {
+        console.warn('[Sync] Inventory pull returned no items; forcing full inventory fetch once.');
+        try {
+          await this.fetchAllInventoryFromBackend(branchId);
+          if (typeof window !== 'undefined') {
+            localStorage.setItem(backfillKey, '1');
+          }
+        } catch (fallbackError) {
+          console.warn('[Sync] Forced inventory fetch failed:', fallbackError);
+        }
+      }
 
       // Pull take order changes
       const ordersUrl = `/orders/sync/pull/?since=${encodeURIComponent(since)}&branch_id=${backendBranchId}`;
@@ -726,7 +767,7 @@ class SyncService {
 
       // Step 3: Apply server changes to local DB
       if (Object.keys(mergedChanges).length > 0) {
-        await this.applyServerChanges(mergedChanges);
+        await this.applyServerChanges(mergedChanges, branchId);
       } else {
         console.log('[Sync] No changes to apply');
       }
@@ -1506,7 +1547,7 @@ class SyncService {
    * Apply server changes to local database
    * Merges server data with local data, clearing dirty flags
    */
-  private async applyServerChanges(changes: any): Promise<void> {
+  private async applyServerChanges(changes: any, branchId?: string): Promise<void> {
     console.log('[Sync] Applying server changes to local DB');
 
     try {
@@ -1605,6 +1646,15 @@ class SyncService {
           try {
             // Convert snake_case to camelCase
             const convertedItem = this.snakeToCamel(item);
+            const resolvedBranchId =
+              String(
+                convertedItem?.branchId ??
+                  (convertedItem as any)?.branch_id ??
+                  item?.branch_id ??
+                  item?.branchId ??
+                  ''
+              ).trim() || undefined;
+            const fallbackBranchId = branchId ? String(branchId).trim() : undefined;
             
             // Get existing item to preserve local fields
             const existingItem = await db.inventory.get(convertedItem.id);
@@ -1621,7 +1671,10 @@ class SyncService {
               await db.inventory.put({
                 ...existingItem,
                 ...convertedItem,
-                branchId: existingItem.branchId, // Preserve existing branchId
+                branchId:
+                  fallbackBranchId ??
+                  existingItem.branchId ??
+                  resolvedBranchId, // Prefer active branch ID format, then existing/payload
                 supplier: existingItem.supplier, // ✅ PRESERVE supplier relationship
                 _dirty: false,
                 _synced_at: new Date().toISOString()
@@ -1633,6 +1686,7 @@ class SyncService {
               console.warn(`[Sync] New inventory item ${convertedItem.id} from server without existing record - branchId may be missing`);
               await db.inventory.put({
                 ...convertedItem,
+                branchId: fallbackBranchId ?? resolvedBranchId,
                 _dirty: false,
                 _synced_at: new Date().toISOString()
               });

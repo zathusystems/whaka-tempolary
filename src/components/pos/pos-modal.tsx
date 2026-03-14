@@ -70,6 +70,19 @@ const toBackendBranchId = (value?: string | number | null): string => {
   return normalizeBranchId(value);
 };
 
+const getBranchIdCandidates = (branchId?: string | number | null): string[] => {
+  const normalized = normalizeBranchId(branchId);
+  if (!normalized) return [];
+
+  const candidates = new Set<string>([normalized, String(branchId ?? '').trim()]);
+  if (/^\d+$/.test(normalized)) {
+    candidates.add(`BRN-${normalized}`);
+    candidates.add(`branch-${normalized}`);
+  }
+
+  return Array.from(candidates).filter((candidate) => candidate.length > 0);
+};
+
 const normalizeText = (value: unknown): string => String(value ?? '').trim().toLowerCase();
 
 const isAllProductType = (value: string): boolean =>
@@ -800,7 +813,15 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   ]);
   
   const allInventory = useLiveQuery(
-    () => branchId ? db.inventory.where({ branchId: branchId }).toArray() : [], 
+    () => {
+      if (!branchId) return [];
+      const candidates = getBranchIdCandidates(branchId);
+      if (candidates.length === 0) return [];
+      if (candidates.length === 1) {
+        return db.inventory.where({ branchId: candidates[0] }).toArray();
+      }
+      return db.inventory.where('branchId').anyOf(candidates).toArray();
+    },
     [branchId]
   );
   
@@ -862,7 +883,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   // Load EIS enabled status from business settings
   useEffect(() => {
     const loadEisStatus = async () => {
-      if (business?.id) {
+      if (business?.id && isOpen) {
         try {
           console.log('[POS Modal] Loading EIS status for business:', business.id);
 
@@ -901,7 +922,9 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                 console.log('[POS Modal] EIS is disabled from backend');
               }
 
-              const backendBlockSetting = resolveBlockSalesIfTaxMappingMissing(backendBusiness);
+              const backendBlockSetting =
+                resolveBlockSalesIfTaxMappingMissing(backendBusiness) ??
+                resolveBlockSalesIfTaxMappingMissing(backendBusiness?.settings);
               if (backendBlockSetting !== null) {
                 setBlockSalesIfTaxMappingMissing(backendBlockSetting);
               }
@@ -932,7 +955,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       }
     };
     loadEisStatus();
-  }, [business?.id, resolveBlockSalesIfTaxMappingMissing]);
+  }, [business?.id, isOpen, resolveBlockSalesIfTaxMappingMissing]);
 
   // Fetch inventory from backend when modal opens to ensure we have current branch data
   // Falls back to local DB if offline or backend fails
@@ -967,7 +990,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
             console.log('[POS Modal] Received', items.length, 'items from backend for branch', backendBranchId);
             
             // Clear old inventory for this branch ONLY (keep other branches)
-            const oldItems = await db.inventory.where({ branchId: branchId }).toArray();
+            const branchCandidates = getBranchIdCandidates(branchId);
+            const oldItems = branchCandidates.length > 0
+              ? await db.inventory.where('branchId').anyOf(branchCandidates).toArray()
+              : await db.inventory.where({ branchId: branchId }).toArray();
             console.log('[POS Modal] Clearing', oldItems.length, 'old items for branch:', branchId);
             for (const item of oldItems) {
               await db.inventory.delete(item.id);

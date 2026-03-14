@@ -164,22 +164,22 @@ const normalizePumpList = (value: unknown): string[] => {
       extractId(responseUser?.uid) ||
       extractId(responseUser?.user_id);
     const resolvedEmail =
-      staffProfile?.email ||
       responseUser?.email ||
+      staffProfile?.email ||
       (isEmail ? loginValues.identifier : undefined);
     const resolvedPhone =
-      staffProfile?.phone ||
       responseUser?.phone ||
+      staffProfile?.phone ||
       (!isEmail ? loginValues.identifier : undefined);
     const firstName = responseUser?.first_name || responseUser?.firstName || '';
     const lastName = responseUser?.last_name || responseUser?.lastName || '';
     const nameFromProfile = `${firstName} ${lastName}`.trim();
     const displayName =
-      staffProfile?.name ||
-      staffProfile?.full_name ||
       nameFromProfile ||
       responseUser?.display_name ||
       responseUser?.name ||
+      staffProfile?.name ||
+      staffProfile?.full_name ||
       (resolvedEmail ? resolvedEmail.split('@')[0] : '') ||
       resolvedPhone ||
       loginValues.identifier;

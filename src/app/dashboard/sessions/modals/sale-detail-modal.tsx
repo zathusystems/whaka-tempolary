@@ -4,7 +4,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { format } from 'date-fns';
 import { MoreHorizontal, AlertTriangle, FileText, Loader2, Printer } from 'lucide-react';
 
-import { type Order, type Business } from '@/lib/db';
+import { db, type Order, type Business } from '@/lib/db';
 import { useCurrency } from '@/hooks/use-currency';
 import { useAuth } from '@/hooks/use-auth';
 import { authFetch } from '@/lib/auth-fetch';
@@ -76,6 +76,43 @@ const toTrimmedString = (value: unknown): string => {
   return trimmed;
 };
 
+const resolveOrderItemInventoryId = (item: any): string => {
+  const candidates = [
+    item?.inventoryItemId,
+    item?.inventory_item_id,
+    item?.inventoryItem,
+    item?.inventory_item,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = toTrimmedString(candidate);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  const rawLineId = toTrimmedString(item?.id);
+  if (!rawLineId) {
+    return '';
+  }
+  return rawLineId.split('::cart::')[0] || rawLineId;
+};
+
+const normalizeUnitLabel = (value: unknown): string => {
+  return toTrimmedString(value);
+};
+
+const formatUnitLabel = (unit: string, quantity: number): string => {
+  const trimmed = normalizeUnitLabel(unit);
+  if (!trimmed) {
+    return '';
+  }
+  if (trimmed.toLowerCase() === 'unit') {
+    return quantity === 1 ? 'unit' : 'units';
+  }
+  return trimmed;
+};
+
 const resolveBuyerField = (...candidates: Array<unknown>): string => {
   for (const candidate of candidates) {
     const trimmed = toTrimmedString(candidate);
@@ -139,6 +176,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
   const [loadingVoid, setLoadingVoid] = useState(false);
   const [isPrinting, setIsPrinting] = useState(false);
   const [businessSettings, setBusinessSettings] = useState<Business | null>(null);
+  const [inventoryUnitById, setInventoryUnitById] = useState<Record<string, string>>({});
   const [receiptPaperWidth, setReceiptPaperWidth] = useState<'80mm' | '58mm'>('80mm');
   const [receiptCopyNumber, setReceiptCopyNumber] = useState(1);
   const [receiptDisplaySettings, setReceiptDisplaySettings] = useState({
@@ -261,6 +299,65 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
     return () => window.removeEventListener(PRINTER_CONFIG_UPDATED_EVENT, handlePrinterUpdate);
   }, [isOpen, refreshPrinterSettings]);
 
+  useEffect(() => {
+    let isMounted = true;
+
+    if (!isOpen || !order) {
+      setInventoryUnitById({});
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    const inventoryIds = Array.from(
+      new Set(
+        order.items
+          .map((item) => resolveOrderItemInventoryId(item))
+          .filter((id) => Boolean(id))
+      )
+    );
+
+    if (inventoryIds.length === 0) {
+      setInventoryUnitById({});
+      return () => {
+        isMounted = false;
+      };
+    }
+
+    db.inventory
+      .bulkGet(inventoryIds)
+      .then((items) => {
+        if (!isMounted) {
+          return;
+        }
+        const nextMap: Record<string, string> = {};
+        items.forEach((inventoryItem, index) => {
+          const id = inventoryIds[index];
+          if (!inventoryItem || !id) {
+            return;
+          }
+          const unitLabel =
+            normalizeUnitLabel((inventoryItem as any).unitType) ||
+            normalizeUnitLabel((inventoryItem as any).unit_type) ||
+            normalizeUnitLabel((inventoryItem as any).unit);
+          if (unitLabel) {
+            nextMap[id] = unitLabel;
+          }
+        });
+        setInventoryUnitById(nextMap);
+      })
+      .catch((error) => {
+        console.warn('Error loading inventory units:', error);
+        if (isMounted) {
+          setInventoryUnitById({});
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, order]);
+
   if (!order) return null;
 
   const buyerDetails = resolveBuyerDetails(order);
@@ -283,6 +380,18 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
     const itemSubtotal = toFiniteNumber(item.subtotal, itemPrice * itemQuantity);
     const itemTaxAmount = toFiniteNumber(item.tax_amount ?? item.taxAmount, 0);
     const itemTotal = toFiniteNumber(item.total, itemSubtotal + itemTaxAmount);
+    const directUnit =
+      normalizeUnitLabel((item as any).unitType) ||
+      normalizeUnitLabel((item as any).unit_type) ||
+      normalizeUnitLabel((item as any).unit) ||
+      normalizeUnitLabel((item as any).mraUnitMeasure) ||
+      normalizeUnitLabel((item as any).mra_unit_measure);
+    const resolvedInventoryId = resolveOrderItemInventoryId(item);
+    const inventoryUnit = resolvedInventoryId ? inventoryUnitById[resolvedInventoryId] : '';
+    const unitLabel = formatUnitLabel(
+      directUnit || inventoryUnit || 'unit',
+      itemQuantity
+    );
 
     return {
       ...item,
@@ -294,6 +403,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
       itemSubtotal,
       itemTaxAmount,
       itemTotal,
+      unitLabel,
     };
   });
 
@@ -489,7 +599,9 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <p className="font-medium break-words">{item.name}</p>
-                          <p className="text-xs text-muted-foreground">Qty: {item.itemQuantity}</p>
+                          <p className="text-xs text-muted-foreground">
+                            Qty: {item.itemQuantity} {item.unitLabel}
+                          </p>
                           {item.notes && (
                             <p className="mt-1 text-xs text-muted-foreground break-words">{item.notes}</p>
                           )}
@@ -554,7 +666,9 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                           <TableCell className="font-medium">
                             <div>
                               <p>{item.name}</p>
-                              <p className="text-xs text-muted-foreground">Qty: {item.itemQuantity}</p>
+                              <p className="text-xs text-muted-foreground">
+                                Qty: {item.itemQuantity} {item.unitLabel}
+                              </p>
                               {item.notes && <p className="text-xs text-muted-foreground mt-1">{item.notes}</p>}
                             </div>
                           </TableCell>

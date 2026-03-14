@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
 import {
   Select,
   SelectContent,
@@ -62,75 +63,255 @@ const toBackendBranchId = (branchId: string): string => {
     return normalized || branchId;
 };
 
+type SessionChoice = {
+    id: string;
+    label: string;
+    sortValue: number;
+    hasPump: boolean;
+    pumpName?: string;
+};
+
+const parseSessionDate = (value: unknown): Date | null => {
+    if (value instanceof Date) {
+        return Number.isNaN(value.getTime()) ? null : value;
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        const ms = value < 1_000_000_000_000 ? value * 1000 : value;
+        const parsed = new Date(ms);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+        if (/^\d+$/.test(trimmed)) {
+            const numericValue = Number(trimmed);
+            const ms = numericValue < 1_000_000_000_000 ? numericValue * 1000 : numericValue;
+            const parsed = new Date(ms);
+            return Number.isNaN(parsed.getTime()) ? null : parsed;
+        }
+        const parsed = new Date(trimmed);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    return null;
+};
+
+const getSessionPumpName = (session: any): string => {
+    const raw = session?.pump_name ?? session?.pumpName ?? session?.pump ?? '';
+    return String(raw ?? '').trim();
+};
+
+const getSessionHasPump = (session: any): boolean => {
+    return Boolean(getSessionPumpName(session));
+};
+
+const buildSessionChoice = (session: any): SessionChoice | null => {
+    if (!session) return null;
+    const id = String(session?.id ?? '').trim();
+    if (!id) return null;
+
+    const userLabel = String(
+        session?.user_name ??
+        session?.userName ??
+        session?.user_email ??
+        session?.userEmail ??
+        session?.user ??
+        ''
+    ).trim();
+    const displayUser = userLabel || 'Unknown User';
+
+    const startedAtRaw =
+        session?.started_at ??
+        session?.startedAt ??
+        session?.created_at ??
+        session?.createdAt ??
+        session?.opened_at ??
+        session?.openedAt;
+    const startedAtDate = parseSessionDate(startedAtRaw);
+    const startedAtLabel = startedAtDate ? format(startedAtDate, 'PPpp') : '';
+    const pumpName = getSessionPumpName(session);
+    const hasPump = Boolean(pumpName);
+    const pumpLabel = hasPump ? ` • Pump: ${pumpName}` : ' • No Pump';
+
+    const label = startedAtLabel
+        ? `${displayUser} • ${startedAtLabel}${pumpLabel}`
+        : `${displayUser}${pumpLabel}`;
+    const sortValue = startedAtDate ? startedAtDate.getTime() : 0;
+
+    return { id, label, sortValue, hasPump, pumpName: pumpName || undefined };
+};
+
+const getSessionChoicesFromResponse = (response: any): SessionChoice[] => {
+    const rawSessions = Array.isArray(response?.results)
+        ? response.results
+        : Array.isArray(response)
+        ? response
+        : [];
+
+    const uniqueChoices = new Map<string, SessionChoice>();
+    for (const session of rawSessions) {
+        const choice = buildSessionChoice(session);
+        if (choice) {
+            uniqueChoices.set(choice.id, choice);
+        }
+    }
+
+    return Array.from(uniqueChoices.values()).sort((a, b) => b.sortValue - a.sortValue);
+};
+
 export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppliers, onFormSubmit }: { branchId: string; businessType: BusinessType, inventoryItems: InventoryItem[], suppliers: Supplier[], onFormSubmit: () => void }) => {
     const { user } = useAuth();
     const [isSubmitting, setIsSubmitting] = React.useState(false);
     const isSubmittingRef = React.useRef(false);
+    const normalizedUserRole = String(user?.role || '').toLowerCase();
+    const isAdminUser = normalizedUserRole === 'admin' || normalizedUserRole === 'owner' || normalizedUserRole === 'administrator';
+    const manualSessionSelectionRef = React.useRef(false);
     
     // NEW: Get active session ID from Dexie (same pattern as waste form)
     const [sessionId, setSessionId] = React.useState<string | undefined>(undefined);
+    const [resolvedSessionHasPump, setResolvedSessionHasPump] = React.useState<boolean | null>(null);
+    const [availableSessions, setAvailableSessions] = React.useState<SessionChoice[]>([]);
+    const [isLoadingSessionChoices, setIsLoadingSessionChoices] = React.useState(false);
     
     React.useEffect(() => {
         let isCancelled = false;
+        manualSessionSelectionRef.current = false;
+        setAvailableSessions([]);
+        setIsLoadingSessionChoices(false);
 
         const fetchActiveSession = async () => {
             try {
                 if (!branchId) {
                     if (!isCancelled) {
                         setSessionId(undefined);
+                        setResolvedSessionHasPump(null);
                     }
                     return;
                 }
 
                 const backendBranchId = toBackendBranchId(branchId);
+                let resolvedSessionId: string | undefined;
+                let resolvedSessionHasPumpValue: boolean | null = null;
 
                 try {
                     const backendSession = await authFetch.fetch<any>(
                         `/sessions/sessions/active/?branch_id=${encodeURIComponent(backendBranchId)}`
                     );
 
-                    if (!isCancelled && backendSession?.id) {
+                    if (backendSession?.id) {
                         console.log('[ReceiveStockForm] Found active session from backend:', backendSession.id);
-                        setSessionId(String(backendSession.id));
-                        return;
+                        resolvedSessionId = String(backendSession.id);
+                        resolvedSessionHasPumpValue = getSessionHasPump(backendSession);
                     }
                 } catch (backendError) {
                     console.warn('[ReceiveStockForm] Backend active session fetch failed, falling back to Dexie:', backendError);
                 }
 
-                const normalizedBranchId = normalizeBranchId(branchId);
-                const currentUserId = String(user?.uid || '');
-                const currentUserEmail = String(user?.email || '').trim().toLowerCase();
-                const activeSessions = await db.sessions
-                    .where('status')
-                    .equals('active')
-                    .toArray();
+                if (!resolvedSessionId) {
+                    const normalizedBranchId = normalizeBranchId(branchId);
+                    const currentUserId = String(user?.uid || '');
+                    const currentUserEmail = String(user?.email || '').trim().toLowerCase();
+                    const activeSessions = await db.sessions
+                        .where('status')
+                        .equals('active')
+                        .toArray();
 
-                const activeSession = activeSessions
-                    .filter((session) => {
-                        if (normalizeBranchId(session.branchId) !== normalizedBranchId) {
-                            return false;
-                        }
+                    const activeSession = activeSessions
+                        .filter((session) => {
+                            if (normalizeBranchId(session.branchId) !== normalizedBranchId) {
+                                return false;
+                            }
 
-                        const sessionUserId = String(session.userId || '');
-                        const sessionUserEmail = String(session.userEmail || '').trim().toLowerCase();
-                        return sessionUserId === currentUserId || (currentUserEmail !== '' && sessionUserEmail === currentUserEmail);
-                    })
-                    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0];
-                
-                if (!isCancelled) {
+                            const sessionUserId = String(session.userId || '');
+                            const sessionUserEmail = String(session.userEmail || '').trim().toLowerCase();
+                            return sessionUserId === currentUserId || (currentUserEmail !== '' && sessionUserEmail === currentUserEmail);
+                        })
+                        .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0];
+                    
                     if (activeSession?.id) {
                         console.log('[ReceiveStockForm] Found active session in Dexie:', activeSession.id);
-                        setSessionId(activeSession.id);
+                        resolvedSessionId = activeSession.id;
+                        resolvedSessionHasPumpValue = getSessionHasPump(activeSession);
                     } else {
                         console.log('[ReceiveStockForm] No active session found in Dexie');
-                        setSessionId(undefined);
                     }
                 }
+
+                if (resolvedSessionId) {
+                    if (!isCancelled && !manualSessionSelectionRef.current) {
+                        setSessionId(resolvedSessionId);
+                        setResolvedSessionHasPump(resolvedSessionHasPumpValue);
+                    }
+                    if (!isAdminUser) {
+                        return;
+                    }
+                }
+
+                if (!isAdminUser) {
+                    if (!isCancelled) {
+                        setSessionId(undefined);
+                        setResolvedSessionHasPump(null);
+                        setAvailableSessions([]);
+                    }
+                    return;
+                }
+
+                if (!isCancelled) {
+                    setIsLoadingSessionChoices(true);
+                }
+
+                let resolvedChoices: SessionChoice[] = [];
+
+                try {
+                    const businessQuery = user?.businessId
+                        ? `&business_id=${encodeURIComponent(String(user.businessId))}`
+                        : '';
+                    const activeListResponse = await authFetch.fetch<any>(
+                        `/sessions/sessions/active_list/?branch_id=${encodeURIComponent(backendBranchId)}${businessQuery}`
+                    );
+                    resolvedChoices = getSessionChoicesFromResponse(activeListResponse);
+                } catch (activeListError) {
+                    console.warn('[ReceiveStockForm] Backend active_list fetch failed:', activeListError);
+                }
+
+                if (resolvedChoices.length === 0) {
+                    try {
+                        const normalizedBranchId = normalizeBranchId(branchId);
+                        const activeSessions = await db.sessions
+                            .where('status')
+                            .equals('active')
+                            .toArray();
+                        const branchSessions = activeSessions.filter(
+                            (session) => normalizeBranchId(session.branchId) === normalizedBranchId
+                        );
+                        resolvedChoices = getSessionChoicesFromResponse(branchSessions);
+                    } catch (localError) {
+                        console.warn('[ReceiveStockForm] Local active session lookup failed:', localError);
+                    }
+                }
+
+                if (!isCancelled) {
+                    setAvailableSessions(resolvedChoices);
+                    if (!manualSessionSelectionRef.current && !resolvedSessionId) {
+                        if (resolvedChoices.length === 1) {
+                            setSessionId(resolvedChoices[0].id);
+                            setResolvedSessionHasPump(resolvedChoices[0].hasPump);
+                        } else {
+                            setSessionId(undefined);
+                            setResolvedSessionHasPump(null);
+                        }
+                    }
+                    setIsLoadingSessionChoices(false);
+                }
             } catch (error) {
-                console.warn('[ReceiveStockForm] Failed to get session from Dexie:', error);
+                console.warn('[ReceiveStockForm] Failed to resolve session info:', error);
                 if (!isCancelled) {
                     setSessionId(undefined);
+                    setResolvedSessionHasPump(null);
+                    setAvailableSessions([]);
+                    setIsLoadingSessionChoices(false);
                 }
             }
         };
@@ -140,7 +321,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         return () => {
             isCancelled = true;
         };
-    }, [branchId, user?.uid, user?.email]);
+    }, [branchId, user?.uid, user?.email, user?.businessId, isAdminUser]);
     
     // Log suppliers received
     React.useEffect(() => {
@@ -155,14 +336,39 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         }
     });
     const { control, handleSubmit, setValue, getValues } = form;
-    const { fields, append, remove } = useFieldArray({
+    const { fields, append, remove, replace } = useFieldArray({
         control,
         name: "items",
     });
 
     const supplierId = useWatch({ control, name: "supplierId" });
     const watchedItems = useWatch({ control, name: "items" }) || [];
-    const filteredProducts = supplierId 
+    const hasFuelItems = React.useMemo(
+        () => inventoryItems.some((item) => Boolean(item.isFuel)),
+        [inventoryItems]
+    );
+    const hasNonFuelItems = React.useMemo(
+        () => inventoryItems.some((item) => !Boolean(item.isFuel)),
+        [inventoryItems]
+    );
+    const canToggleFuelMode = hasFuelItems && hasNonFuelItems;
+    const [isFuelMode, setIsFuelMode] = React.useState<boolean>(hasFuelItems && !hasNonFuelItems);
+
+    React.useEffect(() => {
+        if (isFuelMode && !hasFuelItems && hasNonFuelItems) {
+            setIsFuelMode(false);
+        } else if (!isFuelMode && !hasNonFuelItems && hasFuelItems) {
+            setIsFuelMode(true);
+        }
+    }, [hasFuelItems, hasNonFuelItems, isFuelMode]);
+
+    const handleFuelModeToggle = React.useCallback((checked: boolean) => {
+        if (!canToggleFuelMode) return;
+        setIsFuelMode(checked);
+        replace([{ productId: '', quantity: 1, cost: 0 }]);
+    }, [replace, canToggleFuelMode]);
+
+    const supplierFilteredProducts = supplierId 
         ? inventoryItems.filter(item => {
             // Match by supplier ID or supplier name
             const itemSupplier = suppliers.find(s => s.id === supplierId);
@@ -171,6 +377,10 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
             return matches && !item.isProduced;
           })
         : inventoryItems.filter(item => !item.isProduced);
+
+    const filteredProducts = supplierFilteredProducts.filter(
+        (item) => Boolean(item.isFuel) === isFuelMode
+    );
 
     const selectedProductIds = React.useMemo(() => {
         const selected = new Set<string>();
@@ -203,6 +413,50 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         );
         return { totalItems, totalQuantity, totalCost };
     }, [watchedItems]);
+
+    const requiredSessionKind: 'pump' | 'no_pump' = isFuelMode ? 'pump' : 'no_pump';
+
+    const applicableSessions = React.useMemo(() => {
+        const requiresPump = requiredSessionKind === 'pump';
+        return availableSessions.filter((session) => session.hasPump === requiresPump);
+    }, [availableSessions, requiredSessionKind]);
+
+    const enforceSessionKind = true;
+
+    const sessionHasPump = React.useMemo(() => {
+        if (!sessionId) return null;
+        const found = availableSessions.find((session) => session.id === sessionId);
+        if (found) return found.hasPump;
+        return resolvedSessionHasPump;
+    }, [sessionId, availableSessions, resolvedSessionHasPump]);
+
+    const hasSessionChoices = applicableSessions.length > 0;
+    const shouldEnforceSessionMatch = isAdminUser ? hasSessionChoices : Boolean(sessionId);
+    const sessionMatchesRequired =
+        sessionHasPump !== null &&
+        (requiredSessionKind === 'pump' ? sessionHasPump : !sessionHasPump);
+    const sessionMismatch = Boolean(
+        shouldEnforceSessionMatch &&
+            sessionId &&
+            !sessionMatchesRequired
+    );
+    const needsSessionSelection =
+        isAdminUser && enforceSessionKind && hasSessionChoices && !sessionId;
+    const isWaitingForSessionChoices =
+        isAdminUser && enforceSessionKind && hasSessionChoices && !sessionId && isLoadingSessionChoices;
+    const shouldShowSessionSelector =
+        isAdminUser && enforceSessionKind && hasSessionChoices && (isLoadingSessionChoices || needsSessionSelection || sessionMismatch);
+    const shouldWarnNoSessions =
+        isAdminUser && enforceSessionKind && !hasSessionChoices && !isLoadingSessionChoices;
+    const sessionIdForSubmit =
+        sessionId && (isAdminUser ? (hasSessionChoices ? sessionMatchesRequired : false) : sessionMatchesRequired)
+            ? sessionId
+            : undefined;
+    const isSubmitDisabled =
+        isSubmitting ||
+        sessionMismatch ||
+        needsSessionSelection ||
+        isWaitingForSessionChoices;
     
     // Log for debugging
     React.useEffect(() => {
@@ -219,6 +473,41 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     const onSubmit = async (data: ReceiveStockFormValues) => {
         if (!user) {
             toast({ variant: 'destructive', title: "User not found" });
+            return;
+        }
+
+        if (sessionMismatch) {
+            toast({
+                variant: 'destructive',
+                title: 'Session type mismatch',
+                description:
+                    requiredSessionKind === 'pump'
+                        ? 'Select a session with a pump for fuel items.'
+                        : 'Select a session without a pump for non-fuel items.',
+            });
+            return;
+        }
+
+        if (needsSessionSelection) {
+            toast({ variant: 'destructive', title: 'Select a session', description: 'Choose an active session to attribute this stock receipt.' });
+            return;
+        }
+
+        const mismatchedItems = (data.items || []).filter((item) => {
+            const productId = String(item?.productId || '').trim();
+            if (!productId) return false;
+            const product = inventoryItems.find((candidate) => String(candidate.id) === productId);
+            if (!product) return false;
+            return Boolean(product.isFuel) !== isFuelMode;
+        });
+        if (mismatchedItems.length > 0) {
+            toast({
+                variant: 'destructive',
+                title: 'Item type mismatch',
+                description: isFuelMode
+                    ? 'Switch to non-fuel mode or remove non-fuel items from this receipt.'
+                    : 'Switch to fuel mode or remove fuel items from this receipt.',
+            });
             return;
         }
 
@@ -281,7 +570,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                         supplierId: selectedSupplier?.id,
                         supplierName: selectedSupplier?.name || 'No Supplier',
                         branchId: branchId,
-                        sessionId: sessionId,  // NEW: Link to active session
+                    sessionId: sessionIdForSubmit,  // Link to active session if available
                         quantityReceived: quantityReceived,
                         quantityRemaining: quantityReceived,
                         costPerUnit: costPerUnit,
@@ -409,6 +698,86 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                             </FormItem>
                         )}
                     />
+                    <div className="rounded-lg border p-3">
+                        <div className="flex items-center justify-between gap-4">
+                            <div className="space-y-1">
+                                <p className="text-sm font-medium">Product Type</p>
+                                <p className="text-xs text-muted-foreground">
+                                    {isFuelMode
+                                        ? 'Fuel items require a pump session.'
+                                        : 'Non-fuel items require a non-pump session.'}
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <span className={cn('text-xs', !isFuelMode ? 'font-semibold text-foreground' : 'text-muted-foreground')}>
+                                    Non-fuel
+                                </span>
+                                <Switch
+                                    checked={isFuelMode}
+                                    onCheckedChange={handleFuelModeToggle}
+                                    disabled={!canToggleFuelMode}
+                                />
+                                <span className={cn('text-xs', isFuelMode ? 'font-semibold text-foreground' : 'text-muted-foreground')}>
+                                    Fuel
+                                </span>
+                            </div>
+                        </div>
+                        {!canToggleFuelMode && (
+                            <p className="text-xs text-muted-foreground mt-2">
+                                {hasFuelItems ? 'Only fuel items are available.' : 'Only non-fuel items are available.'}
+                            </p>
+                        )}
+                    </div>
+                    {shouldShowSessionSelector && (
+                        <FormItem>
+                            <FormLabel>Assign to Session</FormLabel>
+                            <Select
+                                onValueChange={(value) => {
+                                    manualSessionSelectionRef.current = true;
+                                    setSessionId(value);
+                                    const selectedSession = applicableSessions.find((session) => session.id === value);
+                                    setResolvedSessionHasPump(selectedSession ? selectedSession.hasPump : null);
+                                }}
+                                value={sessionId || ''}
+                            >
+                                <FormControl>
+                                    <SelectTrigger disabled={isSubmitting || isLoadingSessionChoices}>
+                                        <SelectValue placeholder={isLoadingSessionChoices ? 'Loading sessions...' : 'Select an active session'} />
+                                    </SelectTrigger>
+                                </FormControl>
+                                <SelectContent>
+                                    {applicableSessions.length > 0 ? (
+                                        applicableSessions.map((session) => (
+                                            <SelectItem key={session.id} value={session.id}>
+                                                {session.label}
+                                            </SelectItem>
+                                        ))
+                                    ) : (
+                                        <SelectItem value="loading" disabled>
+                                            {isLoadingSessionChoices ? 'Loading sessions...' : 'No active sessions'}
+                                        </SelectItem>
+                                    )}
+                                </SelectContent>
+                            </Select>
+                            {needsSessionSelection && (
+                                <p className="text-xs text-destructive">Select an active session to continue.</p>
+                            )}
+                            {sessionMismatch && (
+                                <p className="text-xs text-destructive">
+                                    {requiredSessionKind === 'pump'
+                                        ? 'Current session has no pump. Select a pump session.'
+                                        : 'Current session has a pump. Select a non-pump session.'}
+                                </p>
+                            )}
+                        </FormItem>
+                    )}
+                    {shouldWarnNoSessions && (
+                        <div className="text-xs text-muted-foreground">
+                            {requiredSessionKind === 'pump'
+                                ? 'No active pump sessions found for this branch.'
+                                : 'No active non-pump sessions found for this branch.'}
+                        </div>
+                    )}
                 </div>
                 
                 <Separator />
@@ -552,7 +921,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                 </div>
 
                 <DialogFooter>
-                    <Button type="submit" disabled={isSubmitting}>
+                    <Button type="submit" disabled={isSubmitDisabled}>
                         {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                         {isSubmitting ? 'Submitting...' : 'Receive Stock'}
                     </Button>

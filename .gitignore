@@ -11,7 +11,6 @@
 !.yarn/versions
 
 # exclude non-Next.js apps
-/backend/
 /handy-agent-app/
 
 # testing
@@ -33,6 +32,16 @@
 *.zip
 *.exe
 *.msi
+
+# python
+__pycache__/
+*.py[cod]
+*.pyd
+*.egg-info/
+*.egg
+.venv/
+venv/
+backend/.venv/
 
 # debug
 npm-debug.log*
@@ -67,3 +76,6 @@ src-tauri/target/
 src-tauri/Cargo.lock
 src-tauri/backend-bundle/*
 !src-tauri/backend-bundle/.keep
+handypos-release.jks
+key_pair
+key_pair.pub

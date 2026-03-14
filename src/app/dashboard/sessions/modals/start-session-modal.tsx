@@ -302,12 +302,29 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
 
             console.log('[Sessions] Session created on backend:', response);
 
-            // Save to local DB for offline access
+            const resolvedSessionId = String(response?.id || sessionData.id);
+            const responseUserName =
+                response?.user_name ||
+                response?.userName ||
+                response?.user_email ||
+                user.displayName ||
+                user.email ||
+                'Unknown User';
+            const responseUserEmail =
+                response?.user_email ||
+                response?.userEmail ||
+                user.email ||
+                '';
+            const responseUserId = String(response?.user || response?.user_id || user.uid || '');
+            const startedAt = response?.started_at || response?.startedAt || new Date().toISOString();
+
+            // Save to local DB for offline access (use backend user/session details as source of truth)
             await db.sessions.add({
-                id: sessionData.id,
+                id: resolvedSessionId,
                 branchId: activeBranchId,
-                userId: user.uid,
-                userName: user.displayName || user.email || 'Unknown User',
+                userId: responseUserId,
+                userName: responseUserName,
+                userEmail: responseUserEmail,
                 status: 'active',
                 pumpName: selectedPump || undefined,
                 openingFloat: openingFloat,
@@ -320,19 +337,19 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                 totalOnAccountSales: 0,
                 totalOtherSales: 0,
                 totalTips: 0,
-                startedAt: new Date().toISOString(),
+                startedAt,
             });
 
-            console.log('[Sessions] Session saved to local DB:', sessionData.id);
+            console.log('[Sessions] Session saved to local DB:', resolvedSessionId);
 
             // Log audit action
             await logAuditAction({
-                userId: user.uid,
-                userName: user.displayName || user.email || 'Unknown',
+                userId: responseUserId || user.uid,
+                userName: responseUserName || user.displayName || user.email || 'Unknown',
                 branchId: activeBranchId,
                 actionType: 'SESSION_START',
                 entityType: 'Session',
-                entityId: sessionData.id,
+                entityId: resolvedSessionId,
                 details: { openingFloat: openingFloat },
             });
 
@@ -341,7 +358,7 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
             // CRITICAL: Immediately refresh active session in POS modal
             // Dispatch custom event to notify POS modal to fetch the new session
             window.dispatchEvent(new CustomEvent('sessionCreated', { 
-              detail: { sessionId: sessionData.id, branchId: activeBranchId }
+              detail: { sessionId: resolvedSessionId, branchId: activeBranchId }
             }));
             console.log('[Sessions] Dispatched sessionCreated event for POS modal refresh');
             

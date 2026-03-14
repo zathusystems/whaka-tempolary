@@ -55,6 +55,8 @@ const areForcedFlagsOn = (value: PrinterSettings): boolean => (
 
 export function PrinterConfigScreen() {
   const { toast } = useToast();
+  const isWindows =
+    typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('windows');
   const [printers, setPrinters] = useState<PrinterConfig[]>([]);
   const [settings, setSettings] = useState<PrinterSettings | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -419,8 +421,9 @@ export function PrinterConfigScreen() {
                               if (e.key === 'Enter') {
                                 const name = (e.target as HTMLInputElement).value.trim();
                                 if (name) {
+                                  const manualId = isWindows ? `win:${name}` : `manual-${Date.now()}`;
                                   const manualPrinter: DiscoveredPrinter = {
-                                    id: `manual-${Date.now()}`,
+                                    id: manualId,
                                     name,
                                     type: 'unknown',
                                     status: 'ready',
@@ -439,8 +442,9 @@ export function PrinterConfigScreen() {
                               const input = (e.currentTarget.parentElement?.querySelector('#manual-printer-name') as HTMLInputElement);
                               const name = input?.value.trim();
                               if (name) {
+                                const manualId = isWindows ? `win:${name}` : `manual-${Date.now()}`;
                                 const manualPrinter: DiscoveredPrinter = {
-                                  id: `manual-${Date.now()}`,
+                                  id: manualId,
                                   name,
                                   type: 'unknown',
                                   status: 'ready',

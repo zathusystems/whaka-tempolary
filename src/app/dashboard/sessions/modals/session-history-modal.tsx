@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import SessionDetailDialog from './session-detail-modal';
 
 const LOCAL_STORAGE_KEYS = {
@@ -92,6 +93,11 @@ const formatSessionDate = (value?: string) => {
   return format(dt, 'PP');
 };
 
+const hasPumpName = (session: Session) => {
+  const pumpName = String(session.pumpName ?? '').trim();
+  return pumpName !== '';
+};
+
 export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = null }: SessionHistoryModalProps) {
     const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
     const [viewingSession, setViewingSession] = useState<Session | null>(null);
@@ -99,6 +105,7 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
     const { user } = useAuth();
     const [closedSessions, setClosedSessions] = useState<Session[]>([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [activeTab, setActiveTab] = useState<'fuel' | 'nonFuel'>('fuel');
 
     useEffect(() => {
         if (branchId) {
@@ -239,6 +246,58 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
         );
     }
 
+    const fuelSessions = closedSessions.filter((session) => hasPumpName(session));
+    const nonFuelSessions = closedSessions.filter((session) => !hasPumpName(session));
+
+    const renderSessionsTable = (sessions: Session[], emptyMessage: string, showPump: boolean) => (
+        <Table>
+            <TableHeader>
+                <TableRow>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Started By</TableHead>
+                    {showPump && <TableHead>Pump</TableHead>}
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Total Sales</TableHead>
+                    <TableHead className="text-right">Cash Difference</TableHead>
+                    <TableHead className="w-auto text-right">
+                        <span className="sr-only">Actions</span>
+                    </TableHead>
+                </TableRow>
+            </TableHeader>
+            <TableBody>
+                {sessions.length > 0 ? (
+                    sessions.map((session) => (
+                        <TableRow key={session.id}>
+                            <TableCell>{formatSessionDate(session.startedAt)}</TableCell>
+                            <TableCell>{session.userName}</TableCell>
+                            {showPump && <TableCell>{session.pumpName || '-'}</TableCell>}
+                            <TableCell><Badge variant="secondary">Closed</Badge></TableCell>
+                            <TableCell className="text-right font-medium">{formatCurrency(session.totalSales || 0)}</TableCell>
+                            <TableCell className={`text-right font-medium ${(session.difference || 0) !== 0 ? 'text-destructive' : ''}`}>
+                                {formatCurrency(session.difference || 0)}
+                            </TableCell>
+                            <TableCell>
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => setViewingSession(session)}
+                                >
+                                    <MoreHorizontal className="h-4 w-4" />
+                                </Button>
+                            </TableCell>
+                        </TableRow>
+                    ))
+                ) : (
+                    <TableRow>
+                        <TableCell colSpan={showPump ? 7 : 6} className="h-24 text-center">
+                            {emptyMessage}
+                        </TableCell>
+                    </TableRow>
+                )}
+            </TableBody>
+        </Table>
+    );
+
     return (
         <Dialog open={isOpen} onOpenChange={onOpenChange}>
             <DialogContent className="sm:max-w-4xl max-h-[90vh] flex flex-col">
@@ -252,48 +311,26 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
                         </div>
                     ) : (
-                        <Table>
-                            <TableHeader>
-                                <TableRow>
-                                    <TableHead>Date</TableHead>
-                                    <TableHead>Started By</TableHead>
-                                    <TableHead>Status</TableHead>
-                                    <TableHead className="text-right">Total Sales</TableHead>
-                                    <TableHead className="text-right">Cash Difference</TableHead>
-                                    <TableHead className="w-auto text-right"><span className="sr-only">Actions</span></TableHead>
-                                </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                                {closedSessions && closedSessions.length > 0 ? (
-                                    closedSessions.map(s => (
-                                        <TableRow key={s.id}>
-                                            <TableCell>{formatSessionDate(s.startedAt)}</TableCell>
-                                            <TableCell>{s.userName}</TableCell>
-                                            <TableCell><Badge variant="secondary">Closed</Badge></TableCell>
-                                            <TableCell className="text-right font-medium">{formatCurrency(s.totalSales || 0)}</TableCell>
-                                            <TableCell className={`text-right font-medium ${(s.difference || 0) !== 0 ? 'text-destructive' : ''}`}>
-                                                {formatCurrency(s.difference || 0)}
-                                            </TableCell>
-                                            <TableCell>
-                                                 <Button 
-                                                    variant="ghost" 
-                                                    size="icon"
-                                                    onClick={() => setViewingSession(s)}
-                                                 >
-                                                    <MoreHorizontal className="h-4 w-4" />
-                                                 </Button>
-                                            </TableCell>
-                                        </TableRow>
-                                    ))
-                                ) : (
-                                    <TableRow>
-                                        <TableCell colSpan={6} className="h-24 text-center">
-                                            No closed sessions found for this branch.
-                                        </TableCell>
-                                    </TableRow>
+                        <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'fuel' | 'nonFuel')}>
+                            <TabsList className="mb-4">
+                                <TabsTrigger value="fuel">Fuel Sessions</TabsTrigger>
+                                <TabsTrigger value="nonFuel">Non-Pump Sessions</TabsTrigger>
+                            </TabsList>
+                            <TabsContent value="fuel">
+                                {renderSessionsTable(
+                                    fuelSessions,
+                                    'No closed pump sessions found for this branch.',
+                                    true
                                 )}
-                            </TableBody>
-                        </Table>
+                            </TabsContent>
+                            <TabsContent value="nonFuel">
+                                {renderSessionsTable(
+                                    nonFuelSessions,
+                                    'No closed non-pump sessions found for this branch.',
+                                    false
+                                )}
+                            </TabsContent>
+                        </Tabs>
                     )}
                 </div>
             </DialogContent>

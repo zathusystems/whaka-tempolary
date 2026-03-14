@@ -141,13 +141,25 @@ class PrinterDiscoveryService {
           ? 'network'
           : 'usb';
 
+        const rawName = String(printer.name || '').trim();
+        const rawId = String(printer.id || '').trim();
+        let id = rawId || rawName || `printer-${Date.now()}`;
+
+        // On Windows, ensure we store a spooler queue id to match the native backend.
+        if (this.isWindowsEnvironment() && rawName) {
+          const lowerId = id.toLowerCase();
+          if (!lowerId.startsWith('win:')) {
+            id = `win:${rawName}`;
+          }
+        }
+
         return {
-          id: printer.id || printer.name || `printer-${Date.now()}`,
-          name: printer.name || 'Unknown Printer',
+          id,
+          name: rawName || 'Unknown Printer',
           type: mappedType,
           status: (printer.status || 'ready') as 'ready' | 'offline' | 'error' | 'unknown',
           isDefault: printer.is_default || false,
-          description: printer.description || `System printer: ${printer.name}`,
+          description: printer.description || `System printer: ${rawName || 'Unknown Printer'}`,
         };
       });
 
@@ -389,6 +401,15 @@ class PrinterDiscoveryService {
       return result;
     } catch (error) {
       console.error('[PrinterDiscovery] Error checking Tauri environment:', error);
+      return false;
+    }
+  }
+
+  private isWindowsEnvironment(): boolean {
+    try {
+      const userAgent = navigator.userAgent.toLowerCase();
+      return userAgent.includes('windows');
+    } catch {
       return false;
     }
   }

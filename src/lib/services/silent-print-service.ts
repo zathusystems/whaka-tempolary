@@ -36,16 +36,32 @@ class SilentPrintService {
 
       console.log('[SilentPrint] Attempting system print to:', printerName);
 
-      // Check if running in Tauri environment
-      if (this.isTauriAvailable()) {
-        const resolvedPrinterId = await this.resolvePrinterId(printerId, printerName);
+      // Prefer native Tauri printing when available (more reliable than UA detection).
+      const tauriInvoke = await this.getTauriInvoke();
+      if (tauriInvoke) {
+        const resolvedPrinterId = await this.resolvePrinterId(printerId, printerName, tauriInvoke);
         if (resolvedPrinterId) {
-          return await this.printViaTauri(htmlContent, resolvedPrinterId, copies, paperSize, printerPaperSize);
+          const tauriResult = await this.printViaTauri(
+            htmlContent,
+            resolvedPrinterId,
+            copies,
+            paperSize,
+            printerPaperSize
+          );
+
+          if (!tauriResult && this.isWindowsEnvironment()) {
+            console.warn('[SilentPrint] Tauri print failed on Windows, trying browser fallback.');
+            return await this.printViaIframe(htmlContent, copies, paperSize);
+          }
+
+          return tauriResult;
         }
 
         // No usable native printer ID: fallback to browser print path.
         console.warn('[SilentPrint] Could not resolve a native printer ID, falling back to browser print.');
-        return await this.printViaAutoSubmit(htmlContent, copies, paperSize);
+        return this.isWindowsEnvironment()
+          ? await this.printViaIframe(htmlContent, copies, paperSize)
+          : await this.printViaAutoSubmit(htmlContent, copies, paperSize);
       }
 
       // Check if running in Electron environment
@@ -83,6 +99,15 @@ class SilentPrintService {
     try {
       return typeof (window as any).electron !== 'undefined' || 
              typeof (window as any).require !== 'undefined';
+    } catch {
+      return false;
+    }
+  }
+
+  private isWindowsEnvironment(): boolean {
+    try {
+      const userAgent = navigator.userAgent.toLowerCase();
+      return userAgent.includes('windows');
     } catch {
       return false;
     }
@@ -133,16 +158,23 @@ class SilentPrintService {
       return false;
     }
 
+    const lower = normalized.toLowerCase();
+    const isWindows = this.isWindowsEnvironment();
+
     if (/^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$/.test(normalized)) {
-      return true; // Raw USB VID:PID
+      return !isWindows; // Raw USB VID:PID (not supported on Windows backend)
     }
 
-    if (normalized.toLowerCase().startsWith('cups:')) {
-      return true; // System print queue (USB/Network/Bluetooth)
+    if (lower.startsWith('cups:')) {
+      return !isWindows; // CUPS queues are non-Windows
     }
 
-    if (normalized.toLowerCase().startsWith('bt:')) {
-      return true; // Paired Bluetooth alias
+    if (lower.startsWith('bt:')) {
+      return !isWindows; // Direct BT IDs are non-Windows
+    }
+
+    if (lower.startsWith('win:')) {
+      return isWindows; // Windows spooler queue
     }
 
     return false;
@@ -175,7 +207,11 @@ class SilentPrintService {
     return null;
   }
 
-  private async resolvePrinterId(printerId?: string, printerName?: string): Promise<string | null> {
+  private async resolvePrinterId(
+    printerId?: string,
+    printerName?: string,
+    invokeOverride?: (command: string, args?: Record<string, unknown>) => Promise<any>
+  ): Promise<string | null> {
     if (this.isNativePrinterId(printerId)) {
       return printerId!.trim();
     }
@@ -184,25 +220,49 @@ class SilentPrintService {
       return printerName!.trim();
     }
 
-    const invoke = await this.getTauriInvoke();
+    const invoke = invokeOverride ?? (await this.getTauriInvoke());
     if (!invoke) {
       return null;
     }
 
     try {
       const printers = await invoke('get_printers');
-      if (!Array.isArray(printers) || !printerName) {
+      if (!Array.isArray(printers)) {
         return null;
       }
 
-      const normalizedTargetName = printerName.trim().toLowerCase();
-      const match = printers.find((printer: any) => {
-        const name = String(printer?.name || '').trim().toLowerCase();
-        const id = String(printer?.id || '').trim();
-        return name === normalizedTargetName && this.isNativePrinterId(id);
-      });
+      if (printerName) {
+        const normalizedTargetName = printerName.trim().toLowerCase();
+        const match = printers.find((printer: any) => {
+          const name = String(printer?.name || '').trim().toLowerCase();
+          const id = String(printer?.id || '').trim();
+          return name === normalizedTargetName && this.isNativePrinterId(id);
+        });
 
-      return match ? String(match.id).trim() : null;
+        if (match) {
+          return String(match.id).trim();
+        }
+      }
+
+      // Windows backend only accepts system queues; fall back to default queue if we can.
+      if (this.isWindowsEnvironment()) {
+        const defaultPrinter = printers.find((printer: any) => printer?.is_default || printer?.isDefault);
+        if (defaultPrinter) {
+          const id = String(defaultPrinter?.id || '').trim();
+          if (this.isNativePrinterId(id)) {
+            return id;
+          }
+        }
+
+        if (printers.length === 1) {
+          const onlyId = String(printers[0]?.id || '').trim();
+          if (this.isNativePrinterId(onlyId)) {
+            return onlyId;
+          }
+        }
+      }
+
+      return null;
     } catch (error) {
       console.error('[SilentPrint] Failed to resolve printer ID from discovery:', error);
       return null;
@@ -257,8 +317,8 @@ class SilentPrintService {
         const printWindow = window.open('', '', 'width=800,height=600');
         
         if (!printWindow) {
-          console.error('[SilentPrint] Could not open print window');
-          return false;
+          console.warn('[SilentPrint] Could not open print window, falling back to iframe printing');
+          return await this.printViaIframe(htmlContent, copies, paperSize);
         }
 
         // Write content to print window
@@ -323,6 +383,90 @@ class SilentPrintService {
       return true;
     } catch (error) {
       console.error('[SilentPrint] Auto-submit print error:', error);
+      return false;
+    }
+  }
+
+  private async printViaIframe(
+    htmlContent: string,
+    copies: number,
+    paperSize: '80mm' | '58mm'
+  ): Promise<boolean> {
+    try {
+      console.log('[SilentPrint] Using iframe print fallback');
+
+      const printWidth = paperSize === '58mm' ? '58mm' : '80mm';
+
+      for (let i = 0; i < copies; i++) {
+        const iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        iframe.style.visibility = 'hidden';
+        iframe.style.position = 'absolute';
+        iframe.style.left = '-9999px';
+        iframe.style.width = printWidth;
+        iframe.style.height = 'auto';
+        document.body.appendChild(iframe);
+
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+        if (!iframeDoc) {
+          throw new Error('Could not access iframe document');
+        }
+
+        iframeDoc.write(`
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <style>
+                * {
+                  margin: 0;
+                  padding: 0;
+                  box-sizing: border-box;
+                }
+                body {
+                  font-family: 'Courier New', monospace;
+                  font-size: 12px;
+                  width: ${printWidth};
+                  margin: 0;
+                  padding: 0;
+                }
+                @media print {
+                  * {
+                    margin: 0 !important;
+                    padding: 0 !important;
+                  }
+                  @page {
+                    size: ${printWidth} auto;
+                    margin: 0;
+                  }
+                }
+              </style>
+            </head>
+            <body>
+              ${i > 0 ? `<div style="text-align: center; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed; font-weight: bold;">*** COPY #${i + 1} ***</div>` : ''}
+              ${htmlContent}
+            </body>
+          </html>
+        `);
+        iframeDoc.close();
+
+        await new Promise(resolve => setTimeout(resolve, 300));
+
+        iframe.contentWindow?.print();
+
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        try {
+          document.body.removeChild(iframe);
+        } catch (error) {
+          console.warn('[SilentPrint] Failed to remove print iframe:', error);
+        }
+      }
+
+      return true;
+    } catch (error) {
+      console.error('[SilentPrint] Iframe print error:', error);
       return false;
     }
   }

@@ -1,6 +1,10 @@
 mod receipt_formatter;
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), target_os = "windows"))]
+#[path = "printer/windows.rs"]
+mod desktop;
+
+#[cfg(all(not(target_os = "android"), not(target_os = "windows")))]
 #[path = "printer/desktop.rs"]
 mod desktop;
 

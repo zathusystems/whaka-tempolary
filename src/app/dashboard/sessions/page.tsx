@@ -1656,19 +1656,29 @@ export default function SessionsPage() {
     const normalizedUserRole = String(user?.role || '').toLowerCase();
     const isAdminUser = normalizedUserRole === 'admin' || normalizedUserRole === 'owner' || normalizedUserRole === 'administrator';
     const listedSessions = useMemo(
-        () => mergeSessions([...activeSessions, ...todayClosedSessions]),
-        [activeSessions, todayClosedSessions]
+        () => mergeSessions([...activeSessions, ...carryoverActiveSessions]),
+        [activeSessions, carryoverActiveSessions]
     );
-    const manageableSessions = useMemo(
-        () => mergeSessions([...listedSessions, ...carryoverActiveSessions]),
-        [listedSessions, carryoverActiveSessions]
-    );
+    const manageableSessions = listedSessions;
     const totalActiveSessions = activeSessions.length + carryoverActiveSessions.length;
+    const hasOwnActiveSession = useMemo(
+        () => manageableSessions.some((session) => session.status === 'active' && isOwnSession(session)),
+        [manageableSessions]
+    );
     const canCloseActiveSession =
         !!activeSession &&
         activeSession.status === 'active' &&
         (isOwnSession(activeSession) || isAdminUser);
     const keepCloseDialogMounted = canCloseActiveSession || isCloseModalOpen;
+    const hasPumpName = (value?: string | null) => Boolean(String(value ?? '').trim());
+    const fuelActiveSessions = useMemo(
+        () => listedSessions.filter((session) => hasPumpName(session.pumpName)),
+        [listedSessions]
+    );
+    const nonFuelActiveSessions = useMemo(
+        () => listedSessions.filter((session) => !hasPumpName(session.pumpName)),
+        [listedSessions]
+    );
 
     const formatSessionDateTime = (value?: string) => {
         if (!value) return '-';
@@ -1698,139 +1708,159 @@ export default function SessionsPage() {
                     <Button variant="outline" onClick={() => setHistoryModalOpen(true)}>
                         <History className="mr-2 h-4 w-4" /> History
                     </Button>
-                    {totalActiveSessions === 0 && (
-                        <Dialog open={isStartModalOpen} onOpenChange={setStartModalOpen}>
-                            <DialogTrigger asChild>
-                                <Button><PlusCircle className="mr-2 h-4 w-4" /> Start New Session</Button>
-                            </DialogTrigger>
-                            <DialogContent className="sm:max-w-md">
-                                <DialogHeader>
-                                    <DialogTitle>Start a New Session</DialogTitle>
-                                    <DialogDescription>Enter the opening cash float and review inventory to begin your session.</DialogDescription>
-                                </DialogHeader>
-                                <StartSessionForm onSessionStarted={async () => {
-                                    setStartModalOpen(false);
-                                    // Reload active sessions from backend
-                                    await fetchActiveSessions(activeBranchId);
-                                }} />
-                            </DialogContent>
-                        </Dialog>
-                    )}
+                    <Dialog open={isStartModalOpen} onOpenChange={setStartModalOpen}>
+                        <DialogTrigger asChild>
+                            <Button disabled={hasOwnActiveSession}>
+                                <PlusCircle className="mr-2 h-4 w-4" /> Start New Session
+                            </Button>
+                        </DialogTrigger>
+                        <DialogContent className="sm:max-w-md">
+                            <DialogHeader>
+                                <DialogTitle>Start a New Session</DialogTitle>
+                                <DialogDescription>Enter the opening cash float and review inventory to begin your session.</DialogDescription>
+                            </DialogHeader>
+                            <StartSessionForm onSessionStarted={async () => {
+                                setStartModalOpen(false);
+                                // Reload active sessions from backend
+                                await fetchActiveSessions(activeBranchId);
+                            }} />
+                        </DialogContent>
+                    </Dialog>
                 </div>
             </div>
 
             {listedSessions.length > 0 && (
                 <Card>
                     <CardHeader>
-                        <CardTitle>Today's Sessions In This Branch</CardTitle>
+                        <CardTitle>Active Sessions In This Branch</CardTitle>
                         <CardDescription>
-                            {activeSessions.length} active, {todayClosedSessions.length} closed (started today).
+                            {totalActiveSessions} active.
                             {isAdminUser ? ' Admins can switch to and close any active session.' : ''}
                         </CardDescription>
                     </CardHeader>
                     <CardContent>
-                        <ScrollArea className="w-full">
-                            <Table>
-                                <TableHeader>
-                                    <TableRow>
-                                        <TableHead>Started By</TableHead>
-                                        <TableHead>Email</TableHead>
-                                        <TableHead>Started At</TableHead>
-                                        <TableHead className="text-right">Sales</TableHead>
-                                        <TableHead>Status</TableHead>
-                                        <TableHead className="text-right">Action</TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {listedSessions.map((session) => {
-                                        const isSelected = activeSession?.id === session.id;
-                                        const isClosed = session.status === 'closed';
-
-                                        return (
-                                            <TableRow key={session.id} className={isSelected ? 'bg-muted/40' : undefined}>
-                                                <TableCell className="font-medium">{session.userName}</TableCell>
-                                                <TableCell>{session.userEmail || '-'}</TableCell>
-                                                <TableCell>{formatSessionDateTime(session.startedAt)}</TableCell>
-                                                <TableCell className="text-right">{formatCurrency(session.totalSales || 0)}</TableCell>
-                                                <TableCell>
-                                                    <Badge variant={isSelected ? 'default' : isClosed ? 'outline' : 'secondary'}>
-                                                        {isSelected ? (isClosed ? 'Selected (Closed)' : 'Selected') : isClosed ? 'Closed' : 'Active'}
-                                                    </Badge>
-                                                </TableCell>
-                                                <TableCell className="text-right">
-                                                    <Button
-                                                        size="sm"
-                                                        variant={isSelected ? 'secondary' : 'outline'}
-                                                        onClick={() => void handleSwitchActiveSession(session.id)}
-                                                        disabled={isLoadingSession || isSelected}
-                                                    >
-                                                        {isSelected ? 'Viewing' : 'View'}
-                                                    </Button>
-                                                </TableCell>
+                        <Tabs defaultValue="fuel" className="w-full">
+                            <TabsList className="grid h-auto w-full grid-cols-1 sm:grid-cols-2">
+                                <TabsTrigger value="fuel" className="text-xs sm:text-sm">
+                                    Fuel Sessions ({fuelActiveSessions.length})
+                                </TabsTrigger>
+                                <TabsTrigger value="non-fuel" className="text-xs sm:text-sm">
+                                    Normal Sessions ({nonFuelActiveSessions.length})
+                                </TabsTrigger>
+                            </TabsList>
+                            <TabsContent value="fuel" className="mt-4">
+                                <ScrollArea className="w-full">
+                                    <Table>
+                                        <TableHeader>
+                                            <TableRow>
+                                                <TableHead>Started By</TableHead>
+                                                <TableHead>Pump</TableHead>
+                                                <TableHead>Email</TableHead>
+                                                <TableHead>Started At</TableHead>
+                                                <TableHead className="text-right">Sales</TableHead>
+                                                <TableHead>Status</TableHead>
+                                                <TableHead className="text-right">Action</TableHead>
                                             </TableRow>
-                                        );
-                                    })}
-                                </TableBody>
-                            </Table>
-                        </ScrollArea>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {fuelActiveSessions.length === 0 ? (
+                                                <TableRow>
+                                                    <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
+                                                        No active fuel sessions.
+                                                    </TableCell>
+                                                </TableRow>
+                                            ) : (
+                                                fuelActiveSessions.map((session) => {
+                                                    const isSelected = activeSession?.id === session.id;
+
+                                                    return (
+                                                        <TableRow key={session.id} className={isSelected ? 'bg-muted/40' : undefined}>
+                                                            <TableCell className="font-medium">{session.userName}</TableCell>
+                                                            <TableCell>{session.pumpName || '-'}</TableCell>
+                                                            <TableCell>{session.userEmail || '-'}</TableCell>
+                                                            <TableCell>{formatSessionDateTime(session.startedAt)}</TableCell>
+                                                            <TableCell className="text-right">{formatCurrency(session.totalSales || 0)}</TableCell>
+                                                            <TableCell>
+                                                                <Badge variant={isSelected ? 'default' : 'secondary'}>
+                                                                    {isSelected ? 'Selected' : 'Active'}
+                                                                </Badge>
+                                                            </TableCell>
+                                                            <TableCell className="text-right">
+                                                                <Button
+                                                                    size="sm"
+                                                                    variant={isSelected ? 'secondary' : 'outline'}
+                                                                    onClick={() => void handleSwitchActiveSession(session.id)}
+                                                                    disabled={isLoadingSession || isSelected}
+                                                                >
+                                                                    {isSelected ? 'Viewing' : 'View'}
+                                                                </Button>
+                                                            </TableCell>
+                                                        </TableRow>
+                                                    );
+                                                })
+                                            )}
+                                        </TableBody>
+                                    </Table>
+                                </ScrollArea>
+                            </TabsContent>
+                            <TabsContent value="non-fuel" className="mt-4">
+                                <ScrollArea className="w-full">
+                                    <Table>
+                                        <TableHeader>
+                                            <TableRow>
+                                                <TableHead>Started By</TableHead>
+                                                <TableHead>Email</TableHead>
+                                                <TableHead>Started At</TableHead>
+                                                <TableHead className="text-right">Sales</TableHead>
+                                                <TableHead>Status</TableHead>
+                                                <TableHead className="text-right">Action</TableHead>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {nonFuelActiveSessions.length === 0 ? (
+                                                <TableRow>
+                                                    <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
+                                                        No active normal sessions.
+                                                    </TableCell>
+                                                </TableRow>
+                                            ) : (
+                                                nonFuelActiveSessions.map((session) => {
+                                                    const isSelected = activeSession?.id === session.id;
+
+                                                    return (
+                                                        <TableRow key={session.id} className={isSelected ? 'bg-muted/40' : undefined}>
+                                                            <TableCell className="font-medium">{session.userName}</TableCell>
+                                                            <TableCell>{session.userEmail || '-'}</TableCell>
+                                                            <TableCell>{formatSessionDateTime(session.startedAt)}</TableCell>
+                                                            <TableCell className="text-right">{formatCurrency(session.totalSales || 0)}</TableCell>
+                                                            <TableCell>
+                                                                <Badge variant={isSelected ? 'default' : 'secondary'}>
+                                                                    {isSelected ? 'Selected' : 'Active'}
+                                                                </Badge>
+                                                            </TableCell>
+                                                            <TableCell className="text-right">
+                                                                <Button
+                                                                    size="sm"
+                                                                    variant={isSelected ? 'secondary' : 'outline'}
+                                                                    onClick={() => void handleSwitchActiveSession(session.id)}
+                                                                    disabled={isLoadingSession || isSelected}
+                                                                >
+                                                                    {isSelected ? 'Viewing' : 'View'}
+                                                                </Button>
+                                                            </TableCell>
+                                                        </TableRow>
+                                                    );
+                                                })
+                                            )}
+                                        </TableBody>
+                                    </Table>
+                                </ScrollArea>
+                            </TabsContent>
+                        </Tabs>
                     </CardContent>
                 </Card>
             )}
 
-            {carryoverActiveSessions.length > 0 && (
-                <Card>
-                    <CardHeader>
-                        <CardTitle>Carryover Active Sessions</CardTitle>
-                        <CardDescription>
-                            {carryoverActiveSessions.length} active session{carryoverActiveSessions.length !== 1 ? 's' : ''} started before today.
-                        </CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                        <ScrollArea className="w-full">
-                            <Table>
-                                <TableHeader>
-                                    <TableRow>
-                                        <TableHead>Started By</TableHead>
-                                        <TableHead>Email</TableHead>
-                                        <TableHead>Started At</TableHead>
-                                        <TableHead className="text-right">Sales</TableHead>
-                                        <TableHead>Status</TableHead>
-                                        <TableHead className="text-right">Action</TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {carryoverActiveSessions.map((session) => {
-                                        const isSelected = activeSession?.id === session.id;
-                                        return (
-                                            <TableRow key={session.id} className={isSelected ? 'bg-muted/40' : undefined}>
-                                                <TableCell className="font-medium">{session.userName}</TableCell>
-                                                <TableCell>{session.userEmail || '-'}</TableCell>
-                                                <TableCell>{formatSessionDateTime(session.startedAt)}</TableCell>
-                                                <TableCell className="text-right">{formatCurrency(session.totalSales || 0)}</TableCell>
-                                                <TableCell>
-                                                    <Badge variant={isSelected ? 'default' : 'secondary'}>
-                                                        {isSelected ? 'Selected' : 'Active (Earlier)'}
-                                                    </Badge>
-                                                </TableCell>
-                                                <TableCell className="text-right">
-                                                    <Button
-                                                        size="sm"
-                                                        variant={isSelected ? 'secondary' : 'outline'}
-                                                        onClick={() => void handleSwitchActiveSession(session.id)}
-                                                        disabled={isLoadingSession || isSelected}
-                                                    >
-                                                        {isSelected ? 'Viewing' : 'View'}
-                                                    </Button>
-                                                </TableCell>
-                                            </TableRow>
-                                        );
-                                    })}
-                                </TableBody>
-                            </Table>
-                        </ScrollArea>
-                    </CardContent>
-                </Card>
-            )}
 
             {isLoadingSession ? (
                 <Card className="flex flex-col items-center justify-center py-12">

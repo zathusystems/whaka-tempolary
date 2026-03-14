@@ -47,6 +47,7 @@ jobs:
         run: |
           sdkmanager --licenses
           sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" "ndk;26.1.10909125"
+
       - name: Configure Android SDK/NDK
         run: |
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"

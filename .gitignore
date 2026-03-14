@@ -42,6 +42,10 @@ __pycache__/
 .venv/
 venv/
 backend/.venv/
+backend/db.sqlite3
+backend/db.test.sqlite3
+backend/db.sqlite3-journal
+backend/staticfiles/
 
 # debug
 npm-debug.log*
@@ -76,6 +80,8 @@ src-tauri/target/
 src-tauri/Cargo.lock
 src-tauri/backend-bundle/*
 !src-tauri/backend-bundle/.keep
+src-tauri/gen/android/
+src-tauri/gen/schemas/
 handypos-release.jks
 key_pair
 key_pair.pub

@@ -628,10 +628,10 @@ class ExpenseSerializer(serializers.ModelSerializer):
         model = Expense
         fields = [
             'id', 'business', 'branch', 'title', 'category', 'amount', 'date',
-            'notes', 'status', 'created_by', 'created_at', 'approved_by',
-            'approved_at'
+            'notes', 'status', 'created_by', 'created_at', 'updated_at',
+            'approved_by', 'approved_at'
         ]
-        read_only_fields = ['id', 'business', 'created_at']
+        read_only_fields = ['id', 'business', 'created_at', 'updated_at']
 
 
 class ExpenseCreateSerializer(serializers.ModelSerializer):

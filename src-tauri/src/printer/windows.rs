@@ -3,11 +3,12 @@ use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use tauri::command;
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{GetLastError, HANDLE};
+use windows::Win32::Foundation::GetLastError;
 use windows::Win32::Graphics::Printing::{
     ClosePrinter, EndDocPrinter, EndPagePrinter, EnumPrintersW, GetDefaultPrinterW,
     OpenPrinterW, StartDocPrinterW, StartPagePrinter, WritePrinter, DOC_INFO_1W,
-    PRINTER_ATTRIBUTE_WORK_OFFLINE, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_INFO_4W,
+    PRINTER_ATTRIBUTE_WORK_OFFLINE, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_HANDLE,
+    PRINTER_INFO_4W,
 };
 
 #[derive(serde::Serialize, Clone)]
@@ -100,33 +101,17 @@ fn enumerate_printers() -> Result<Vec<WinPrinterEntry>, String> {
         let mut bytes_needed: u32 = 0;
         let mut count: u32 = 0;
 
-        let _ = EnumPrintersW(
-            flags,
-            PCWSTR::null(),
-            4,
-            std::ptr::null_mut(),
-            0,
-            &mut bytes_needed,
-            &mut count,
-        );
+        let _ = EnumPrintersW(flags, PCWSTR::null(), 4, None, &mut bytes_needed, &mut count);
 
         if bytes_needed == 0 {
             return Ok(Vec::new());
         }
 
         let mut buffer = vec![0u8; bytes_needed as usize];
-        let success = EnumPrintersW(
-            flags,
-            PCWSTR::null(),
-            4,
-            buffer.as_mut_ptr(),
-            bytes_needed,
-            &mut bytes_needed,
-            &mut count,
-        );
-
-        if !success.as_bool() {
-            return Err(last_error("EnumPrintersW failed"));
+        if let Err(err) =
+            EnumPrintersW(flags, PCWSTR::null(), 4, Some(buffer.as_mut_slice()), &mut bytes_needed, &mut count)
+        {
+            return Err(format!("EnumPrintersW failed: {}", err));
         }
 
         let entries = std::slice::from_raw_parts(
@@ -149,13 +134,13 @@ fn enumerate_printers() -> Result<Vec<WinPrinterEntry>, String> {
 fn get_default_printer_name() -> Option<String> {
     unsafe {
         let mut needed: u32 = 0;
-        let _ = GetDefaultPrinterW(PWSTR::null(), &mut needed);
+        let _ = GetDefaultPrinterW(None, &mut needed);
         if needed == 0 {
             return None;
         }
 
         let mut buffer = vec![0u16; needed as usize];
-        let success = GetDefaultPrinterW(PWSTR(buffer.as_mut_ptr()), &mut needed);
+        let success = GetDefaultPrinterW(Some(PWSTR(buffer.as_mut_ptr())), &mut needed);
         if !success.as_bool() {
             return None;
         }
@@ -212,9 +197,9 @@ fn print_raw_windows(printer_name: &str, data: &[u8]) -> Result<(), String> {
 
     unsafe {
         let name_w = to_wide(printer_name);
-        let mut handle = HANDLE::default();
-        if !OpenPrinterW(PCWSTR(name_w.as_ptr()), &mut handle, None).as_bool() {
-            return Err(last_error("Failed to open printer"));
+        let mut handle = PRINTER_HANDLE::default();
+        if let Err(err) = OpenPrinterW(PCWSTR(name_w.as_ptr()), &mut handle, None) {
+            return Err(format!("Failed to open printer: {}", err));
         }
 
         let doc_name = to_wide("Mwaka POS Receipt");

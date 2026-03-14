@@ -384,6 +384,11 @@ export interface Expense {
     createdBy: string;
     approvedBy?: string;
     approvedAt?: string;
+    updatedAt?: string;
+    // Sync fields
+    _dirty?: boolean;
+    _operation?: 'create' | 'update' | 'delete';
+    _synced_at?: string;
 }
 
 export interface Customer {
@@ -655,7 +660,7 @@ export class HandyPosDatabase extends Dexie {
     constructor() {
         super('handypos');
 
-        this.version(34).stores({
+        this.version(35).stores({
             inventory: 'id, name, category, itemType, supplier, status, onMenu, branchId, _dirty, [branchId+itemType], &[branchId+itemType+onMenu]',
             suppliers: 'id, name, businessId, _dirty, [businessId+name]',
             purchaseHistory: '++id, productId, supplierId, receivedDate, branchId, paymentStatus, sessionId, _dirty, &[branchId+receivedDate], [branchId+productId+receivedDate], [sessionId]',
@@ -665,7 +670,7 @@ export class HandyPosDatabase extends Dexie {
             sessions: 'id, branchId, status, userId, startedAt, _dirty, [branchId+status], [branchId+userId+status]',
             staff: 'id, name, email, role, branchId',
             stockTakes: 'id, branchId, createdAt, status, _dirty, &[branchId+status]',
-            expenses: 'id, branchId, category, date, status, [branchId+date]',
+            expenses: 'id, branchId, category, date, status, _dirty, [branchId+date]',
             customers: 'id, name, branchId, email',
             invoices: 'id, invoiceNumber, branchId, customerId, status, issueDate',
             taxes: 'id, name, isDefault, businessId, _dirty, [businessId+isDefault]',

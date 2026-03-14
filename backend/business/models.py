@@ -724,6 +724,7 @@ class Expense(models.Model):
     
     created_by = models.CharField(max_length=255)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     
     approved_by = models.CharField(max_length=255, blank=True)
     approved_at = models.DateTimeField(null=True, blank=True)

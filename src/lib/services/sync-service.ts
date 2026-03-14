@@ -303,8 +303,15 @@ class SyncService {
       // Separate changes by entity type
       const sessionChanges = changes.filter(c => c.entity_type === 'Session');
       const orderChanges = changes.filter(c => c.entity_type === 'Order');
+      const expenseChanges = changes.filter(c => c.entity_type === 'Expense');
       const taxChanges = changes.filter(c => c.entity_type === 'TaxRate');
-      const inventoryChanges = changes.filter(c => c.entity_type !== 'TakeOrder' && c.entity_type !== 'Session' && c.entity_type !== 'Order' && c.entity_type !== 'TaxRate');
+      const inventoryChanges = changes.filter(c =>
+        c.entity_type !== 'TakeOrder' &&
+        c.entity_type !== 'Session' &&
+        c.entity_type !== 'Order' &&
+        c.entity_type !== 'TaxRate' &&
+        c.entity_type !== 'Expense'
+      );
       const takeOrderChanges = changes.filter(c => c.entity_type === 'TakeOrder');
 
       // Push session changes to sessions sync endpoint
@@ -473,6 +480,36 @@ class SyncService {
           }
         } catch (error) {
           console.error('[Sync] Tax push failed:', error);
+        }
+      }
+
+      // Push expense changes to business sync endpoint
+      if (expenseChanges.length > 0) {
+        try {
+          const businessId = this.resolveBusinessId();
+
+          const result = await authFetch.fetch('/business/sync/push/', {
+            method: 'POST',
+            body: JSON.stringify({
+              last_synced_at: this.syncState.last_synced_at,
+              changes: expenseChanges,
+              business_id: businessId,
+              branch_id: backendBranchId
+            })
+          });
+
+          if (result.results?.acknowledged && Array.isArray(result.results.acknowledged)) {
+            console.log(`[Sync] ${result.results.acknowledged.length} expense changes acknowledged`);
+            for (const ack of result.results.acknowledged) {
+              await this.markChangeAsSynced(ack.id);
+            }
+          }
+
+          if (result.results?.errors && result.results.errors.length > 0) {
+            console.error(`[Sync] ${result.results.errors.length} expense sync errors:`, result.results.errors);
+          }
+        } catch (error) {
+          console.error('[Sync] Expense push failed:', error);
         }
       }
 
@@ -932,6 +969,28 @@ class SyncService {
       }
 
       console.log(`[Sync] Collected ${dirtyTaxes.length} dirty tax rates`);
+
+      // Collect from expenses
+      const expenses = await db.expenses
+        .where('branchId')
+        .equals(branchId)
+        .toArray();
+
+      const dirtyExpenses = expenses.filter(e => e._dirty);
+      for (const expense of dirtyExpenses) {
+        if (!expense.id) {
+          continue;
+        }
+        changes.push({
+          id: String(expense.id),
+          entity_type: 'Expense',
+          op: expense._operation || 'update',
+          data: this.sanitizeForSync(expense),
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      console.log(`[Sync] Collected ${dirtyExpenses.length} dirty expenses`);
       console.log(`[Sync] Total changes collected so far: ${changes.length}`);
 
     } catch (error) {
@@ -1412,6 +1471,18 @@ class SyncService {
     }
 
     try {
+      // Try expenses
+      const expense = await db.expenses.get(id);
+      if (expense) {
+        await db.expenses.update(id, { _dirty: false, _operation: undefined });
+        console.log(`[Sync] Marked expense ${id} as synced`);
+        return;
+      }
+    } catch (error) {
+      // Continue to next table
+    }
+
+    try {
       // Try taxes
       const tax = await db.taxes.get(id);
       if (tax) {
@@ -1657,6 +1728,47 @@ class SyncService {
           }
         }
         console.log(`[Sync] Applied ${changes.invoices.length} invoice changes`);
+      }
+
+      // Apply expenses
+      if (changes.expenses && Array.isArray(changes.expenses) && changes.expenses.length > 0) {
+        for (const expense of changes.expenses) {
+          try {
+            const convertedExpense = this.snakeToCamel(expense);
+            const expenseId = String(convertedExpense.id ?? expense.id ?? '').trim();
+            if (!expenseId) {
+              console.warn('[Sync] Skipping expense change without id:', expense);
+              continue;
+            }
+
+            const existingExpense = await db.expenses.get(expenseId);
+            if (existingExpense?._dirty) {
+              console.log(`[Sync] Skipping server overwrite for dirty expense ${expenseId}`);
+              continue;
+            }
+
+            const mergedExpense: any = {
+              ...(existingExpense || {}),
+              ...convertedExpense,
+              id: expenseId,
+            };
+
+            const branchRaw = mergedExpense.branchId ?? mergedExpense.branch_id ?? mergedExpense.branch;
+            if (branchRaw !== undefined && branchRaw !== null && String(branchRaw).trim().length > 0) {
+              mergedExpense.branchId = String(branchRaw);
+            }
+
+            await db.expenses.put({
+              ...mergedExpense,
+              _dirty: false,
+              _operation: undefined,
+              _synced_at: new Date().toISOString()
+            });
+          } catch (error) {
+            console.error(`[Sync] Error applying expense ${expense.id}:`, error);
+          }
+        }
+        console.log(`[Sync] Applied ${changes.expenses.length} expense changes`);
       }
 
       // Apply tax rates

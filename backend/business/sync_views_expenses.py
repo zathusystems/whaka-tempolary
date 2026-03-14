@@ -154,8 +154,8 @@ def _get_expense_changes(branch_id, since):
         # Get expenses modified since timestamp
         expenses = Expense.objects.filter(
             branch_id=branch_id,
-            created_at__gte=since_dt
-        )
+            updated_at__gte=since_dt
+        ).order_by('updated_at')
         
         serializer = ExpenseSerializer(expenses, many=True)
         

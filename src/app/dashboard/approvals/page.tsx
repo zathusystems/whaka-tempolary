@@ -215,6 +215,9 @@ const ExpenseApprovalItem = ({ expense }: { expense: Expense }) => {
         status: 'Approved',
         approvedBy: user.displayName || user.email,
         approvedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        _dirty: true,
+        _operation: 'update',
       });
       toast({ title: 'Expense Approved' });
     } catch (error) {
@@ -233,6 +236,9 @@ const ExpenseApprovalItem = ({ expense }: { expense: Expense }) => {
         status: 'Rejected',
         approvedBy: user.displayName || user.email,
         approvedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        _dirty: true,
+        _operation: 'update',
       });
       toast({ title: 'Expense Rejected', variant: 'destructive' });
     } catch (error) {

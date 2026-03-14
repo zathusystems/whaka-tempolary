@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
+PREFERRED_NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-${NDK_HOME:-}}}"
 ANDROID_TAURI_CONFIG="$ROOT_DIR/src-tauri/tauri.android.conf.json"
 ANDROID_GEN_DIR="$ROOT_DIR/src-tauri/gen/android"
 ANDROID_MANIFEST_FILE="$ANDROID_GEN_DIR/app/src/main/AndroidManifest.xml"
@@ -211,10 +212,19 @@ if [[ ! -d "$SOURCE_ANDROID_HOME/ndk" ]]; then
   exit 1
 fi
 
-mapfile -t VALID_NDKS < <(
-  find "$SOURCE_ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 -type d \
-    -exec test -f "{}/source.properties" ';' -print | sort -V
-)
+if [[ -n "$PREFERRED_NDK" ]]; then
+  if [[ -f "$PREFERRED_NDK/source.properties" ]]; then
+    VALID_NDKS=("$PREFERRED_NDK")
+  else
+    echo "Preferred NDK path is invalid or missing source.properties: $PREFERRED_NDK"
+    exit 1
+  fi
+else
+  mapfile -t VALID_NDKS < <(
+    find "$SOURCE_ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 -type d \
+      -exec test -f "{}/source.properties" ';' -print | sort -V
+  )
+fi
 
 if [[ ${#VALID_NDKS[@]} -eq 0 ]]; then
   echo "No valid NDK installations found under: $SOURCE_ANDROID_HOME/ndk"

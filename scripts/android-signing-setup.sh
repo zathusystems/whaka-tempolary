@@ -34,6 +34,10 @@ fi
 KEY_PASSWORD="$STORE_PASSWORD"
 KEYSTORE_FILE="${ANDROID_KEYSTORE_PATH:-$ANDROID_DIR/handypos-release.jks}"
 
+if [[ "$KEYSTORE_FILE" != /* ]]; then
+  KEYSTORE_FILE="$ROOT_DIR/$KEYSTORE_FILE"
+fi
+
 mkdir -p "$(dirname "$KEYSTORE_FILE")"
 
 if [[ ! -f "$KEYSTORE_FILE" ]]; then

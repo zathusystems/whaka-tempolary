@@ -966,14 +966,37 @@ const StockReportTab = ({ session }: { session: Session }) => {
             quantity: number; 
             totalCost: number; 
             unitCost: number;
+            vatAmount: number;
+            vatMethod: 'inclusive' | 'exclusive' | 'mixed';
             supplier: string;
             batchNumber?: string;
             expiryDate?: string;
         }>();
 
+        const normalizeMethod = (value: unknown): 'inclusive' | 'exclusive' => {
+            return value === 'inclusive' ? 'inclusive' : 'exclusive';
+        };
+
+        const resolveVatAmount = (purchase: any, method: 'inclusive' | 'exclusive'): number => {
+            const taxRate = Number(purchase.taxRate);
+            const base = Number(purchase.totalCost || 0);
+            if (!Number.isFinite(base) || base <= 0 || !Number.isFinite(taxRate) || taxRate <= 0) {
+                return typeof purchase.taxAmount === 'number' && Number.isFinite(purchase.taxAmount)
+                    ? purchase.taxAmount
+                    : 0;
+            }
+            if (method === 'inclusive') {
+                return base - base / (1 + taxRate / 100);
+            }
+            return base * (taxRate / 100);
+        };
+
         sessionPurchases.forEach(purchase => {
             const key = resolveCanonicalProductKey(purchase.productId, purchase.productName, productIdentity.nameToId);
             if (!key) return;
+
+            const method = normalizeMethod(purchase.taxCalculationMethod);
+            const vatAmount = resolveVatAmount(purchase, method);
 
             if (!purchaseMap.has(key)) {
                 purchaseMap.set(key, {
@@ -982,6 +1005,8 @@ const StockReportTab = ({ session }: { session: Session }) => {
                     quantity: 0,
                     totalCost: 0,
                     unitCost: purchase.costPerUnit,
+                    vatAmount: 0,
+                    vatMethod: method,
                     supplier: purchase.supplierName || 'Unknown Supplier',
                     batchNumber: purchase.batchNumber,
                     expiryDate: purchase.expiryDate,
@@ -992,8 +1017,12 @@ const StockReportTab = ({ session }: { session: Session }) => {
             if (!item.name || item.name === 'Unknown Item') {
                 item.name = resolvedName;
             }
+            if (item.vatMethod !== method) {
+                item.vatMethod = 'mixed';
+            }
             item.quantity += purchase.quantityReceived;
             item.totalCost += purchase.totalCost;
+            item.vatAmount += vatAmount;
         });
 
         return Array.from(purchaseMap.values()).sort((a, b) => a.name.localeCompare(b.name));
@@ -1141,6 +1170,7 @@ const StockReportTab = ({ session }: { session: Session }) => {
                                         <TableHead className="text-right">Quantity</TableHead>
                                         <TableHead className="text-right">Unit Cost</TableHead>
                                         <TableHead className="text-right">Total Cost</TableHead>
+                                        <TableHead className="text-right">VAT (Incl/Excl)</TableHead>
                                         <TableHead>Supplier</TableHead>
                                         <TableHead>Batch #</TableHead>
                                         <TableHead>Expiry Date</TableHead>
@@ -1153,6 +1183,9 @@ const StockReportTab = ({ session }: { session: Session }) => {
                                             <TableCell className="text-right text-blue-600 font-medium">{purchase.quantity.toFixed(2)}</TableCell>
                                             <TableCell className="text-right">{formatCurrency(purchase.unitCost)}</TableCell>
                                             <TableCell className="text-right font-semibold">{formatCurrency(purchase.totalCost)}</TableCell>
+                                            <TableCell className="text-right">
+                                                {formatCurrency(purchase.vatAmount)} ({purchase.vatMethod === 'mixed' ? 'Mixed' : purchase.vatMethod === 'inclusive' ? 'Incl' : 'Excl'})
+                                            </TableCell>
                                             <TableCell className="text-sm">{purchase.supplier}</TableCell>
                                             <TableCell className="text-sm">{purchase.batchNumber || '-'}</TableCell>
                                             <TableCell className="text-sm">{purchase.expiryDate ? format(new Date(purchase.expiryDate), 'MMM dd, yyyy') : '-'}</TableCell>
@@ -1739,7 +1772,7 @@ export default function SessionsPage() {
                         </CardDescription>
                     </CardHeader>
                     <CardContent>
-                        <Tabs defaultValue="fuel" className="w-full">
+                        <Tabs defaultValue="non-fuel" className="w-full">
                             <TabsList className="grid h-auto w-full grid-cols-1 sm:grid-cols-2">
                                 <TabsTrigger value="fuel" className="text-xs sm:text-sm">
                                     Fuel Sessions ({fuelActiveSessions.length})

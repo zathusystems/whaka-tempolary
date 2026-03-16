@@ -54,8 +54,17 @@ const LOCAL_STORAGE_KEYS = {
 };
 
 const normalizeBranchId = (value?: string | number | null): string => {
+  if (value && typeof value === 'object') {
+    const maybeId = (value as any).id ?? (value as any).branch_id ?? (value as any).branchId ?? (value as any).branch;
+    if (maybeId !== undefined && maybeId !== value) {
+      return normalizeBranchId(maybeId as any);
+    }
+    return '';
+  }
+
   const normalized = String(value ?? '').trim();
   if (!normalized) return '';
+  if (normalized === '[object Object]') return '';
 
   const brnMatch = /^BRN-(\d+)$/i.exec(normalized);
   if (brnMatch) return brnMatch[1];
@@ -824,6 +833,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     },
     [branchId]
   );
+  const hasCachedInventory = (allInventory?.length ?? 0) > 0;
   
   const defaultTaxRate = useLiveQuery(
     async () => {
@@ -989,42 +999,55 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
             const items = Array.isArray(result) ? result : result.results || [];
             console.log('[POS Modal] Received', items.length, 'items from backend for branch', backendBranchId);
             
-            // Clear old inventory for this branch ONLY (keep other branches)
             const branchCandidates = getBranchIdCandidates(branchId);
             const oldItems = branchCandidates.length > 0
               ? await db.inventory.where('branchId').anyOf(branchCandidates).toArray()
               : await db.inventory.where({ branchId: branchId }).toArray();
-            console.log('[POS Modal] Clearing', oldItems.length, 'old items for branch:', branchId);
-            for (const item of oldItems) {
-              await db.inventory.delete(item.id);
-            }
-            
-            // Store new items for current branch only
-            for (const item of items) {
-              await db.inventory.put({
-                id: item.id,
-                name: item.name,
-                branchId: branchId,
-                stockUnits: item.stock_units || item.stockUnits || 0,
-                unitType: item.unit_type || item.unitType || 'unit',
-                itemType: item.item_type || item.itemType || 'ingredient',
-                sku: item.sku || '',
-                barcode: item.barcode || '',
-                category: item.category || '',
-                price: item.price || 0,
-                cost: item.cost || 0,
-                reorderLevel: item.reorder_level || item.reorderLevel || 0,
-                supplier: item.supplier || '',
-                isProduced: item.is_produced || item.isProduced || false,
-                isSoldInPortions: item.is_sold_in_portions || item.isSoldInPortions || false,
-                portionName: item.portion_name || item.portionName || '',
-                portionsPerUnit: item.portions_per_unit || item.portionsPerUnit || 0,
-                isVariablePrice: item.is_variable_price || item.isVariablePrice || false,
-                isFuel: item.is_fuel || item.isFuel || false,
-                recipe: item.recipe || [],
-              });
-            }
-            console.log('[POS Modal] Stored', items.length, 'items in local DB for branch:', branchId);
+
+            const nextItems = items.map((item: any) => ({
+              id: item.id,
+              name: item.name,
+              branchId: branchId,
+              stockUnits: item.stock_units || item.stockUnits || 0,
+              unitType: item.unit_type || item.unitType || 'unit',
+              itemType: item.item_type || item.itemType || 'ingredient',
+              sku: item.sku || '',
+              barcode: item.barcode || '',
+              category: item.category || '',
+              price: item.price || 0,
+              cost: item.cost || 0,
+              reorderLevel: item.reorder_level || item.reorderLevel || 0,
+              supplier: item.supplier || '',
+              isProduced: item.is_produced || item.isProduced || false,
+              isSoldInPortions: item.is_sold_in_portions || item.isSoldInPortions || false,
+              portionName: item.portion_name || item.portionName || '',
+              portionsPerUnit: item.portions_per_unit || item.portionsPerUnit || 0,
+              isVariablePrice: item.is_variable_price || item.isVariablePrice || false,
+              isFuel: item.is_fuel || item.isFuel || false,
+              recipe: item.recipe || [],
+              _dirty: false,
+              _operation: undefined,
+            }));
+
+            const incomingIds = new Set(nextItems.map((item) => String(item.id)));
+            const dirtyIds = new Set(
+              oldItems.filter((item) => item._dirty).map((item) => String(item.id))
+            );
+            const upsertItems = nextItems.filter((item) => !dirtyIds.has(String(item.id)));
+            const staleIds = oldItems
+              .filter((item) => !incomingIds.has(String(item.id)) && !item._dirty)
+              .map((item) => item.id);
+
+            await db.transaction('rw', db.inventory, async () => {
+              if (upsertItems.length > 0) {
+                await db.inventory.bulkPut(upsertItems);
+              }
+              if (staleIds.length > 0) {
+                await db.inventory.bulkDelete(staleIds);
+              }
+            });
+
+            console.log('[POS Modal] Stored', nextItems.length, 'items in local DB for branch:', branchId);
 
             // Keep MRA mappings in sync with inventory so product cards and add-to-cart checks stay accurate.
             try {
@@ -1047,7 +1070,13 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                 const taxType = rawMapping.mra_tax_type === 'zero' || rawMapping.mra_tax_type === 'exempt'
                   ? rawMapping.mra_tax_type
                   : (rawMapping.mraTaxType === 'zero' || rawMapping.mraTaxType === 'exempt' ? rawMapping.mraTaxType : 'standard');
-                const calculationMethod = rawMapping.tax_calculation_method === 'exclusive' || rawMapping.taxCalculationMethod === 'exclusive'
+                const calculationMethod = String(
+                  rawMapping.tax_calculation_method ??
+                  rawMapping.taxCalculationMethod ??
+                  rawMapping.calculation_method ??
+                  rawMapping.calculationMethod ??
+                  ''
+                ).trim().toLowerCase().startsWith('excl')
                   ? 'exclusive'
                   : 'inclusive';
 
@@ -1214,7 +1243,13 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                   const taxType = readyMapping.mra_tax_type === 'zero' || readyMapping.mra_tax_type === 'exempt'
                     ? readyMapping.mra_tax_type
                     : (readyMapping.mraTaxType === 'zero' || readyMapping.mraTaxType === 'exempt' ? readyMapping.mraTaxType : 'standard');
-                  const calculationMethod = readyMapping.tax_calculation_method === 'exclusive' || readyMapping.taxCalculationMethod === 'exclusive'
+                  const calculationMethod = String(
+                    readyMapping.tax_calculation_method ??
+                    readyMapping.taxCalculationMethod ??
+                    readyMapping.calculation_method ??
+                    readyMapping.calculationMethod ??
+                    ''
+                  ).trim().toLowerCase().startsWith('excl')
                     ? 'exclusive'
                     : 'inclusive';
                   const nowIso = new Date().toISOString();
@@ -2145,7 +2180,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   };
 
   const renderPosForBusiness = () => {
-    if (isLoadingInventory || !allInventory) {
+    if ((isLoadingInventory && !hasCachedInventory) || !allInventory) {
         return (
           <Card className="flex h-full items-center justify-center">
             <CardContent className="text-center">
@@ -2273,19 +2308,11 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
-                  className="h-10 w-10 p-0"
+                  className="h-10 w-10 p-0 sm:hidden"
                   title="Scan Barcode with Camera"
                   onClick={() => setShowCameraScanner(true)}
                 >
                   <Camera className="h-4 w-4" />
-                </Button>
-                <Button 
-                  variant="outline" 
-                  className="h-10 w-10 p-0"
-                  title="Configure Scanner"
-                  onClick={() => setShowScannerConfig(true)}
-                >
-                  <Barcode className="h-4 w-4" />
                 </Button>
                 <Button 
                   variant="outline" 

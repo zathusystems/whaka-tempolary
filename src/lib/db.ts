@@ -118,6 +118,8 @@ export interface InventoryItem {
     reorderLevel?: number;
     cost?: number; // This will be the latest or average cost
     value?: number;
+    // Local-only flag: initial stock was created via purchase records
+    initialStockViaPurchase?: boolean;
     status?: 'In Stock' | 'Low Stock' | 'Out of Stock';
     expiry?: string; // Earliest expiry date from batches
     batch?: string;
@@ -151,6 +153,11 @@ export interface PurchaseRecord {
     id?: number;
     purchaseOrderId?: string; // ID of the purchase order this item belongs to
     sessionId?: string; // Link to the session when stock was received
+    referenceNumber?: string; // Supplier reference / invoice number
+    vatAmount?: number; // VAT amount for the purchase
+    taxRate?: number; // VAT rate (%) for this item
+    taxCalculationMethod?: 'inclusive' | 'exclusive';
+    taxAmount?: number; // VAT amount for this item
     productId: string;
     productName: string;
     supplierId: string;
@@ -160,7 +167,7 @@ export interface PurchaseRecord {
     quantityRemaining: number; // New field for FIFO
     costPerUnit: number;
     totalCost: number;
-    paymentStatus: 'Paid' | 'Credit';
+    paymentStatus: 'Paid' | 'Unpaid' | 'Partial' | 'Credit' | 'Pending';
     amountDue: number;
     batchNumber?: string;
     expiryDate?: string;
@@ -501,6 +508,9 @@ export interface PurchaseOrderItem {
     costPerUnit: number;
     batchNumber?: string;
     expiryDate?: string;
+    taxRate?: number; // VAT rate (%) for this item
+    taxCalculationMethod?: 'inclusive' | 'exclusive';
+    taxAmount?: number; // VAT amount for this item
     
     // MRA Compliance Fields
     mraProductCode?: string; // MRA product code for this item
@@ -512,6 +522,8 @@ export interface PurchaseOrder {
     orderNumber: string;
     supplierId?: string;
     supplierName?: string;
+    referenceNumber?: string; // Supplier reference / invoice number
+    vatAmount?: number; // VAT amount for the purchase
     status: 'Draft' | 'Pending' | 'Approved' | 'Received' | 'Completed' | 'Cancelled';
     totalItems: number;
     totalCost: number;

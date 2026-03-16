@@ -28,6 +28,73 @@ class SyncService {
   private readonly RETRY_INTERVAL = 30000; // 30 seconds
   private readonly DEFAULT_SYNC_TIMESTAMP = '2000-01-01T00:00:00Z';
 
+  private resolveNumber(value: unknown): number | undefined {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  private buildOrderTaxPatch(order: Order): Partial<Order> | null {
+    const vat = this.resolveNumber((order as any).vatAmount ?? (order as any).vat_amount);
+    const net = this.resolveNumber((order as any).netAmount ?? (order as any).net_amount);
+    const gross = this.resolveNumber((order as any).grossAmount ?? (order as any).gross_amount);
+
+    const existingTax = this.resolveNumber(order.tax);
+    const existingSubtotal = this.resolveNumber(order.subtotal);
+    const existingTotal = this.resolveNumber(order.total);
+
+    const resolvedTax = existingTax ?? vat;
+    const resolvedSubtotal =
+      existingSubtotal ??
+      net ??
+      (gross !== undefined && resolvedTax !== undefined ? gross - resolvedTax : undefined);
+    const resolvedTotal =
+      existingTotal ??
+      gross ??
+      (resolvedSubtotal !== undefined && resolvedTax !== undefined
+        ? resolvedSubtotal + resolvedTax
+        : undefined);
+
+    const changes: Partial<Order> = {};
+    if (existingTax === undefined && resolvedTax !== undefined) {
+      changes.tax = resolvedTax;
+    }
+    if (existingSubtotal === undefined && resolvedSubtotal !== undefined) {
+      changes.subtotal = resolvedSubtotal;
+    }
+    if (existingTotal === undefined && resolvedTotal !== undefined) {
+      changes.total = resolvedTotal;
+    }
+
+    return Object.keys(changes).length > 0 ? changes : null;
+  }
+
+  async backfillOrderTaxFields(branchId?: string): Promise<void> {
+    try {
+      const orders = branchId
+        ? await db.orders
+            .where('branchId')
+            .anyOf(this.getBranchIdCandidates(branchId))
+            .toArray()
+        : await db.orders.toArray();
+
+      if (orders.length === 0) return;
+
+      const updates = orders
+        .map((order) => {
+          const changes = this.buildOrderTaxPatch(order);
+          return changes ? { key: order.id, changes } : null;
+        })
+        .filter(Boolean) as Array<{ key: string; changes: Partial<Order> }>;
+
+      if (updates.length > 0) {
+        await db.orders.bulkUpdate(updates);
+        console.log(`[Sync] Backfilled tax fields for ${updates.length} orders`);
+      }
+    } catch (error) {
+      console.warn('[Sync] Failed to backfill order tax fields:', error);
+    }
+  }
+
   // Convert UI/display branch id (e.g., 'BRN-9') to backend PK string ('9')
   private toBackendBranchId(id: string): string {
     const normalized = String(id || '').trim();
@@ -210,6 +277,11 @@ class SyncService {
     return fallback;
   }
 
+  private normalizeTaxCalculationMethod(value: unknown): 'inclusive' | 'exclusive' {
+    const normalized = String(value ?? '').trim().toLowerCase();
+    return normalized.startsWith('excl') ? 'exclusive' : 'inclusive';
+  }
+
   private normalizeTaxType(value: unknown): 'VAT_STANDARD' | 'VAT_ZERO' | 'VAT_EXEMPT' {
     const raw = String(value ?? '').trim().toUpperCase();
     if (raw === 'VAT_ZERO' || raw === 'ZERO') return 'VAT_ZERO';
@@ -254,7 +326,10 @@ class SyncService {
    * Main sync orchestration
    * Performs: Push local changes → Pull server changes → Update timestamp
    */
-  async performFullSync(branchId: string): Promise<void> {
+  async performFullSync(
+    branchId: string,
+    options: { onProgress?: (progress: { stage: string; percent?: number; current?: number; total?: number; message?: string }) => void } = {}
+  ): Promise<void> {
     if (!branchId) {
       console.warn('[Sync] No branch ID provided, skipping sync');
       return;
@@ -268,15 +343,20 @@ class SyncService {
     this.syncInProgress = true;
     this.syncState.is_syncing = true;
 
+    const { onProgress } = options;
+
     try {
       console.log('[Sync] Starting full sync for branch:', branchId);
+      onProgress?.({ stage: 'start', percent: 0, message: 'Starting sync' });
       this.syncState.last_synced_at = this.resolveLastSyncedAt(branchId);
       console.log('[Sync] Using sync timestamp:', this.syncState.last_synced_at);
 
       // Step 1: Push local changes to backend
-      await this.pushChanges(branchId);
+      onProgress?.({ stage: 'push', percent: 10, message: 'Pushing changes' });
+      await this.pushChanges(branchId, onProgress);
 
       // Step 2: Pull server changes from backend
+      onProgress?.({ stage: 'pull', percent: 85, message: 'Pulling updates' });
       await this.pullChanges(branchId);
 
       // Step 3: Update sync timestamp
@@ -287,8 +367,10 @@ class SyncService {
       }
 
       console.log('[Sync] Full sync completed successfully at', this.syncState.last_synced_at);
+      onProgress?.({ stage: 'done', percent: 100, message: 'Sync complete' });
     } catch (error) {
       console.error('[Sync] Full sync failed:', error);
+      onProgress?.({ stage: 'error', percent: 100, message: 'Sync failed' });
       // Don't throw - allow app to continue working offline
     } finally {
       this.syncInProgress = false;
@@ -301,7 +383,10 @@ class SyncService {
    * Collects all dirty records and sends them to /inventory/sync/push/
    * If backend is unreachable, dirty records remain marked for retry
    */
-  private async pushChanges(branchId: string): Promise<void> {
+  private async pushChanges(
+    branchId: string,
+    onProgress?: (progress: { stage: string; percent?: number; current?: number; total?: number; message?: string }) => void
+  ): Promise<void> {
     const changes = await this.collectLocalChanges(branchId);
     const backendBranchId = this.toBackendBranchId(branchId);
 
@@ -311,6 +396,7 @@ class SyncService {
     }
 
     console.log(`[Sync] Pushing ${changes.length} changes to backend`);
+    onProgress?.({ stage: 'push', percent: 15, message: 'Pushing changes' });
 
     try {
       // Separate changes by entity type
@@ -405,29 +491,44 @@ class SyncService {
       // Push inventory changes to inventory sync endpoint
       if (inventoryChanges.length > 0) {
         try {
-          const result = await authFetch.fetch('/inventory/sync/push/', {
-            method: 'POST',
-            body: JSON.stringify({
-              last_synced_at: this.syncState.last_synced_at,
-              changes: inventoryChanges,
-              branch_id: backendBranchId
-            })
-          });
+          const chunkSize = 200;
+          const totalChunks = Math.ceil(inventoryChanges.length / chunkSize);
+          for (let start = 0; start < inventoryChanges.length; start += chunkSize) {
+            const chunk = inventoryChanges.slice(start, start + chunkSize);
+            const chunkIndex = Math.floor(start / chunkSize) + 1;
+            onProgress?.({
+              stage: 'inventory',
+              percent: Math.round((chunkIndex / totalChunks) * 100),
+              current: Math.min(start + chunk.length, inventoryChanges.length),
+              total: inventoryChanges.length,
+              message: `Syncing changes ${Math.min(start + chunk.length, inventoryChanges.length)} of ${inventoryChanges.length}`,
+            });
+            console.log(`[Sync] Pushing inventory chunk ${start / chunkSize + 1} (${chunk.length} changes)`);
 
-          if (result.results?.acknowledged && Array.isArray(result.results.acknowledged)) {
-            console.log(`[Sync] ${result.results.acknowledged.length} inventory changes acknowledged`);
-            for (const ack of result.results.acknowledged) {
-              await this.applyInventorySyncAck(ack);
+            const result = await authFetch.fetch('/inventory/sync/push/', {
+              method: 'POST',
+              body: JSON.stringify({
+                last_synced_at: this.syncState.last_synced_at,
+                changes: chunk,
+                branch_id: backendBranchId
+              })
+            });
+
+            if (result.results?.acknowledged && Array.isArray(result.results.acknowledged)) {
+              console.log(`[Sync] ${result.results.acknowledged.length} inventory changes acknowledged`);
+              for (const ack of result.results.acknowledged) {
+                await this.applyInventorySyncAck(ack);
+              }
             }
-          }
 
-          if (result.results?.conflicts && result.results.conflicts.length > 0) {
-            console.warn(`[Sync] ${result.results.conflicts.length} inventory conflicts detected:`, result.results.conflicts);
-            await this.handleConflicts(result.results.conflicts);
-          }
+            if (result.results?.conflicts && result.results.conflicts.length > 0) {
+              console.warn(`[Sync] ${result.results.conflicts.length} inventory conflicts detected:`, result.results.conflicts);
+              await this.handleConflicts(result.results.conflicts);
+            }
 
-          if (result.results?.errors && result.results.errors.length > 0) {
-            console.error(`[Sync] ${result.results.errors.length} inventory sync errors:`, result.results.errors);
+            if (result.results?.errors && result.results.errors.length > 0) {
+              console.error(`[Sync] ${result.results.errors.length} inventory sync errors:`, result.results.errors);
+            }
           }
         } catch (error) {
           console.error('[Sync] Inventory push failed:', error);
@@ -764,6 +865,7 @@ class SyncService {
       console.log('[Sync] Sessions count:', mergedChanges.sessions?.length || 0);
       console.log('[Sync] Take orders count:', mergedChanges.take_orders?.length || 0);
       console.log('[Sync] Suppliers count:', mergedChanges.suppliers?.length || 0);
+      console.log('[Sync] Purchase orders count:', mergedChanges.purchase_orders?.length || 0);
 
       // Step 3: Apply server changes to local DB
       if (Object.keys(mergedChanges).length > 0) {
@@ -849,6 +951,23 @@ class SyncService {
 
       console.log(`[Sync] Collected ${inventoryItems.filter(i => i._dirty).length} dirty inventory items`);
 
+      // Collect from suppliers (ensure suppliers sync before purchase orders)
+      const suppliers = await db.suppliers.toArray();
+
+      for (const supplier of suppliers) {
+        if (supplier._dirty) {
+          changes.push({
+            id: supplier.id,
+            entity_type: 'Supplier',
+            op: supplier._operation || 'update',
+            data: this.sanitizeForSync(supplier),
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+
+      console.log(`[Sync] Collected ${suppliers.filter(s => s._dirty).length} dirty suppliers`);
+
       // Collect from purchase orders
       const purchaseOrders = await db.purchaseOrders
         .where('branchId')
@@ -907,23 +1026,6 @@ class SyncService {
       }
 
       console.log(`[Sync] Collected ${wasteRecords.filter(w => w._dirty).length} dirty waste records`);
-
-      // Collect from suppliers
-      const suppliers = await db.suppliers.toArray();
-
-      for (const supplier of suppliers) {
-        if (supplier._dirty) {
-          changes.push({
-            id: supplier.id,
-            entity_type: 'Supplier',
-            op: supplier._operation || 'update',
-            data: this.sanitizeForSync(supplier),
-            timestamp: new Date().toISOString()
-          });
-        }
-      }
-
-      console.log(`[Sync] Collected ${suppliers.filter(s => s._dirty).length} dirty suppliers`);
 
       // Collect from take orders
       const takeOrders = await db.takeOrders
@@ -1047,7 +1149,12 @@ class SyncService {
    * Note: Large base64 images are kept for sync but may need compression in production
    */
   private sanitizeForSync(data: any): any {
-    const { _dirty, _operation, _synced_at, ...clean } = data;
+    const { _dirty, _operation, _synced_at, initialStockViaPurchase, ...clean } = data;
+    if (_operation === 'create' && initialStockViaPurchase) {
+      clean.stockUnits = 0;
+      clean.value = 0;
+      clean.status = 'Out of Stock';
+    }
     
     // ✅ Fields that should NOT be converted to snake_case (backend expects camelCase)
     const keepCamelCase = ['supplierId', 'supplierName', 'totalItems', 'totalCost', 'paymentStatus', 'amountPaid', 'amountDue', 'createdBy', 'inventoryItemId', 'quantityOrdered', 'quantityReceived', 'quantityRemaining', 'costPerUnit', 'batchNumber', 'expiryDate', 'branchId', 'businessId', 'supplierTin', 'vatRegistered', 'itemType', 'stockUnits', 'unitType', 'reorderLevel', 'isVariablePrice', 'isProduced', 'isSoldInPortions', 'portionName', 'portionsPerUnit', 'isRecipeIngredient', 'onMenu', 'isRecipeIngredient'];
@@ -1153,6 +1260,21 @@ class SyncService {
         normalized[camelKey] = value;
         normalized[snakeKey] = value;
       }
+    }
+
+    const resolvedTax = resolveAliasValue(normalized.tax, normalized.vatAmount, normalized.vat_amount);
+    if (resolvedTax !== undefined) {
+      normalized.tax = resolvedTax;
+    }
+
+    const resolvedSubtotal = resolveAliasValue(normalized.subtotal, normalized.netAmount, normalized.net_amount);
+    if (resolvedSubtotal !== undefined) {
+      normalized.subtotal = resolvedSubtotal;
+    }
+
+    const resolvedTotal = resolveAliasValue(normalized.total, normalized.grossAmount, normalized.gross_amount);
+    if (resolvedTotal !== undefined) {
+      normalized.total = resolvedTotal;
     }
 
     const resolveBuyerField = (...candidates: Array<unknown>): string | undefined => {
@@ -1724,6 +1846,371 @@ class SyncService {
         console.log('[Sync] No suppliers to apply');
       }
 
+      // Apply purchase orders + purchase history (supplier modal uses purchaseHistory)
+      if (changes.purchase_orders && Array.isArray(changes.purchase_orders) && changes.purchase_orders.length > 0) {
+        console.log('[Sync] Processing purchase orders:', changes.purchase_orders.length);
+        const fallbackBranchId = branchId ? String(branchId).trim() : undefined;
+
+        for (const po of changes.purchase_orders) {
+          try {
+            const convertedPo = this.snakeToCamel(po);
+            const poId = String(convertedPo.id ?? po.id ?? '').trim();
+            if (!poId) {
+              console.warn('[Sync] Skipping purchase order without id:', po);
+              continue;
+            }
+
+            const existingPo = await db.purchaseOrders.get(poId);
+            if (existingPo?._dirty) {
+              console.log(`[Sync] Skipping server overwrite for dirty purchase order ${poId}`);
+              continue;
+            }
+
+            const supplierId = String(
+              convertedPo.supplierId ??
+                (convertedPo as any).supplier ??
+                (po as any).supplier ??
+                ''
+            ).trim() || undefined;
+
+            let supplierName =
+              convertedPo.supplierName ??
+              (convertedPo as any).supplier_name ??
+              (po as any).supplier_name ??
+              existingPo?.supplierName;
+
+            if (!supplierName || supplierName === 'null') {
+              if (supplierId) {
+                try {
+                  const supplier = await db.suppliers.get(supplierId);
+                  if (supplier) {
+                    supplierName = supplier.name;
+                  }
+                } catch {
+                  // ignore lookup errors, fallback below
+                }
+              }
+            }
+            if (!supplierName) {
+              supplierName = 'No Supplier';
+            }
+
+            const rawItems = Array.isArray((po as any).items) ? (po as any).items : [];
+            const convertedItems = Array.isArray(convertedPo.items)
+              ? convertedPo.items
+              : rawItems.map((item: any) => this.snakeToCamel(item));
+
+            const mappedItems = convertedItems
+              .map((item: any, index: number) => {
+                const rawItem = rawItems[index] ?? item ?? {};
+                const itemId = String(item?.id ?? rawItem?.id ?? '').trim();
+                const inventoryItemId = String(
+                  item?.inventoryItemId ??
+                    item?.inventoryItem ??
+                    rawItem?.inventory_item ??
+                    rawItem?.inventoryItem ??
+                    ''
+                ).trim();
+
+                if (!itemId || !inventoryItemId) {
+                  return null;
+                }
+
+                const quantityReceived = this.toNumber(
+                  item?.quantityReceived ?? rawItem?.quantity_received ?? 0,
+                  0
+                );
+                const quantityOrdered = this.toNumber(
+                  item?.quantityOrdered ?? rawItem?.quantity_ordered ?? quantityReceived,
+                  quantityReceived
+                );
+                const quantityRemaining = this.toNumber(
+                  item?.quantityRemaining ?? rawItem?.quantity_remaining ?? quantityReceived,
+                  quantityReceived
+                );
+
+                return {
+                  id: itemId,
+                  inventoryItemId,
+                  inventoryItemName:
+                    item?.inventoryItemName ??
+                    item?.inventory_item_name ??
+                    rawItem?.inventory_item_name ??
+                    rawItem?.item_name ??
+                    undefined,
+                  quantityOrdered,
+                  quantityReceived,
+                  quantityRemaining,
+                  costPerUnit: this.toNumber(item?.costPerUnit ?? rawItem?.cost_per_unit ?? 0, 0),
+                  taxRate: this.toNumber(item?.taxRate ?? rawItem?.tax_rate ?? 0, 0),
+                  taxCalculationMethod:
+                    item?.taxCalculationMethod ??
+                    rawItem?.tax_calculation_method ??
+                    'exclusive',
+                  taxAmount: (() => {
+                    const rawTaxAmount = item?.taxAmount ?? rawItem?.tax_amount;
+                    const parsed = Number(rawTaxAmount);
+                    return Number.isFinite(parsed) ? parsed : undefined;
+                  })(),
+                  batchNumber: item?.batchNumber ?? rawItem?.batch_number ?? undefined,
+                  expiryDate: item?.expiryDate ?? rawItem?.expiry_date ?? undefined
+                } as any;
+              })
+              .filter(Boolean);
+
+            const vatRaw =
+              convertedPo.vatAmount ??
+              (convertedPo as any).vat_amount ??
+              (po as any).vat_amount ??
+              existingPo?.vatAmount;
+            const vatParsed = Number(vatRaw);
+            const vatAmount = Number.isFinite(vatParsed) ? vatParsed : undefined;
+
+            const branchRaw =
+              convertedPo.branchId ??
+              (convertedPo as any).branch_id ??
+              existingPo?.branchId;
+            const normalizedBranchId =
+              branchRaw !== undefined && branchRaw !== null && String(branchRaw).trim().length > 0
+                ? String(branchRaw)
+                : undefined;
+
+            const mergedPo: any = {
+              ...(existingPo || {}),
+              id: poId,
+              orderNumber: String(
+                convertedPo.orderNumber ??
+                  (convertedPo as any).order_number ??
+                  (po as any).order_number ??
+                  existingPo?.orderNumber ??
+                  poId
+              ),
+              supplierId,
+              supplierName,
+              referenceNumber:
+                convertedPo.referenceNumber ??
+                (convertedPo as any).reference_number ??
+                (po as any).reference_number ??
+                existingPo?.referenceNumber,
+              vatAmount,
+              status:
+                convertedPo.status ??
+                (po as any).status ??
+                existingPo?.status ??
+                'Received',
+              totalItems: this.toNumber(
+                convertedPo.totalItems ??
+                  (convertedPo as any).total_items ??
+                  (po as any).total_items ??
+                  existingPo?.totalItems ??
+                  mappedItems.length,
+                mappedItems.length
+              ),
+              totalCost: this.toNumber(
+                convertedPo.totalCost ??
+                  (convertedPo as any).total_cost ??
+                  (po as any).total_cost ??
+                  existingPo?.totalCost ??
+                  0,
+                0
+              ),
+              paymentStatus:
+                convertedPo.paymentStatus ??
+                (convertedPo as any).payment_status ??
+                (po as any).payment_status ??
+                existingPo?.paymentStatus ??
+                'Unpaid',
+              amountPaid: this.toNumber(
+                convertedPo.amountPaid ??
+                  (convertedPo as any).amount_paid ??
+                  (po as any).amount_paid ??
+                  existingPo?.amountPaid ??
+                  0,
+                0
+              ),
+              amountDue: this.toNumber(
+                convertedPo.amountDue ??
+                  (convertedPo as any).amount_due ??
+                  (po as any).amount_due ??
+                  existingPo?.amountDue ??
+                  0,
+                0
+              ),
+              notes: convertedPo.notes ?? existingPo?.notes ?? '',
+              createdBy: convertedPo.createdBy ?? existingPo?.createdBy ?? 'System',
+              branchId: fallbackBranchId ?? normalizedBranchId ?? existingPo?.branchId,
+              items: mappedItems,
+              createdAt:
+                convertedPo.createdAt ??
+                (convertedPo as any).created_at ??
+                (po as any).created_at ??
+                existingPo?.createdAt ??
+                new Date().toISOString(),
+              updatedAt:
+                convertedPo.updatedAt ??
+                (convertedPo as any).updated_at ??
+                (po as any).updated_at ??
+                existingPo?.updatedAt ??
+                new Date().toISOString(),
+              supplierTin: convertedPo.supplierTin ?? existingPo?.supplierTin,
+              supplierVatRegistered:
+                convertedPo.supplierVatRegistered ?? existingPo?.supplierVatRegistered,
+              eisInvoiceNumber: convertedPo.eisInvoiceNumber ?? existingPo?.eisInvoiceNumber,
+              eisSynced: convertedPo.eisSynced ?? existingPo?.eisSynced,
+              eisSyncedAt: convertedPo.eisSyncedAt ?? existingPo?.eisSyncedAt,
+              approvedBy: convertedPo.approvedBy ?? existingPo?.approvedBy,
+              approvedAt: convertedPo.approvedAt ?? existingPo?.approvedAt,
+              _dirty: false,
+              _operation: undefined,
+              _synced_at: new Date().toISOString()
+            };
+
+            await db.purchaseOrders.put(mergedPo);
+
+            // Apply purchase order items to purchase history (used by supplier modal)
+            for (let i = 0; i < convertedItems.length; i++) {
+              const item = convertedItems[i] ?? {};
+              const rawItem = rawItems[i] ?? item ?? {};
+              const purchaseItemId = String(item?.id ?? rawItem?.id ?? '').trim();
+              if (!purchaseItemId) {
+                continue;
+              }
+
+              const existingRecord = await db.purchaseHistory.get(purchaseItemId as any);
+              if (existingRecord?._dirty) {
+                console.log('[Sync] Skipping purchase item overwrite because local record is dirty:', purchaseItemId);
+                continue;
+              }
+
+              const inventoryItemId = String(
+                item?.inventoryItemId ??
+                  item?.inventoryItem ??
+                  rawItem?.inventory_item ??
+                  rawItem?.inventoryItem ??
+                  ''
+              ).trim();
+              if (!inventoryItemId) {
+                console.warn('[Sync] Skipping purchase item without inventory item id:', rawItem);
+                continue;
+              }
+
+              let productName =
+                item?.inventoryItemName ??
+                item?.inventory_item_name ??
+                rawItem?.inventory_item_name ??
+                rawItem?.item_name ??
+                'Unknown';
+
+              if (productName === 'Unknown') {
+                try {
+                  const inv = await db.inventory.get(inventoryItemId);
+                  if (inv) {
+                    productName = inv.name;
+                  }
+                } catch {
+                  // ignore
+                }
+              }
+
+              const quantityReceivedRaw = item?.quantityReceived ?? rawItem?.quantity_received ?? 0;
+              const quantityReceivedParsed = Number(quantityReceivedRaw);
+              const quantityReceived = Number.isFinite(quantityReceivedParsed) ? quantityReceivedParsed : 0;
+
+              const quantityRemainingRaw = item?.quantityRemaining ?? rawItem?.quantity_remaining;
+              const quantityRemainingParsed = Number(quantityRemainingRaw);
+              const hasExplicitRemaining =
+                quantityRemainingRaw !== undefined &&
+                quantityRemainingRaw !== null &&
+                quantityRemainingRaw !== '' &&
+                Number.isFinite(quantityRemainingParsed);
+
+              const quantityRemaining = hasExplicitRemaining
+                ? Math.max(0, quantityRemainingParsed)
+                : Math.max(0, existingRecord?.quantityRemaining ?? quantityReceived);
+
+              const costPerUnit = this.toNumber(item?.costPerUnit ?? rawItem?.cost_per_unit ?? 0, 0);
+              const totalCost = this.toNumber(
+                item?.totalCost ?? rawItem?.total_cost ?? costPerUnit * quantityReceived,
+                costPerUnit * quantityReceived
+              );
+
+              const sessionIdRaw = item?.sessionId ?? rawItem?.session_id ?? existingRecord?.sessionId;
+              const sessionId =
+                sessionIdRaw !== undefined && sessionIdRaw !== null && String(sessionIdRaw).trim().length > 0
+                  ? String(sessionIdRaw)
+                  : undefined;
+
+              const receivedDate =
+                item?.receivedDate ??
+                rawItem?.received_date ??
+                convertedPo.receivedDate ??
+                (convertedPo as any).received_date ??
+                item?.createdAt ??
+                rawItem?.created_at ??
+                convertedPo.createdAt ??
+                (convertedPo as any).created_at ??
+                new Date().toISOString();
+
+              await db.purchaseHistory.put({
+                id: purchaseItemId,
+                purchaseOrderId: poId,
+                branchId: fallbackBranchId ?? existingRecord?.branchId ?? '',
+                supplierId: supplierId,
+                supplierName: supplierName,
+                productId: inventoryItemId,
+                productName: productName,
+                referenceNumber:
+                  convertedPo.referenceNumber ??
+                  (convertedPo as any).reference_number ??
+                  existingRecord?.referenceNumber,
+                vatAmount,
+                taxRate: this.toNumber(item?.taxRate ?? rawItem?.tax_rate ?? 0, 0),
+                taxCalculationMethod:
+                  item?.taxCalculationMethod ??
+                  rawItem?.tax_calculation_method ??
+                  'exclusive',
+                taxAmount: (() => {
+                  const rawTaxAmount = item?.taxAmount ?? rawItem?.tax_amount;
+                  const parsed = Number(rawTaxAmount);
+                  return Number.isFinite(parsed) ? parsed : undefined;
+                })(),
+                quantityReceived: quantityReceived,
+                quantityRemaining: quantityRemaining,
+                costPerUnit: costPerUnit,
+                totalCost: totalCost,
+                paymentStatus:
+                  convertedPo.paymentStatus ??
+                  (convertedPo as any).payment_status ??
+                  existingRecord?.paymentStatus ??
+                  'Pending',
+                amountDue: this.toNumber(
+                  convertedPo.amountDue ??
+                    (convertedPo as any).amount_due ??
+                    existingRecord?.amountDue ??
+                    0,
+                  0
+                ),
+                receivedDate: receivedDate,
+                expiryDate: item?.expiryDate ?? rawItem?.expiry_date ?? undefined,
+                batchNumber: item?.batchNumber ?? rawItem?.batch_number ?? undefined,
+                sessionId,
+                createdAt: item?.createdAt ?? rawItem?.created_at ?? convertedPo.createdAt,
+                updatedAt: item?.updatedAt ?? rawItem?.updated_at ?? convertedPo.updatedAt,
+                _dirty: false,
+                _operation: undefined,
+                _synced_at: new Date().toISOString()
+              });
+            }
+          } catch (error) {
+            console.error('[Sync] Error applying purchase order:', error);
+          }
+        }
+
+        console.log(`[Sync] Applied ${changes.purchase_orders.length} purchase order changes`);
+      } else {
+        console.log('[Sync] No purchase orders to apply');
+      }
+
       // Apply take orders
       if (changes.take_orders && Array.isArray(changes.take_orders) && changes.take_orders.length > 0) {
         for (const takeOrder of changes.take_orders) {
@@ -1904,6 +2391,14 @@ class SyncService {
               _dirty: false,
               _synced_at: new Date().toISOString()
             };
+
+            mappingToStore.taxCalculationMethod = this.normalizeTaxCalculationMethod(
+              mappingToStore.taxCalculationMethod ??
+              (mappingToStore as any).tax_calculation_method ??
+              mapping.tax_calculation_method ??
+              (mapping as any).calculation_method ??
+              (mapping as any).calculationMethod
+            );
             
             // Remove the incorrect field name
             delete mappingToStore.inventoryItem;
@@ -2106,6 +2601,9 @@ class SyncService {
         void this.notifyEisOnlineStatus(false, branchId);
       }
     });
+
+    // Backfill tax/net/gross fields into local orders on startup.
+    void this.backfillOrderTaxFields();
 
     // Start periodic retry for existing dirty data
     this.startRetryInterval();

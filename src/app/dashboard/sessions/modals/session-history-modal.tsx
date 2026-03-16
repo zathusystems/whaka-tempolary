@@ -105,7 +105,7 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
     const { user } = useAuth();
     const [closedSessions, setClosedSessions] = useState<Session[]>([]);
     const [isLoading, setIsLoading] = useState(false);
-    const [activeTab, setActiveTab] = useState<'fuel' | 'nonFuel'>('fuel');
+    const [activeTab, setActiveTab] = useState<'fuel' | 'nonFuel'>('nonFuel');
 
     useEffect(() => {
         if (branchId) {

@@ -121,6 +121,115 @@ const resolveMappingInventoryItemId = (mapping: any): string => {
   return '';
 };
 
+const resolveCartInventoryItemId = (cartItem: { id?: string; inventoryItemId?: string }): string => {
+  const explicitInventoryId = String(cartItem.inventoryItemId || '').trim();
+  if (explicitInventoryId) {
+    return explicitInventoryId;
+  }
+
+  const rawLineId = String(cartItem.id || '').trim();
+  if (!rawLineId) {
+    return '';
+  }
+
+  // Backward compatibility for legacy synthetic line ids like "<inventoryId>::cart::<ts>".
+  return rawLineId.split('::cart::')[0] || rawLineId;
+};
+
+const mappingReadinessRank = (mapping: any): number => {
+  if (!mapping) {
+    return -1;
+  }
+
+  const approved = Boolean(mapping.isApproved ?? mapping.is_approved);
+  const synced = Boolean(mapping.mraSynced ?? mapping.mra_synced);
+
+  if (approved && synced) {
+    return 3;
+  }
+  if (approved) {
+    return 2;
+  }
+  if (synced) {
+    return 1;
+  }
+  return 0;
+};
+
+const choosePreferredMapping = (current: any, candidate: any): any => {
+  if (!current) {
+    return candidate;
+  }
+
+  const currentRank = mappingReadinessRank(current);
+  const candidateRank = mappingReadinessRank(candidate);
+  if (candidateRank > currentRank) {
+    return candidate;
+  }
+  if (candidateRank < currentRank) {
+    return current;
+  }
+
+  const currentUpdatedAt = new Date(
+    current.updatedAt ||
+      current.updated_at ||
+      current.lastSyncedAt ||
+      current.last_synced_at ||
+      current.createdAt ||
+      current.created_at ||
+      0
+  ).getTime();
+  const candidateUpdatedAt = new Date(
+    candidate.updatedAt ||
+      candidate.updated_at ||
+      candidate.lastSyncedAt ||
+      candidate.last_synced_at ||
+      candidate.createdAt ||
+      candidate.created_at ||
+      0
+  ).getTime();
+
+  return candidateUpdatedAt >= currentUpdatedAt ? candidate : current;
+};
+
+const buildMappingLookup = (mappings: any[]): Map<string, any> => {
+  const lookup = new Map<string, any>();
+
+  for (const mapping of mappings) {
+    const key = resolveMappingInventoryItemId(mapping);
+    if (!key) {
+      continue;
+    }
+
+    lookup.set(key, choosePreferredMapping(lookup.get(key), mapping));
+  }
+
+  return lookup;
+};
+
+type NormalizedTaxType = 'standard' | 'zero' | 'exempt';
+type NormalizedTaxCalculationMethod = 'inclusive' | 'exclusive';
+
+const normalizeMappedTaxType = (value: unknown): NormalizedTaxType => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (
+    normalized === 'zero' ||
+    normalized === 'zero_rated' ||
+    normalized === 'zero-rated' ||
+    normalized === 'vat_zero'
+  ) {
+    return 'zero';
+  }
+  if (normalized === 'exempt' || normalized === 'vat_exempt') {
+    return 'exempt';
+  }
+  return 'standard';
+};
+
+const normalizeTaxCalculationMethod = (value: unknown): NormalizedTaxCalculationMethod => {
+  return String(value || '').trim().toLowerCase() === 'exclusive' ? 'exclusive' : 'inclusive';
+};
+
 const toFiniteNumber = (value: unknown, fallback = 0): number => {
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -134,6 +243,31 @@ const toPositiveNumber = (value: unknown, fallback = 0): number => {
 const toNonNegativeNumber = (value: unknown, fallback = 0): number => {
   const parsed = toFiniteNumber(value, fallback);
   return parsed >= 0 ? parsed : fallback;
+};
+
+const resolvePurchaseVatAmount = (batch: any, grossTotal: number): number => {
+  const providedTaxAmount = toFiniteNumber(batch?.taxAmount, Number.NaN);
+  if (Number.isFinite(providedTaxAmount)) {
+    return providedTaxAmount;
+  }
+  const taxRate = toNonNegativeNumber(batch?.taxRate, 0);
+  if (taxRate <= 0 || grossTotal <= 0) return 0;
+  const divisor = 1 + taxRate / 100;
+  if (divisor <= 0) return 0;
+  return grossTotal - grossTotal / divisor;
+};
+
+const resolveNetUnitCostFromBatch = (batch: any): number => {
+  const receivedQty = toNonNegativeNumber(batch?.quantityReceived, 0);
+  const fallbackQty = receivedQty > 0 ? receivedQty : toNonNegativeNumber(batch?.quantityRemaining, 0);
+  const unitCost = toNonNegativeNumber(batch?.costPerUnit, 0);
+  if (fallbackQty <= 0) return unitCost;
+
+  const grossTotalCandidate = toFiniteNumber(batch?.totalCost, Number.NaN);
+  const grossTotal = Number.isFinite(grossTotalCandidate) ? grossTotalCandidate : unitCost * fallbackQty;
+  const vatAmount = resolvePurchaseVatAmount(batch, grossTotal);
+  const netTotal = Math.max(0, grossTotal - vatAmount);
+  return netTotal / fallbackQty;
 };
 
 const toBoolean = (value: unknown, fallback = false): boolean => {
@@ -483,7 +617,13 @@ export default function PosPage() {
                   const taxType = readyMapping.mra_tax_type === 'zero' || readyMapping.mra_tax_type === 'exempt'
                     ? readyMapping.mra_tax_type
                     : 'standard';
-                  const calculationMethod = readyMapping.tax_calculation_method === 'exclusive'
+                  const calculationMethod = String(
+                    readyMapping.tax_calculation_method ??
+                    readyMapping.taxCalculationMethod ??
+                    readyMapping.calculation_method ??
+                    readyMapping.calculationMethod ??
+                    ''
+                  ).trim().toLowerCase().startsWith('excl')
                     ? 'exclusive'
                     : 'inclusive';
                   const nowIso = new Date().toISOString();
@@ -698,22 +838,150 @@ export default function PosPage() {
       buyerFields.customer_tin = buyerTin;
       buyerPayload.customer_tin = buyerTin;
     }
-    
-    // Note: Product prices already include VAT
-    // So we need to extract tax from the total price, not add it
-    const taxRateAmount = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
-    const grossWithoutTip = cart.reduce((acc, item) => {
-      const quantity = toPositiveNumber(item.quantity, 0);
-      const lineGross = item.isVariablePrice
-        ? toNonNegativeNumber(item.price, 0)
-        : toNonNegativeNumber(item.price, 0) * quantity;
-      return acc + lineGross;
-    }, 0);
-    // Extract tax from gross amount: tax = gross / (1 + tax rate) * tax rate
-    const tax = taxRateAmount > 0 ? (grossWithoutTip / (1 + taxRateAmount)) * taxRateAmount : 0;
-    // Subtotal is gross minus tax
-    const subtotal = grossWithoutTip - tax;
-    const total = grossWithoutTip + tip;
+
+    const defaultTaxRateAmount = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
+    let shouldUseMappings = eisEnabled;
+    let shouldEnforceTaxMapping = eisEnabled && blockSalesIfTaxMappingMissing === true;
+    let mappingByItemId = new Map<string, any>();
+
+    if (shouldUseMappings) {
+      try {
+        const normalizedBranchId = normalizeBranchId(activeBranchId);
+        const shouldScopeByBranch =
+          Boolean(normalizedBranchId) &&
+          !['main', 'main-branch', 'main_branch'].includes(normalizedBranchId.toLowerCase());
+        const localMappings = await db.mraMappings.toArray();
+        const scopedMappings = localMappings.filter((mapping) => {
+          const mappingBranchId = normalizeBranchId(
+            (mapping as any).branchId ??
+              (mapping as any).branch_id ??
+              (mapping as any).branch
+          );
+          if (!mappingBranchId) {
+            return true;
+          }
+          if (!shouldScopeByBranch) {
+            return true;
+          }
+          return mappingBranchId === normalizedBranchId;
+        });
+        mappingByItemId = buildMappingLookup(scopedMappings);
+      } catch (mappingError) {
+        console.warn('[POS Page] Failed to load local MRA mappings, falling back to default tax:', mappingError);
+        shouldUseMappings = false;
+        shouldEnforceTaxMapping = false;
+        mappingByItemId = new Map<string, any>();
+      }
+    }
+
+    const unmappedProducts: string[] = [];
+    let totalTax = 0;
+    let totalNet = 0;
+    let totalGross = 0;
+
+    const computedLineItems = cart.map((cartItem) => {
+      const quantity = toPositiveNumber(cartItem.quantity, 0);
+      const unitPriceRaw = toNonNegativeNumber(cartItem.price, 0);
+      const lineAmount = cartItem.isVariablePrice
+        ? unitPriceRaw
+        : unitPriceRaw * quantity;
+
+      let lineTax = 0;
+      let lineNet = lineAmount;
+      let lineGross = lineAmount;
+      let taxRate = 0;
+      let taxType: NormalizedTaxType = 'standard';
+      let taxCalculationMethod: NormalizedTaxCalculationMethod = 'inclusive';
+
+      if (shouldUseMappings) {
+        const primaryInventoryItemId = String(cartItem.inventoryItemId || '').trim();
+        const fallbackInventoryItemId = resolveCartInventoryItemId(cartItem) || String(cartItem.id || '').trim();
+        const preferredMappingKey = primaryInventoryItemId || fallbackInventoryItemId;
+        let localMapping = mappingByItemId.get(preferredMappingKey);
+        if (!localMapping && fallbackInventoryItemId && fallbackInventoryItemId !== preferredMappingKey) {
+          localMapping = mappingByItemId.get(fallbackInventoryItemId);
+        }
+
+        const isApproved = Boolean(localMapping?.isApproved ?? localMapping?.is_approved);
+        const isSynced = Boolean(localMapping?.mraSynced ?? localMapping?.mra_synced);
+
+        if (localMapping && isApproved && isSynced) {
+          taxType = normalizeMappedTaxType(localMapping.mraTaxType || localMapping.mra_tax_type);
+          taxRate = toFiniteNumber(localMapping.mraTaxRate ?? localMapping.mra_tax_rate ?? 0, 0);
+          taxCalculationMethod = normalizeTaxCalculationMethod(
+            localMapping.taxCalculationMethod || localMapping.tax_calculation_method
+          );
+          const effectiveRate = taxRate / 100;
+
+          if (taxType === 'zero' || taxType === 'exempt' || effectiveRate <= 0) {
+            lineTax = 0;
+            lineNet = lineAmount;
+            lineGross = lineAmount;
+          } else if (taxCalculationMethod === 'exclusive') {
+            lineTax = lineAmount * effectiveRate;
+            lineNet = lineAmount;
+            lineGross = lineAmount + lineTax;
+          } else {
+            lineTax = effectiveRate > 0 ? (lineAmount * effectiveRate) / (1 + effectiveRate) : 0;
+            lineGross = lineAmount;
+            lineNet = lineAmount - lineTax;
+          }
+        } else {
+          const hasLocalMapping = Boolean(localMapping);
+          const reasonSuffix = hasLocalMapping ? ' (mapping pending approval/sync)' : '';
+          if (shouldEnforceTaxMapping) {
+            unmappedProducts.push(`${cartItem.name}${reasonSuffix}`);
+          }
+          if (!shouldEnforceTaxMapping && defaultTaxRateAmount > 0) {
+            taxRate = defaultTaxRateAmount * 100;
+            taxType = 'standard';
+            taxCalculationMethod = 'inclusive';
+            lineTax = (lineAmount * defaultTaxRateAmount) / (1 + defaultTaxRateAmount);
+            lineGross = lineAmount;
+            lineNet = lineAmount - lineTax;
+          }
+        }
+      } else if (defaultTaxRateAmount > 0) {
+        taxRate = defaultTaxRateAmount * 100;
+        taxType = 'standard';
+        taxCalculationMethod = 'inclusive';
+        lineTax = (lineAmount * defaultTaxRateAmount) / (1 + defaultTaxRateAmount);
+        lineGross = lineAmount;
+        lineNet = lineAmount - lineTax;
+      }
+
+      totalTax += lineTax;
+      totalNet += lineNet;
+      totalGross += lineGross;
+
+      const unitPrice = quantity > 0 ? lineAmount / quantity : unitPriceRaw;
+
+      return {
+        cartItem,
+        inventoryItemId: resolveInventoryItemId(cartItem),
+        quantity,
+        unitPrice,
+        lineNet,
+        lineTax,
+        lineGross,
+        taxRate,
+        taxType,
+        taxCalculationMethod,
+      };
+    });
+
+    if (shouldEnforceTaxMapping && unmappedProducts.length > 0) {
+      toast({
+        variant: 'destructive',
+        title: 'MRA Mapping Required',
+        description: `Cannot complete sale. Missing mapping for: ${unmappedProducts.join(', ')}`,
+      });
+      return null;
+    }
+
+    const subtotal = Number(totalNet.toFixed(2));
+    const tax = Number(totalTax.toFixed(2));
+    const total = Number(totalGross.toFixed(2));
     let orderCogs = 0;
     let finalOrder: Order | null = null;
     let orderForBackend: any = null;
@@ -809,7 +1077,8 @@ export default function PosPage() {
                     });
 
                     // Add to order COGS
-                    orderCogs += decrementAmount * toNonNegativeNumber(batch.costPerUnit, 0);
+                    const netUnitCost = resolveNetUnitCostFromBatch(batch);
+                    orderCogs += decrementAmount * netUnitCost;
                     
                     quantityToDecrement -= decrementAmount;
                     totalDecrementedFromBatches += decrementAmount;
@@ -882,35 +1151,20 @@ export default function PosPage() {
           sessionId: sessionForOrder.id,
           pumpName: sessionForOrder.pumpName,
           orderType: 'sale',  // Mark as POS sale
-          items: cart.map(item => {
-            const inventoryItemId = resolveInventoryItemId(item);
-            const quantity = toPositiveNumber(item.quantity, 0);
-            const lineGross = item.isVariablePrice
-              ? toNonNegativeNumber(item.price, 0)
-              : toNonNegativeNumber(item.price, 0) * quantity;
-            const unitPrice = quantity > 0
-              ? lineGross / quantity
-              : toNonNegativeNumber(item.price, 0);
-            const lineTax = taxRateAmount > 0
-              ? (lineGross / (1 + taxRateAmount)) * taxRateAmount
-              : 0;
-            const lineSubtotal = lineGross - lineTax;
-
-            return {
-              id: uuidv4(),
-              inventoryItemId,
-              name: item.name,
-              quantity,
-              price: Number(unitPrice.toFixed(2)),
-              notes: item.notes || '',
-              taxRate: Number((taxRateAmount * 100).toFixed(2)),
-              taxType: 'standard',
-              taxCalculationMethod: 'inclusive',
-              subtotal: Number(lineSubtotal.toFixed(2)),
-              taxAmount: Number(lineTax.toFixed(2)),
-              total: Number(lineGross.toFixed(2)),
-            };
-          }),
+          items: computedLineItems.map((line) => ({
+            id: uuidv4(),
+            inventoryItemId: line.inventoryItemId,
+            name: line.cartItem.name,
+            quantity: line.quantity,
+            price: Number(line.unitPrice.toFixed(2)),
+            notes: line.cartItem.notes || '',
+            taxRate: Number(line.taxRate.toFixed(2)),
+            taxType: line.taxType,
+            taxCalculationMethod: line.taxCalculationMethod,
+            subtotal: Number(line.lineNet.toFixed(2)),
+            taxAmount: Number(line.lineTax.toFixed(2)),
+            total: Number(line.lineGross.toFixed(2)),
+          })),
           status: isKitchenOrder ? 'New' : 'Completed',
           paymentMethod: paymentMethod,
           ...buyerFields,
@@ -943,7 +1197,7 @@ export default function PosPage() {
             _operation: 'update'
         };
 
-        const saleAmount = total - tip;
+        const saleAmount = total;
         switch(paymentMethod) {
             case 'Cash':
                 sessionUpdate.totalCashSales = (sessionForOrder.totalCashSales || 0) + saleAmount;
@@ -1002,34 +1256,20 @@ export default function PosPage() {
           session: sessionForOrder.id,
           branch: sessionForOrder.branchId, // Use session's branchId which is the UUID
           // CRITICAL: Include items with prices so backend can calculate totals
-          items: cart.map(item => {
-            const quantity = toPositiveNumber(item.quantity, 0);
-            const lineGross = item.isVariablePrice
-              ? toNonNegativeNumber(item.price, 0)
-              : toNonNegativeNumber(item.price, 0) * quantity;
-            const unitPrice = quantity > 0
-              ? lineGross / quantity
-              : toNonNegativeNumber(item.price, 0);
-            const lineTax = taxRateAmount > 0
-              ? (lineGross / (1 + taxRateAmount)) * taxRateAmount
-              : 0;
-            const lineSubtotal = lineGross - lineTax;
-
-            return {
-              id: uuidv4(),
-              inventoryItemId: resolveInventoryItemId(item),
-              name: item.name,
-              quantity,
-              price: Number(unitPrice.toFixed(2)),
-              subtotal: Number(lineSubtotal.toFixed(2)),
-              taxAmount: Number(lineTax.toFixed(2)),
-              total: Number(lineGross.toFixed(2)),
-              taxRate: Number((taxRateAmount * 100).toFixed(2)),
-              taxType: 'standard',
-              taxCalculationMethod: 'inclusive',
-              notes: item.notes || '',
-            };
-          })
+          items: computedLineItems.map((line) => ({
+            id: uuidv4(),
+            inventoryItemId: line.inventoryItemId,
+            name: line.cartItem.name,
+            quantity: line.quantity,
+            price: Number(line.unitPrice.toFixed(2)),
+            subtotal: Number(line.lineNet.toFixed(2)),
+            taxAmount: Number(line.lineTax.toFixed(2)),
+            total: Number(line.lineGross.toFixed(2)),
+            taxRate: Number(line.taxRate.toFixed(2)),
+            taxType: line.taxType,
+            taxCalculationMethod: line.taxCalculationMethod,
+            notes: line.cartItem.notes || '',
+          }))
         };
         console.log('[Order] Built backend order:', orderForBackend);
       }

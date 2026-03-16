@@ -372,11 +372,11 @@ export function ProductMappingForm({
   );
 
   const handleAddMapping = () => {
-    if (!selectedProduct || !selectedMraProduct) {
+    if (!selectedProduct) {
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: 'Please select both a product and an MRA code',
+        description: 'Please select a product',
       });
       return;
     }
@@ -400,8 +400,10 @@ export function ProductMappingForm({
       return;
     }
 
-    // Check if MRA code is already used
-    if (mappings.some(m => m.mraCode === selectedMraProduct.code)) {
+    const selectedMraCode = selectedMraProduct?.code?.trim() || '';
+
+    // Check if MRA code is already used (only when provided)
+    if (selectedMraCode && mappings.some(m => m.mraCode === selectedMraCode)) {
       toast({
         variant: 'destructive',
         title: 'Error',
@@ -422,8 +424,8 @@ export function ProductMappingForm({
     const newMapping: ProductMapping = {
       productId: selectedProduct.id,
       productName: selectedProduct.name,
-      mraCode: selectedMraProduct.code,
-      mraName: selectedMraProduct.name,
+      mraCode: selectedMraCode,
+      mraName: selectedMraProduct?.name?.trim() || selectedProduct.name,
       mraTaxType: normalizedTaxType,
       mraTaxRate: effectiveTaxRate,
       mraUnitMeasure: selectedUnitMeasure,
@@ -596,7 +598,7 @@ export function ProductMappingForm({
 
               {/* Select MRA Code */}
               <div className="space-y-2">
-                <FormLabel>Select MRA Code</FormLabel>
+                <FormLabel>Select MRA Code (Optional)</FormLabel>
                 {catalogSource === 'mra_configuration' && (
                   <p className="text-xs text-green-700">
                     Using synced MRA catalog{catalogVersion ? ` (v${catalogVersion})` : ''}.
@@ -648,7 +650,7 @@ export function ProductMappingForm({
               onClick={handleAddMapping}
               variant="outline"
               className="w-full"
-              disabled={!selectedProduct || !selectedMraProduct}
+              disabled={!selectedProduct || !selectedTax}
             >
               <Plus className="mr-2 h-4 w-4" />
               Add Mapping
@@ -684,7 +686,7 @@ export function ProductMappingForm({
                             </TableCell>
                             <TableCell>
                               <code className="text-xs bg-muted px-2 py-1 rounded">
-                                {mapping.mraCode}
+                                {mapping.mraCode || '—'}
                               </code>
                             </TableCell>
                             <TableCell className="text-sm">

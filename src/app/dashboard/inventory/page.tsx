@@ -409,6 +409,32 @@ export default function InventoryPage() {
               supplierName: supplierName,  // ✅ Will be 'No Supplier' if null
               productId: poItem.inventory_item,
               productName: productName,
+              referenceNumber:
+                (purchase as any).reference_number ||
+                (purchase as any).referenceNumber ||
+                existingRecord?.referenceNumber,
+              vatAmount: (() => {
+                const rawVat =
+                  (purchase as any).vat_amount ??
+                  (purchase as any).vatAmount ??
+                  existingRecord?.vatAmount;
+                const parsedVat = Number(rawVat);
+                return Number.isFinite(parsedVat) ? parsedVat : undefined;
+              })(),
+              taxRate: (() => {
+                const rawRate = poItem.tax_rate ?? poItem.taxRate;
+                const parsed = Number(rawRate);
+                return Number.isFinite(parsed) ? parsed : undefined;
+              })(),
+              taxCalculationMethod:
+                poItem.tax_calculation_method ??
+                poItem.taxCalculationMethod ??
+                existingRecord?.taxCalculationMethod,
+              taxAmount: (() => {
+                const rawAmount = poItem.tax_amount ?? poItem.taxAmount;
+                const parsed = Number(rawAmount);
+                return Number.isFinite(parsed) ? parsed : undefined;
+              })(),
               quantityReceived: quantityReceived,
               quantityRemaining: quantityRemaining,
               costPerUnit: Number(poItem.cost_per_unit || poItem.costPerUnit || 0),

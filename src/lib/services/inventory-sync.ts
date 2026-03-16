@@ -57,6 +57,11 @@ function toBoolean(value: unknown, fallback = false): boolean {
   return fallback;
 }
 
+function normalizeTaxCalculationMethod(value: unknown): 'inclusive' | 'exclusive' {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return normalized.startsWith('excl') ? 'exclusive' : 'inclusive';
+}
+
 function normalizeInventoryProduct(
   backendProduct: any,
   branchId: string,
@@ -283,6 +288,14 @@ export async function syncInventoryFromBackend(branchId: string): Promise<{
             _dirty: false,
             _synced_at: new Date().toISOString()
           };
+
+          mappingToStore.taxCalculationMethod = normalizeTaxCalculationMethod(
+            mappingToStore.taxCalculationMethod ??
+            (mappingToStore as any).tax_calculation_method ??
+            mapping.tax_calculation_method ??
+            (mapping as any).calculation_method ??
+            (mapping as any).calculationMethod
+          );
 
           delete (mappingToStore as any).inventoryItem;
 

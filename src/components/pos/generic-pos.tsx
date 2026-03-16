@@ -21,6 +21,7 @@ import type { CartItem, PaymentMethod } from '@/app/dashboard/pos/page';
 import type { InventoryItem, Order, TaxRate } from '@/lib/db';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useCurrency } from '@/hooks/use-currency';
+import { authFetch } from '@/lib/auth-fetch';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -246,8 +247,17 @@ const buildMappingLookup = (mappings: any[]): Map<string, any> => {
 };
 
 const normalizeBranchIdentifier = (value: unknown): string => {
+  if (value && typeof value === 'object') {
+    const maybeId = (value as any).id ?? (value as any).branch_id ?? (value as any).branchId ?? (value as any).branch;
+    if (maybeId !== undefined && maybeId !== value) {
+      return normalizeBranchIdentifier(maybeId);
+    }
+    return '';
+  }
+
   const normalized = String(value ?? '').trim();
   if (!normalized) return '';
+  if (normalized === '[object Object]') return '';
 
   const brnMatch = /^BRN-(\d+)$/i.exec(normalized);
   if (brnMatch) return brnMatch[1];
@@ -274,6 +284,17 @@ type ProductTaxMappingDetail = {
   taxCalculationBasis: TaxCalculationBasis;
   taxableAmount: number;
   mappingStatus: MappingStatus;
+  mappingId?: string;
+  mappingBranchId?: string;
+  mappingSource?: 'local' | 'default' | 'none';
+};
+
+type CartItemTaxDetail = {
+  amount: number;
+  rate: number;
+  taxType: NormalizedTaxType;
+  method: NormalizedTaxCalculationMethod;
+  status: MappingStatus;
 };
 
 const normalizeMappedTaxType = (value: unknown): NormalizedTaxType => {
@@ -293,7 +314,18 @@ const normalizeMappedTaxType = (value: unknown): NormalizedTaxType => {
 };
 
 const normalizeTaxCalculationMethod = (value: unknown): 'inclusive' | 'exclusive' => {
-  return String(value || '').trim().toLowerCase() === 'exclusive' ? 'exclusive' : 'inclusive';
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized.startsWith('excl') ? 'exclusive' : 'inclusive';
+};
+
+const resolveMappingTaxMethod = (mapping: any): 'inclusive' | 'exclusive' => {
+  if (!mapping) return 'inclusive';
+  return normalizeTaxCalculationMethod(
+    mapping.taxCalculationMethod ??
+      mapping.tax_calculation_method ??
+      mapping.calculationMethod ??
+      mapping.calculation_method
+  );
 };
 
 const formatTaxTypeLabel = (taxType: NormalizedTaxType): string => {
@@ -391,19 +423,41 @@ const CartItemView = ({
   item,
   onUpdateQuantity,
   currencyFormatter,
+  taxDetail,
+  showTaxStatus,
 }: {
   item: CartItem;
   onUpdateQuantity: (itemId: string, quantity: number) => void;
   currencyFormatter: (amount: number) => string;
+  taxDetail?: CartItemTaxDetail;
+  showTaxStatus?: boolean;
 }) => {
   const total = item.isVariablePrice ? item.price : item.price * item.quantity;
   const isVariable = item.isVariablePrice;
+  const taxRateLabel = taxDetail && Number.isFinite(taxDetail.rate) ? `${taxDetail.rate.toFixed(2)}%` : '0%';
+  const taxMethodLabel =
+    taxDetail?.method === 'exclusive'
+      ? 'EXC'
+      : taxDetail?.method === 'inclusive'
+        ? 'INC'
+        : 'N/A';
+  const taxDescriptor = taxDetail
+    ? taxDetail.taxType === 'standard'
+      ? `VAT ${taxRateLabel}${taxMethodLabel !== 'N/A' ? ` (${taxMethodLabel})` : ''}`
+      : taxDetail.taxType === 'unmapped'
+        ? 'Tax'
+        : `${formatTaxTypeLabel(taxDetail.taxType)} VAT`
+    : '';
+  const taxStatusLabel =
+    taxDetail && showTaxStatus && taxDetail.status !== 'ready'
+      ? ` • ${formatMappingStatusLabel(taxDetail.status)}`
+      : '';
 
   return (
-    <div className="flex items-center gap-4 py-3">
-      <div className="flex-1">
-        <p className="font-medium">{item.name}</p>
-        <p className="text-sm text-muted-foreground">
+    <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-start gap-3 py-3">
+      <div className="min-w-0 space-y-1">
+        <p className="font-medium truncate">{item.name}</p>
+        <p className="text-sm text-muted-foreground break-words">
           {isVariable
             ? `${item.quantity.toFixed(3)} ${item.unitType} @ ${currencyFormatter(item.price / item.quantity)}/${item.unitType}`
             : currencyFormatter(item.price)}
@@ -430,15 +484,25 @@ const CartItemView = ({
           </Button>
         </div>
       )}
-      <p className="w-16 text-right font-semibold">{currencyFormatter(total)}</p>
-      <Button
-        size="icon"
-        variant="ghost"
-        className="h-8 w-8 text-muted-foreground hover:text-destructive"
-        onClick={() => onUpdateQuantity(item.id, 0)}
-      >
-        <Trash2 className="h-4 w-4" />
-      </Button>
+      <div className="flex w-32 flex-col items-end gap-1 text-right">
+        <div className="flex items-center gap-2">
+          <p className="font-semibold">{currencyFormatter(total)}</p>
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-7 w-7 text-muted-foreground hover:text-destructive"
+            onClick={() => onUpdateQuantity(item.id, 0)}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+        {taxDetail && (
+          <p className="text-xs text-muted-foreground">
+            {taxDescriptor}
+            {taxStatusLabel}: <span className="font-medium text-foreground">{currencyFormatter(taxDetail.amount)}</span>
+          </p>
+        )}
+      </div>
     </div>
   );
 };
@@ -489,8 +553,29 @@ const PaymentDialog = ({
     const [productTaxMappings, setProductTaxMappings] = useState<Record<string, ProductTaxMappingDetail>>({});
     const [unmappedProducts, setUnmappedProducts] = useState<string[]>([]);
     const [isProcessingPayment, setIsProcessingPayment] = useState(false);
-    const shouldEnforceTaxMapping = blockSalesIfTaxMappingMissing === true;
+    const shouldEnforceTaxMapping = eisEnabled && blockSalesIfTaxMappingMissing === true;
     const defaultTaxRateDecimal = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
+    const mappingRefreshAttemptedRef = useRef(false);
+    const mappingItemFetchAttemptedRef = useRef(false);
+    const taxMethodSummary = useMemo(() => {
+        const methods = new Set<'inclusive' | 'exclusive'>();
+        Object.values(productTaxMappings).forEach((mapping) => {
+            if (mapping.taxCalculationMethod === 'inclusive' || mapping.taxCalculationMethod === 'exclusive') {
+                methods.add(mapping.taxCalculationMethod);
+            }
+        });
+
+        if (methods.size === 1) {
+            return methods.has('exclusive') ? 'Exclusive' : 'Inclusive';
+        }
+        if (methods.size > 1) {
+            return 'Mixed';
+        }
+        if (!shouldEnforceTaxMapping && defaultTaxRateDecimal > 0) {
+            return 'Default (Inclusive)';
+        }
+        return 'N/A';
+    }, [productTaxMappings, shouldEnforceTaxMapping, defaultTaxRateDecimal]);
 
     useEffect(() => {
         setStep('payment');
@@ -509,6 +594,8 @@ const PaymentDialog = ({
         setProductTaxMappings({});
         setUnmappedProducts([]);
         setIsProcessingPayment(false);
+        mappingRefreshAttemptedRef.current = false;
+        mappingItemFetchAttemptedRef.current = false;
     }, [resetToken, subtotal, tax, taxLabel]);
 
     useEffect(() => {
@@ -521,18 +608,6 @@ const PaymentDialog = ({
             console.log('[PaymentDialog] Starting tax calculation, cart items:', cart?.length);
             if (!cart || cart.length === 0) {
                 console.log('[PaymentDialog] No cart items, using default tax:', tax);
-                if (!cancelled) {
-                    setCalculatedTax(tax);
-                    setCalculatedNetAmount(subtotal);
-                    setCalculatedGrossAmount(subtotal + tax);
-                    setCalculatedTaxLabel(effectiveTaxLabel);
-                    setProductTaxMappings({});
-                    setUnmappedProducts([]);
-                }
-                return;
-            }
-
-            if (!eisEnabled) {
                 if (!cancelled) {
                     setCalculatedTax(tax);
                     setCalculatedNetAmount(subtotal);
@@ -574,8 +649,207 @@ const PaymentDialog = ({
                     return mappingBranchId === activeBranchId;
                 });
 
-                const mappingByItemId = buildMappingLookup(scopedMappings);
+                let mappingByItemId = buildMappingLookup(scopedMappings);
+                const missingMappingKeys: string[] = [];
 
+                for (const cartItem of cart) {
+                    const primaryInventoryItemId = String(cartItem.inventoryItemId || '').trim();
+                    const fallbackInventoryItemId = resolveCartInventoryItemId(cartItem) || String(cartItem.id || '').trim();
+                    const preferredMappingKey = primaryInventoryItemId || fallbackInventoryItemId;
+                    let localMapping = mappingByItemId.get(preferredMappingKey);
+                    if (!localMapping && fallbackInventoryItemId && fallbackInventoryItemId !== preferredMappingKey) {
+                        localMapping = mappingByItemId.get(fallbackInventoryItemId);
+                    }
+                    if (!localMapping && preferredMappingKey) {
+                        missingMappingKeys.push(preferredMappingKey);
+                    }
+                }
+
+                if (
+                    missingMappingKeys.length > 0 &&
+                    !mappingRefreshAttemptedRef.current &&
+                    typeof navigator !== 'undefined' &&
+                    navigator.onLine &&
+                    branchId
+                ) {
+                    mappingRefreshAttemptedRef.current = true;
+                    try {
+                        const backendBranchId = normalizeBranchIdentifier(branchId);
+                        if (backendBranchId) {
+                            const mappingsResponse = await authFetch.fetch<any>(
+                                `/inventory/mra-mappings/?branch_id=${encodeURIComponent(backendBranchId)}`
+                            );
+                            const refreshedMappings = Array.isArray(mappingsResponse)
+                                ? mappingsResponse
+                                : Array.isArray(mappingsResponse?.results)
+                                    ? mappingsResponse.results
+                                    : [];
+                            const nowIso = new Date().toISOString();
+
+                            for (const rawMapping of refreshedMappings) {
+                                const mappingItemId = resolveMappingInventoryItemId(rawMapping);
+                                if (!mappingItemId) {
+                                    continue;
+                                }
+
+                                const rawTaxType = rawMapping.mra_tax_type ?? rawMapping.mraTaxType;
+                                const taxType =
+                                    rawTaxType === 'zero' || rawTaxType === 'exempt'
+                                        ? rawTaxType
+                                        : 'standard';
+                                const calculationMethod = resolveMappingTaxMethod(rawMapping);
+
+                                await db.mraMappings.put({
+                                    id: String(rawMapping.id || `${mappingItemId}-mapping`),
+                                    inventoryItemId: mappingItemId,
+                                    branchId: normalizeBranchIdentifier(
+                                        rawMapping.branch ??
+                                        rawMapping.branch_id ??
+                                        backendBranchId
+                                    ) || undefined,
+                                    mraProductCode: rawMapping.mra_product_code || rawMapping.mraProductCode || '',
+                                    mraProductName: rawMapping.mra_product_name || rawMapping.mraProductName || '',
+                                    mraTaxType: taxType,
+                                    mraTaxRate: Number(rawMapping.mra_tax_rate ?? rawMapping.mraTaxRate ?? 0),
+                                    mraUnitMeasure: rawMapping.mra_unit_measure || rawMapping.mraUnitMeasure || '',
+                                    taxCalculationMethod: calculationMethod,
+                                    isApproved: Boolean(rawMapping.is_approved ?? rawMapping.isApproved),
+                                    approvedAt: rawMapping.approved_at || rawMapping.approvedAt || undefined,
+                                    mraSynced: Boolean(rawMapping.mra_synced ?? rawMapping.mraSynced),
+                                    lastSyncedAt: rawMapping.last_synced_at || rawMapping.lastSyncedAt || undefined,
+                                    createdAt: rawMapping.created_at || rawMapping.createdAt || nowIso,
+                                    updatedAt: nowIso,
+                                    _dirty: false,
+                                    _synced_at: nowIso,
+                                });
+                            }
+
+                            const refreshedLocalMappings = await db.mraMappings.toArray();
+                            const refreshedScopedMappings = refreshedLocalMappings.filter((mapping) => {
+                                const mappingBranchId = normalizeBranchIdentifier(
+                                    (mapping as any).branchId ??
+                                    (mapping as any).branch_id ??
+                                    (mapping as any).branch
+                                );
+
+                                if (!mappingBranchId) {
+                                    return true;
+                                }
+                                if (!shouldScopeByBranch) {
+                                    return true;
+                                }
+                                return mappingBranchId === activeBranchId;
+                            });
+                            mappingByItemId = buildMappingLookup(refreshedScopedMappings);
+                        }
+                    } catch (refreshError) {
+                        console.warn('[PaymentDialog] Failed to refresh MRA mappings:', refreshError);
+                    }
+                }
+
+                if (
+                    missingMappingKeys.length > 0 &&
+                    !mappingItemFetchAttemptedRef.current &&
+                    typeof navigator !== 'undefined' &&
+                    navigator.onLine &&
+                    branchId
+                ) {
+                    mappingItemFetchAttemptedRef.current = true;
+                    try {
+                        const backendBranchId = normalizeBranchIdentifier(branchId);
+                        if (backendBranchId) {
+                            const unresolvedKeys: string[] = [];
+                            for (const cartItem of cart) {
+                                const primaryInventoryItemId = String(cartItem.inventoryItemId || '').trim();
+                                const fallbackInventoryItemId = resolveCartInventoryItemId(cartItem) || String(cartItem.id || '').trim();
+                                const preferredMappingKey = primaryInventoryItemId || fallbackInventoryItemId;
+                                let localMapping = mappingByItemId.get(preferredMappingKey);
+                                if (!localMapping && fallbackInventoryItemId && fallbackInventoryItemId !== preferredMappingKey) {
+                                    localMapping = mappingByItemId.get(fallbackInventoryItemId);
+                                }
+                                if (!localMapping && preferredMappingKey) {
+                                    unresolvedKeys.push(preferredMappingKey);
+                                }
+                            }
+
+                            for (const inventoryItemId of unresolvedKeys) {
+                                try {
+                                    const response = await authFetch.fetch<any>(
+                                        `/inventory/mra-mappings/?inventory_item=${encodeURIComponent(inventoryItemId)}&branch_id=${encodeURIComponent(backendBranchId)}`
+                                    );
+                                    const mappings = Array.isArray(response)
+                                        ? response
+                                        : Array.isArray(response?.results)
+                                            ? response.results
+                                            : [];
+                                    if (!mappings.length) {
+                                        continue;
+                                    }
+
+                                    const readyMapping =
+                                        mappings.find((m: any) => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced)) ||
+                                        mappings[0];
+
+                                    const rawTaxType = readyMapping.mra_tax_type ?? readyMapping.mraTaxType;
+                                    const taxType =
+                                        rawTaxType === 'zero' || rawTaxType === 'exempt'
+                                            ? rawTaxType
+                                            : 'standard';
+                                    const calculationMethod = resolveMappingTaxMethod(readyMapping);
+                                    const nowIso = new Date().toISOString();
+
+                                    await db.mraMappings.put({
+                                        id: String(readyMapping.id || `${inventoryItemId}-mapping`),
+                                        inventoryItemId,
+                                        branchId: normalizeBranchIdentifier(
+                                            readyMapping.branch ??
+                                            readyMapping.branch_id ??
+                                            backendBranchId
+                                        ) || undefined,
+                                        mraProductCode: readyMapping.mra_product_code || readyMapping.mraProductCode || '',
+                                        mraProductName: readyMapping.mra_product_name || readyMapping.mraProductName || '',
+                                        mraTaxType: taxType,
+                                        mraTaxRate: Number(readyMapping.mra_tax_rate ?? readyMapping.mraTaxRate ?? 0),
+                                        mraUnitMeasure: readyMapping.mra_unit_measure || readyMapping.mraUnitMeasure || '',
+                                        taxCalculationMethod: calculationMethod,
+                                        isApproved: Boolean(readyMapping.is_approved ?? readyMapping.isApproved),
+                                        approvedAt: readyMapping.approved_at || readyMapping.approvedAt || undefined,
+                                        mraSynced: Boolean(readyMapping.mra_synced ?? readyMapping.mraSynced),
+                                        lastSyncedAt: readyMapping.last_synced_at || readyMapping.lastSyncedAt || undefined,
+                                        createdAt: readyMapping.created_at || readyMapping.createdAt || nowIso,
+                                        updatedAt: nowIso,
+                                        _dirty: false,
+                                        _synced_at: nowIso,
+                                    });
+                                } catch (itemError) {
+                                    console.warn('[PaymentDialog] Failed to fetch mapping for item:', inventoryItemId, itemError);
+                                }
+                            }
+
+                            const refreshedLocalMappings = await db.mraMappings.toArray();
+                            const refreshedScopedMappings = refreshedLocalMappings.filter((mapping) => {
+                                const mappingBranchId = normalizeBranchIdentifier(
+                                    (mapping as any).branchId ??
+                                    (mapping as any).branch_id ??
+                                    (mapping as any).branch
+                                );
+
+                                if (!mappingBranchId) {
+                                    return true;
+                                }
+                                if (!shouldScopeByBranch) {
+                                    return true;
+                                }
+                                return mappingBranchId === activeBranchId;
+                            });
+                            mappingByItemId = buildMappingLookup(refreshedScopedMappings);
+                        }
+                    } catch (refreshError) {
+                        console.warn('[PaymentDialog] Failed to fetch per-item MRA mappings:', refreshError);
+                    }
+                }
+
+                const perItemFetchedMappings = new Map<string, any>();
                 let totalTax = 0;
                 let totalNet = 0;
                 let totalGross = 0;
@@ -593,6 +867,31 @@ const PaymentDialog = ({
                     let localMapping = mappingByItemId.get(preferredMappingKey);
                     if (!localMapping && fallbackInventoryItemId && fallbackInventoryItemId !== preferredMappingKey) {
                         localMapping = mappingByItemId.get(fallbackInventoryItemId);
+                    }
+                    if (!localMapping && preferredMappingKey && perItemFetchedMappings.has(preferredMappingKey)) {
+                        localMapping = perItemFetchedMappings.get(preferredMappingKey);
+                    }
+                    if (!localMapping && preferredMappingKey && typeof navigator !== 'undefined' && navigator.onLine && branchId) {
+                        try {
+                            const backendBranchId = normalizeBranchIdentifier(branchId);
+                            const response = await authFetch.fetch<any>(
+                                `/inventory/mra-mappings/?inventory_item=${encodeURIComponent(preferredMappingKey)}&branch_id=${encodeURIComponent(backendBranchId)}`
+                            );
+                            const fetchedMappings = Array.isArray(response)
+                                ? response
+                                : Array.isArray(response?.results)
+                                    ? response.results
+                                    : [];
+                            if (fetchedMappings.length) {
+                                const readyMapping =
+                                    fetchedMappings.find((m: any) => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced)) ||
+                                    fetchedMappings[0];
+                                perItemFetchedMappings.set(preferredMappingKey, readyMapping);
+                                localMapping = readyMapping;
+                            }
+                        } catch (fetchError) {
+                            console.warn('[PaymentDialog] Failed to fetch mapping for cart item:', preferredMappingKey, fetchError);
+                        }
                     }
                     const lineAmount = cartItem.isVariablePrice
                         ? Number(cartItem.price || 0)
@@ -618,9 +917,7 @@ const PaymentDialog = ({
                             taxCalculationBasis = 'not_applicable';
                             console.log(`[PaymentDialog] ✓ Product ${cartItem.name} is ${taxType.toUpperCase()} - no tax applied`);
                         } else {
-                            taxCalculationMethod = normalizeTaxCalculationMethod(
-                                localMapping.taxCalculationMethod || localMapping.tax_calculation_method
-                            );
+                            taxCalculationMethod = resolveMappingTaxMethod(localMapping);
                             const effectiveTaxRate = normalizedRate / 100;
                             
                             if (taxCalculationMethod === 'exclusive') {
@@ -654,6 +951,14 @@ const PaymentDialog = ({
                             taxCalculationBasis,
                             taxableAmount: itemNet,
                             mappingStatus: 'ready',
+                            mappingId: localMapping?.id ? String(localMapping.id) : undefined,
+                            mappingBranchId: String(
+                                localMapping?.branchId ??
+                                localMapping?.branch_id ??
+                                localMapping?.branch ??
+                                ''
+                            ).trim() || undefined,
+                            mappingSource: 'local',
                         };
                     } else {
                         const hasLocalMapping = Boolean(localMapping);
@@ -663,7 +968,83 @@ const PaymentDialog = ({
                         if (shouldEnforceTaxMapping) {
                             unmapped.push(`${cartItem.name}${reasonSuffix}`);
                         }
-                        if (!shouldEnforceTaxMapping && defaultTaxRateDecimal > 0) {
+                        const fallbackTaxType = hasLocalMapping
+                            ? normalizeMappedTaxType(localMapping.mraTaxType || localMapping.mra_tax_type)
+                            : 'standard';
+                        const fallbackRate = hasLocalMapping
+                            ? Number(localMapping.mraTaxRate ?? localMapping.mra_tax_rate ?? 0)
+                            : 0;
+                        const normalizedFallbackRate = Number.isFinite(fallbackRate) ? fallbackRate : 0;
+                        const fallbackMethod = hasLocalMapping
+                            ? resolveMappingTaxMethod(localMapping)
+                            : 'inclusive';
+
+                        if (!shouldEnforceTaxMapping && hasLocalMapping && (fallbackTaxType === 'zero' || fallbackTaxType === 'exempt')) {
+                            itemTax = 0;
+                            itemNet = lineAmount;
+                            itemGross = lineAmount;
+                            taxCalculationBasis = 'not_applicable';
+                            totalNet += itemNet;
+                            totalGross += itemGross;
+                            mappings[itemId] = {
+                                rate: normalizedFallbackRate,
+                                taxAmount: 0,
+                                netAmount: itemNet,
+                                grossAmount: itemGross,
+                                lineAmount,
+                                taxType: fallbackTaxType,
+                                taxCalculationMethod: 'not_applicable',
+                                taxCalculationBasis,
+                                taxableAmount: itemNet,
+                                mappingStatus,
+                                mappingId: localMapping?.id ? String(localMapping.id) : undefined,
+                                mappingBranchId: String(
+                                    localMapping?.branchId ??
+                                    localMapping?.branch_id ??
+                                    localMapping?.branch ??
+                                    ''
+                                ).trim() || undefined,
+                                mappingSource: 'local',
+                            };
+                        } else if (!shouldEnforceTaxMapping && hasLocalMapping && normalizedFallbackRate > 0) {
+                            const effectiveTaxRate = normalizedFallbackRate / 100;
+                            if (fallbackMethod === 'exclusive') {
+                                itemTax = lineAmount * effectiveTaxRate;
+                                itemNet = lineAmount;
+                                itemGross = lineAmount + itemTax;
+                                taxCalculationBasis = 'net_exclusive';
+                            } else {
+                                itemTax = effectiveTaxRate > 0
+                                    ? lineAmount * effectiveTaxRate / (1 + effectiveTaxRate)
+                                    : 0;
+                                itemGross = lineAmount;
+                                itemNet = lineAmount - itemTax;
+                                taxCalculationBasis = 'gross_inclusive';
+                            }
+                            totalTax += itemTax;
+                            totalNet += itemNet;
+                            totalGross += itemGross;
+                            mappings[itemId] = {
+                                rate: normalizedFallbackRate,
+                                taxAmount: itemTax,
+                                netAmount: itemNet,
+                                grossAmount: itemGross,
+                                lineAmount,
+                                taxType: fallbackTaxType,
+                                taxCalculationMethod: fallbackMethod,
+                                taxCalculationBasis,
+                                taxableAmount: itemNet,
+                                mappingStatus,
+                                mappingId: localMapping?.id ? String(localMapping.id) : undefined,
+                                mappingBranchId: String(
+                                    localMapping?.branchId ??
+                                    localMapping?.branch_id ??
+                                    localMapping?.branch ??
+                                    ''
+                                ).trim() || undefined,
+                                mappingSource: 'local',
+                            };
+                        } else if (!shouldEnforceTaxMapping && defaultTaxRateDecimal > 0) {
                             itemTax = lineAmount * defaultTaxRateDecimal / (1 + defaultTaxRateDecimal);
                             itemGross = lineAmount;
                             itemNet = lineAmount - itemTax;
@@ -682,6 +1063,7 @@ const PaymentDialog = ({
                                 taxCalculationBasis,
                                 taxableAmount: itemNet,
                                 mappingStatus,
+                                mappingSource: 'default',
                             };
                         } else {
                             totalNet += lineAmount;
@@ -697,6 +1079,7 @@ const PaymentDialog = ({
                                 taxCalculationBasis: 'unmapped',
                                 taxableAmount: lineAmount,
                                 mappingStatus,
+                                mappingSource: 'none',
                             };
                         }
                     }
@@ -748,7 +1131,7 @@ const PaymentDialog = ({
 
         for (const item of cart || []) {
             const mapping = productTaxMappings[String(item.id)];
-            if (!mapping || mapping.mappingStatus !== 'ready') {
+            if (!mapping || mapping.taxCalculationMethod === 'unmapped') {
                 continue;
             }
 
@@ -783,6 +1166,23 @@ const PaymentDialog = ({
 
         return Array.from(breakdown.values()).sort((a, b) => b.rate - a.rate);
     }, [cart, productTaxMappings]);
+
+    const taxMethodRateSummary = useMemo(() => {
+        if (receiptStyleTaxBreakdown.length === 0) return '';
+        return receiptStyleTaxBreakdown
+            .map((tax) => {
+                const methodShortLabel =
+                    tax.method === 'exclusive'
+                        ? 'EXC'
+                        : tax.method === 'inclusive'
+                            ? 'INC'
+                            : 'N/A';
+                const displayTaxRate = (Number.isFinite(tax.rate) ? tax.rate : 0).toFixed(2);
+                const countLabel = tax.count > 1 ? ` (x${tax.count})` : '';
+                return `${methodShortLabel} ${displayTaxRate}%${countLabel}`;
+            })
+            .join(' · ');
+    }, [receiptStyleTaxBreakdown]);
 
     const handleSetTip = (percentage: number) => {
         setTip(calculatedNetAmount * percentage);
@@ -1339,6 +1739,16 @@ const PaymentDialog = ({
                 <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
                     <div className="flex justify-between text-xs"><span>Net Amount (Before VAT)</span><span>{currencyFormatter(calculatedNetAmount)}</span></div>
                     <div className="flex justify-between text-xs"><span>{calculatedTaxLabel || 'VAT Amount'}</span><span className="text-green-600 font-semibold">{currencyFormatter(calculatedTax)}</span></div>
+                    <div className="flex justify-between text-[11px] text-muted-foreground">
+                        <span>Tax Method</span>
+                        <span>{taxMethodSummary}</span>
+                    </div>
+                    {taxMethodRateSummary && (
+                        <div className="flex justify-between text-[11px] text-muted-foreground">
+                            <span>Methods & Rates</span>
+                            <span className="text-right">{taxMethodRateSummary}</span>
+                        </div>
+                    )}
                     <div className="flex justify-between text-sm font-semibold"><span>Gross Amount (Including VAT)</span><span>{currencyFormatter(calculatedGrossAmount)}</span></div>
                     <Separator className="my-1" />
                     <div className="flex justify-between text-lg font-bold text-primary"><span>Total Amount Due</span><span>{currencyFormatter(total)}</span></div>
@@ -1391,6 +1801,11 @@ const PaymentDialog = ({
                                             <span>Net: {currencyFormatter(mapping.netAmount)}</span>
                                             <span>Tax: {currencyFormatter(mapping.taxAmount)}</span>
                                             <span>Gross: {currencyFormatter(mapping.grossAmount)}</span>
+                                        </div>
+                                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+                                            <span>Mapping: {mapping.mappingId || 'none'}</span>
+                                            <span>Branch: {mapping.mappingBranchId || 'any'}</span>
+                                            <span>Source: {mapping.mappingSource || 'unknown'}</span>
                                         </div>
                                     </div>
                                 );
@@ -1580,15 +1995,10 @@ export const GenericPos = ({
   const [showPrinterConfig, setShowPrinterConfig] = useState(false);
   const [paymentSessionId, setPaymentSessionId] = useState(0);
   const { format: formatCurrency } = useCurrency();
-  const shouldEnforceTaxMapping = blockSalesIfTaxMappingMissing === true;
+  const shouldEnforceTaxMapping = eisEnabled && blockSalesIfTaxMappingMissing === true;
   
-  const taxRate = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
+  const defaultTaxRateDecimal = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
   const taxLabel = defaultTaxRate ? `${defaultTaxRate.name} (${defaultTaxRate.rate}%)` : 'Tax';
-
-  const total = cart.reduce((acc, item) => acc + (item.isVariablePrice ? item.price : item.price * item.quantity), 0);
-  const tax = taxRate > 0 ? (total / (1 + taxRate)) * taxRate : 0;
-  const subtotal = total - tax;
-  const hasItemsInCart = cart.length > 0;
 
   const mraMappings = useLiveQuery(() => db.mraMappings.toArray());
 
@@ -1655,6 +2065,166 @@ export const GenericPos = ({
 
     return buildMappingLookup(scopedMappings);
   }, [branchId, mraMappings]);
+
+  const cartSummary = useMemo(() => {
+    if (!cart || cart.length === 0) {
+      return {
+        net: 0,
+        tax: 0,
+        gross: 0,
+        methodSummary: 'N/A' as const,
+        perItemTax: {} as Record<string, CartItemTaxDetail>,
+      };
+    }
+
+    let totalTax = 0;
+    let totalNet = 0;
+    let totalGross = 0;
+    const methods = new Set<'inclusive' | 'exclusive'>();
+    const perItemTax: Record<string, CartItemTaxDetail> = {};
+
+    for (const cartItem of cart) {
+      const itemKey = String(cartItem.id || '');
+      const primaryInventoryItemId = String(cartItem.inventoryItemId || '').trim();
+      const fallbackInventoryItemId = resolveCartInventoryItemId(cartItem) || String(cartItem.id || '').trim();
+      const preferredMappingKey = primaryInventoryItemId || fallbackInventoryItemId;
+      let localMapping = mappingByItemId.get(preferredMappingKey);
+      if (!localMapping && fallbackInventoryItemId && fallbackInventoryItemId !== preferredMappingKey) {
+        localMapping = mappingByItemId.get(fallbackInventoryItemId);
+      }
+
+      const lineAmount = cartItem.isVariablePrice
+        ? Number(cartItem.price || 0)
+        : Number(cartItem.price || 0) * Number(cartItem.quantity || 0);
+      let itemTax = 0;
+      let itemNet = lineAmount;
+      let itemGross = lineAmount;
+      let taxType: NormalizedTaxType = 'unmapped';
+      let method: NormalizedTaxCalculationMethod = 'unmapped';
+      let ratePercent = 0;
+      let status: MappingStatus = 'unmapped';
+
+      const hasMapping = Boolean(localMapping);
+      const isApproved = Boolean(localMapping?.isApproved ?? localMapping?.is_approved);
+      const isSynced = Boolean(localMapping?.mraSynced ?? localMapping?.mra_synced);
+      const fallbackTaxType = hasMapping
+        ? normalizeMappedTaxType(localMapping.mraTaxType || localMapping.mra_tax_type)
+        : 'standard';
+      const fallbackRate = hasMapping
+        ? Number(localMapping.mraTaxRate ?? localMapping.mra_tax_rate ?? 0)
+        : 0;
+      const normalizedFallbackRate = Number.isFinite(fallbackRate) ? fallbackRate : 0;
+      const fallbackMethod = hasMapping ? resolveMappingTaxMethod(localMapping) : 'inclusive';
+
+      if (hasMapping) {
+        status = isApproved && isSynced ? 'ready' : 'pending';
+      }
+
+      if (hasMapping && isApproved && isSynced) {
+        taxType = normalizeMappedTaxType(localMapping.mraTaxType || localMapping.mra_tax_type);
+        const rawRate = Number(localMapping.mraTaxRate ?? localMapping.mra_tax_rate ?? 0);
+        const normalizedRate = Number.isFinite(rawRate) ? rawRate : 0;
+        ratePercent = normalizedRate;
+        if (taxType === 'zero' || taxType === 'exempt' || normalizedRate <= 0) {
+          itemTax = 0;
+          itemNet = lineAmount;
+          itemGross = lineAmount;
+          method = 'not_applicable';
+        } else {
+          method = resolveMappingTaxMethod(localMapping);
+          const effectiveRate = normalizedRate / 100;
+          methods.add(method);
+          if (method === 'exclusive') {
+            itemTax = lineAmount * effectiveRate;
+            itemNet = lineAmount;
+            itemGross = lineAmount + itemTax;
+          } else {
+            itemTax = effectiveRate > 0 ? lineAmount * effectiveRate / (1 + effectiveRate) : 0;
+            itemGross = lineAmount;
+            itemNet = lineAmount - itemTax;
+          }
+        }
+      } else if (!shouldEnforceTaxMapping) {
+        taxType = fallbackTaxType;
+        ratePercent = normalizedFallbackRate;
+        if (hasMapping && (fallbackTaxType === 'zero' || fallbackTaxType === 'exempt')) {
+          itemTax = 0;
+          itemNet = lineAmount;
+          itemGross = lineAmount;
+          method = 'not_applicable';
+        } else if (hasMapping && normalizedFallbackRate > 0) {
+          const effectiveRate = normalizedFallbackRate / 100;
+          methods.add(fallbackMethod);
+          method = fallbackMethod;
+          if (fallbackMethod === 'exclusive') {
+            itemTax = lineAmount * effectiveRate;
+            itemNet = lineAmount;
+            itemGross = lineAmount + itemTax;
+          } else {
+            itemTax = effectiveRate > 0 ? lineAmount * effectiveRate / (1 + effectiveRate) : 0;
+            itemGross = lineAmount;
+            itemNet = lineAmount - itemTax;
+          }
+        } else if (defaultTaxRateDecimal > 0) {
+          taxType = 'standard';
+          ratePercent = defaultTaxRateDecimal * 100;
+          method = 'inclusive';
+          itemTax = lineAmount * defaultTaxRateDecimal / (1 + defaultTaxRateDecimal);
+          itemGross = lineAmount;
+          itemNet = lineAmount - itemTax;
+        } else {
+          itemTax = 0;
+          itemNet = lineAmount;
+          itemGross = lineAmount;
+          taxType = 'unmapped';
+          method = 'unmapped';
+          ratePercent = 0;
+        }
+      } else if (hasMapping) {
+        taxType = fallbackTaxType;
+        ratePercent = normalizedFallbackRate;
+        method = (fallbackTaxType === 'zero' || fallbackTaxType === 'exempt')
+          ? 'not_applicable'
+          : fallbackMethod;
+      }
+
+      totalTax += itemTax;
+      totalNet += itemNet;
+      totalGross += itemGross;
+      if (itemKey) {
+        perItemTax[itemKey] = {
+          amount: itemTax,
+          rate: ratePercent,
+          taxType,
+          method,
+          status,
+        };
+      }
+    }
+
+    let methodSummary: 'Inclusive' | 'Exclusive' | 'Mixed' | 'Default (Inclusive)' | 'N/A' = 'N/A';
+    if (methods.size === 1) {
+      methodSummary = methods.has('exclusive') ? 'Exclusive' : 'Inclusive';
+    } else if (methods.size > 1) {
+      methodSummary = 'Mixed';
+    } else if (!shouldEnforceTaxMapping && defaultTaxRateDecimal > 0) {
+      methodSummary = 'Default (Inclusive)';
+    }
+
+    return {
+      net: totalNet,
+      tax: totalTax,
+      gross: totalGross,
+      methodSummary,
+      perItemTax,
+    };
+  }, [cart, mappingByItemId, defaultTaxRateDecimal, shouldEnforceTaxMapping]);
+
+  const subtotal = cartSummary.net;
+  const tax = cartSummary.tax;
+  const total = cartSummary.gross;
+  const cartTaxLabel = shouldEnforceTaxMapping ? 'VAT Amount (MRA Rules Applied)' : (taxLabel || 'VAT Amount');
+  const hasItemsInCart = cart.length > 0;
 
   const getMRAMappingStatus = useCallback((itemId: string): {
     hasMapping: boolean;
@@ -1868,15 +2438,34 @@ export const GenericPos = ({
     }
     return (
       <div className="space-y-2">
-        {cart.map((item) => <CartItemView key={item.id} item={item} onUpdateQuantity={onUpdateQuantity} currencyFormatter={formatCurrency} />)}
+        {cart.map((item) => (
+          <CartItemView
+            key={item.id}
+            item={item}
+            onUpdateQuantity={onUpdateQuantity}
+            currencyFormatter={formatCurrency}
+            taxDetail={cartSummary.perItemTax[String(item.id)]}
+            showTaxStatus={shouldEnforceTaxMapping}
+          />
+        ))}
       </div>
     );
   };
 
   const renderCartFooter = () => (
     <div className="flex flex-col gap-4 bg-muted/50 p-4">
+      <div className="space-y-1 text-sm">
+        <div className="flex w-full items-center justify-between gap-2">
+          <span className="flex-shrink-0 text-muted-foreground">Subtotal (Excl VAT)</span>
+          <span className="flex-shrink-0 text-right">{formatCurrency(subtotal)}</span>
+        </div>
+        <div className="flex w-full items-center justify-between gap-2">
+          <span className="flex-shrink-0 text-muted-foreground">{cartTaxLabel}</span>
+          <span className="flex-shrink-0 text-right font-semibold text-green-600">{formatCurrency(tax)}</span>
+        </div>
+      </div>
       <div className="flex w-full items-center justify-between gap-2 text-lg font-bold">
-        <span className="flex-shrink-0">Total</span>
+        <span className="flex-shrink-0">Total (Incl VAT)</span>
         <span className="flex-shrink-0 text-right">{formatCurrency(total)}</span>
       </div>
       <Button size="lg" className="bg-green-600 hover:bg-green-700" onClick={() => { setPaymentSessionId((id) => id + 1); setPaymentDialogOpen(true); }}>

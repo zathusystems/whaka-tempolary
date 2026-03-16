@@ -5,8 +5,9 @@ import { useForm, FormProvider, useFieldArray, useWatch } from 'react-hook-form'
 import { format } from 'date-fns';
 import { Plus, X, Calendar as CalendarIcon, Loader2 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
+import { useLiveQuery } from 'dexie-react-hooks';
 
-import { db, type InventoryItem, type PurchaseRecord, type Supplier } from '@/lib/db';
+import { db, type InventoryItem, type PurchaseRecord, type Supplier, type MRAMapping } from '@/lib/db';
 import { type BusinessType } from '@/lib/inventory/config';
 import { toast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
@@ -36,10 +37,15 @@ import { Calendar } from '@/components/ui/calendar';
 
 type ReceiveStockFormValues = {
   supplierId?: string;
+  referenceNumber?: string;
+  vatAmount?: number;
+  paymentStatus?: 'Paid' | 'Unpaid';
   items: {
     productId: string;
     quantity: number;
     cost: number;
+    taxRate?: number;
+    taxCalculationMethod?: 'inclusive' | 'exclusive';
     batchNumber?: string;
     expiryDate?: Date;
   }[];
@@ -61,6 +67,66 @@ const normalizeBranchId = (value?: string | number | null): string => {
 const toBackendBranchId = (branchId: string): string => {
     const normalized = normalizeBranchId(branchId);
     return normalized || branchId;
+};
+
+const normalizeTaxRate = (value: unknown): number => {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+};
+
+const resolveTaxMethod = (value: unknown): 'inclusive' | 'exclusive' => {
+    return value === 'inclusive' ? 'inclusive' : 'exclusive';
+};
+
+const calculateItemVat = (
+    costPerUnit: number,
+    quantity: number,
+    taxRate: number,
+    method: 'inclusive' | 'exclusive'
+): number => {
+    const rate = normalizeTaxRate(taxRate);
+    const base = Number(costPerUnit || 0) * Number(quantity || 0);
+    if (!Number.isFinite(base) || base <= 0 || rate <= 0) return 0;
+    if (method === 'inclusive') {
+        return base - base / (1 + rate / 100);
+    }
+    return base * (rate / 100);
+};
+
+const calculateItemGross = (
+    costPerUnit: number,
+    quantity: number,
+    vatAmount: number,
+    method: 'inclusive' | 'exclusive'
+): number => {
+    const base = Number(costPerUnit || 0) * Number(quantity || 0);
+    if (!Number.isFinite(base)) return 0;
+    return method === 'exclusive' ? base + (vatAmount || 0) : base;
+};
+
+const purchaseRecordSortValue = (record: PurchaseRecord): number => {
+    const candidates = [
+        record.receivedDate,
+        (record as any)?.createdAt,
+        (record as any)?.updatedAt
+    ];
+
+    for (const candidate of candidates) {
+        if (!candidate) continue;
+        const parsed = new Date(candidate);
+        if (!Number.isNaN(parsed.getTime())) {
+            return parsed.getTime();
+        }
+    }
+
+    return 0;
+};
+
+const mappingReadinessRank = (mapping: MRAMapping): number => {
+    let score = 0;
+    if (mapping.isApproved) score += 2;
+    if (mapping.mraSynced) score += 1;
+    return score;
 };
 
 type SessionChoice = {
@@ -332,7 +398,10 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     const form = useForm<ReceiveStockFormValues>({
         defaultValues: {
             supplierId: '',
-            items: [{ productId: '', quantity: 1, cost: 0 }],
+            referenceNumber: '',
+            vatAmount: undefined,
+            paymentStatus: 'Paid',
+            items: [{ productId: '', quantity: 1, cost: 0, taxRate: 0, taxCalculationMethod: 'exclusive' }],
         }
     });
     const { control, handleSubmit, setValue, getValues } = form;
@@ -365,7 +434,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     const handleFuelModeToggle = React.useCallback((checked: boolean) => {
         if (!canToggleFuelMode) return;
         setIsFuelMode(checked);
-        replace([{ productId: '', quantity: 1, cost: 0 }]);
+        replace([{ productId: '', quantity: 1, cost: 0, taxRate: 0, taxCalculationMethod: 'exclusive' }]);
     }, [replace, canToggleFuelMode]);
 
     const supplierFilteredProducts = supplierId 
@@ -380,6 +449,81 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
 
     const filteredProducts = supplierFilteredProducts.filter(
         (item) => Boolean(item.isFuel) === isFuelMode
+    );
+
+    const mraMappings = useLiveQuery(
+        async () => {
+            const allMappings = await db.mraMappings.toArray();
+            const normalizedBranchId = normalizeBranchId(branchId);
+            return allMappings.filter((mapping) => {
+                if (!mapping.branchId) return true;
+                return normalizeBranchId(mapping.branchId) === normalizedBranchId;
+            });
+        },
+        [branchId],
+        []
+    ) || [];
+
+    const mappingByItemId = React.useMemo(() => {
+        const map = new Map<string, MRAMapping>();
+        for (const mapping of mraMappings) {
+            const existing = map.get(mapping.inventoryItemId);
+            if (!existing || mappingReadinessRank(mapping) > mappingReadinessRank(existing)) {
+                map.set(mapping.inventoryItemId, mapping);
+            }
+        }
+        return map;
+    }, [mraMappings]);
+
+    const lastPurchaseByProduct = useLiveQuery(
+        async () => {
+            const normalizedBranchId = normalizeBranchId(branchId);
+            const allRecords = await db.purchaseHistory.toArray();
+            const latestByProduct = new Map<string, PurchaseRecord>();
+
+            for (const record of allRecords) {
+                if (!record?.productId) continue;
+                if (normalizeBranchId(record.branchId) !== normalizedBranchId) continue;
+
+                const existing = latestByProduct.get(record.productId);
+                if (!existing) {
+                    latestByProduct.set(record.productId, record);
+                    continue;
+                }
+
+                if (purchaseRecordSortValue(record) > purchaseRecordSortValue(existing)) {
+                    latestByProduct.set(record.productId, record);
+                }
+            }
+
+            return latestByProduct;
+        },
+        [branchId],
+        new Map<string, PurchaseRecord>()
+    );
+
+    const getDefaultTaxForProduct = React.useCallback(
+        (productId: string) => {
+            const mapping = mappingByItemId.get(productId);
+            const lastPurchase = lastPurchaseByProduct?.get(productId);
+            const lastPurchaseMethod = lastPurchase?.taxCalculationMethod
+                ? resolveTaxMethod(lastPurchase.taxCalculationMethod)
+                : undefined;
+            const lastPurchaseRate = normalizeTaxRate(lastPurchase?.taxRate);
+
+            if (!mapping) {
+                return {
+                    taxRate: lastPurchaseRate || 0,
+                    taxCalculationMethod: lastPurchaseMethod ?? 'exclusive'
+                };
+            }
+
+            return {
+                taxRate: lastPurchaseRate || normalizeTaxRate(mapping.mraTaxRate),
+                taxCalculationMethod: lastPurchaseMethod ?? resolveTaxMethod(mapping.taxCalculationMethod)
+            };
+        },
+        [mappingByItemId, lastPurchaseByProduct]
     );
 
     const selectedProductIds = React.useMemo(() => {
@@ -411,8 +555,27 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
             (sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.cost) || 0),
             0
         );
-        return { totalItems, totalQuantity, totalCost };
+        const totalVat = items.reduce((sum, item) => {
+            const rate = normalizeTaxRate(item.taxRate);
+            const method = resolveTaxMethod(item.taxCalculationMethod);
+            return sum + calculateItemVat(Number(item.cost || 0), Number(item.quantity || 0), rate, method);
+        }, 0);
+        const totalWithVat = items.reduce((sum, item) => {
+            const rate = normalizeTaxRate(item.taxRate);
+            const method = resolveTaxMethod(item.taxCalculationMethod);
+            const vatAmount = calculateItemVat(Number(item.cost || 0), Number(item.quantity || 0), rate, method);
+            return sum + calculateItemGross(Number(item.cost || 0), Number(item.quantity || 0), vatAmount, method);
+        }, 0);
+        return { totalItems, totalQuantity, totalCost, totalVat, totalWithVat };
     }, [watchedItems]);
+
+    React.useEffect(() => {
+        const roundedVat = Math.round(liveTotals.totalVat * 100) / 100;
+        setValue('vatAmount', Number.isFinite(roundedVat) ? roundedVat : 0, {
+            shouldDirty: false,
+            shouldTouch: false,
+        });
+    }, [liveTotals.totalVat, setValue]);
 
     const requiredSessionKind: 'pump' | 'no_pump' = isFuelMode ? 'pump' : 'no_pump';
 
@@ -518,7 +681,8 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         setIsSubmitting(true);
 
         const selectedSupplier = data.supplierId ? suppliers.find(s => s.id === data.supplierId) : null;
-        const paymentStatus: 'Paid' = 'Paid';
+        const paymentStatus: 'Paid' | 'Unpaid' = data.paymentStatus === 'Unpaid' ? 'Unpaid' : 'Paid';
+        const referenceNumber = data.referenceNumber?.trim() || undefined;
 
         try {
             // Filter out items with empty productId
@@ -531,6 +695,22 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
 
             const purchaseRecordIds: string[] = [];
             const totalCost = validItems.reduce((sum, item) => sum + (Number(item.quantity) * Number(item.cost)), 0);
+            const totalVat = validItems.reduce((sum, item) => {
+                const mappingDefaults = getDefaultTaxForProduct(item.productId);
+                const taxRate = normalizeTaxRate(item.taxRate ?? mappingDefaults.taxRate);
+                const taxMethod = resolveTaxMethod(item.taxCalculationMethod ?? mappingDefaults.taxCalculationMethod);
+                return sum + calculateItemVat(Number(item.cost || 0), Number(item.quantity || 0), taxRate, taxMethod);
+            }, 0);
+            const totalWithVat = validItems.reduce((sum, item) => {
+                const mappingDefaults = getDefaultTaxForProduct(item.productId);
+                const taxRate = normalizeTaxRate(item.taxRate ?? mappingDefaults.taxRate);
+                const taxMethod = resolveTaxMethod(item.taxCalculationMethod ?? mappingDefaults.taxCalculationMethod);
+                const itemVat = calculateItemVat(Number(item.cost || 0), Number(item.quantity || 0), taxRate, taxMethod);
+                return sum + calculateItemGross(Number(item.cost || 0), Number(item.quantity || 0), itemVat, taxMethod);
+            }, 0);
+            const vatAmount = Number.isFinite(totalVat) ? totalVat : 0;
+            const amountPaid = paymentStatus === 'Paid' ? totalWithVat : 0;
+            const amountDue = paymentStatus === 'Paid' ? 0 : totalWithVat;
             // Generate UUID v4 like suppliers do
             const poId = uuidv4();
             const baseReceivedAt = Date.now();
@@ -547,13 +727,23 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                     const quantityReceived = Number(item.quantity);
                     const costPerUnit = Number(item.cost);
                     const itemTotalCost = quantityReceived * costPerUnit;
+                    const taxDefaults = getDefaultTaxForProduct(product.id);
+                    const taxRate = normalizeTaxRate(item.taxRate ?? taxDefaults.taxRate);
+                    const taxMethod = resolveTaxMethod(item.taxCalculationMethod ?? taxDefaults.taxCalculationMethod);
+                    const itemVatAmount = calculateItemVat(costPerUnit, quantityReceived, taxRate, taxMethod);
+                    const itemGross = calculateItemGross(costPerUnit, quantityReceived, itemVatAmount, taxMethod);
+                    const itemNetTotal =
+                        taxMethod === 'exclusive'
+                            ? itemTotalCost
+                            : Math.max(0, itemTotalCost - itemVatAmount);
+                    const netCostPerUnit = quantityReceived > 0 ? itemNetTotal / quantityReceived : costPerUnit;
 
                     const newStock = (product.stockUnits || 0) + quantityReceived;
                     
                     // Update main inventory item. Cost will be latest cost.
                     await db.inventory.update(item.productId, {
                         stockUnits: newStock,
-                        cost: costPerUnit,
+                        cost: Number(netCostPerUnit.toFixed(4)),
                         status: newStock > (product.reorderLevel || 0) ? 'In Stock' : (newStock > 0 ? 'Low Stock' : 'Out of Stock'),
                         _dirty: true,
                         _operation: 'update'
@@ -571,12 +761,17 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                         supplierName: selectedSupplier?.name || 'No Supplier',
                         branchId: branchId,
                     sessionId: sessionIdForSubmit,  // Link to active session if available
+                        referenceNumber: referenceNumber,
+                        vatAmount: vatAmount,
+                        taxRate: taxRate,
+                        taxCalculationMethod: taxMethod,
+                        taxAmount: itemVatAmount,
                         quantityReceived: quantityReceived,
                         quantityRemaining: quantityReceived,
                         costPerUnit: costPerUnit,
                         totalCost: itemTotalCost,
                         paymentStatus: paymentStatus,
-                        amountDue: 0,
+                        amountDue: paymentStatus === 'Paid' ? 0 : itemGross,
                         batchNumber: item.batchNumber,
                         expiryDate: item.expiryDate ? format(item.expiryDate, 'yyyy-MM-dd') : undefined,
                         receivedDate: receivedDate,
@@ -607,9 +802,11 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                     status: 'Received',
                     totalItems: validItems.length,
                     totalCost: totalCost,
-                    paymentStatus: 'Paid',
-                    amountPaid: totalCost,
-                    amountDue: 0,
+                    referenceNumber: referenceNumber,
+                    vatAmount: vatAmount,
+                    paymentStatus: paymentStatus,
+                    amountPaid: amountPaid,
+                    amountDue: amountDue,
                     notes: `Stock received from ${selectedSupplier?.name || 'No Supplier'}`,
                     createdBy: user.displayName || user.email || 'System',
                     branchId: branchId,
@@ -652,6 +849,8 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                     supplier: selectedSupplier?.name || 'No Supplier',
                     itemsCount: data.items.length,
                     totalCost: totalCost,
+                    referenceNumber: referenceNumber,
+                    vatAmount: vatAmount,
                     paymentStatus: paymentStatus,
                     purchaseOrderId: poId,
                 },
@@ -692,6 +891,61 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                     <FormControl><SelectTrigger disabled={isSubmitting}><SelectValue placeholder="Select a supplier (optional)" /></SelectTrigger></FormControl>
                                     <SelectContent>
                                         {suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}
+                                    </SelectContent>
+                                </Select>
+                                <FormMessage />
+                            </FormItem>
+                        )}
+                    />
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <FormField
+                            control={control}
+                            name="referenceNumber"
+                            render={({ field }) => (
+                                <FormItem>
+                                    <FormLabel>Reference Number</FormLabel>
+                                    <FormControl>
+                                        <Input placeholder="Supplier invoice/reference" {...field} disabled={isSubmitting} />
+                                    </FormControl>
+                                </FormItem>
+                            )}
+                        />
+                        <FormField
+                            control={control}
+                            name="vatAmount"
+                            render={({ field }) => (
+                                <FormItem>
+                                    <FormLabel>VAT Amount (Auto)</FormLabel>
+                                    <FormControl>
+                                        <Input
+                                            type="number"
+                                            step="0.01"
+                                            placeholder="VAT amount"
+                                            value={field.value ?? ''}
+                                            readOnly
+                                            disabled={isSubmitting}
+                                            className="bg-muted"
+                                        />
+                                    </FormControl>
+                                </FormItem>
+                            )}
+                        />
+                    </div>
+                    <FormField
+                        control={control}
+                        name="paymentStatus"
+                        render={({ field }) => (
+                            <FormItem>
+                                <FormLabel>Payment Status</FormLabel>
+                                <Select onValueChange={field.onChange} value={field.value || 'Paid'}>
+                                    <FormControl>
+                                        <SelectTrigger disabled={isSubmitting}>
+                                            <SelectValue placeholder="Select payment status" />
+                                        </SelectTrigger>
+                                    </FormControl>
+                                    <SelectContent>
+                                        <SelectItem value="Paid">Paid</SelectItem>
+                                        <SelectItem value="Unpaid">Unpaid</SelectItem>
                                     </SelectContent>
                                 </Select>
                                 <FormMessage />
@@ -787,10 +1041,18 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                     <div className="space-y-4">
                         {fields.map((field, index) => {
                             const availableProducts = getAvailableProductsForRow(index);
+                            const rowItem = watchedItems?.[index];
+                            const rowQuantity = Number(rowItem?.quantity || 0);
+                            const rowCost = Number(rowItem?.cost || 0);
+                            const rowRate = normalizeTaxRate(rowItem?.taxRate);
+                            const rowMethod = resolveTaxMethod(rowItem?.taxCalculationMethod);
+                            const rowVat = calculateItemVat(rowCost, rowQuantity, rowRate, rowMethod);
+                            const rowTotalInclVat = calculateItemGross(rowCost, rowQuantity, rowVat, rowMethod);
+                            const rowSubtotalExVat = rowTotalInclVat - rowVat;
                             return (
                             <div key={field.id} className="p-4 border rounded-lg space-y-4">
                                 <div className="grid grid-cols-12 gap-2 items-start">
-                                    <div className="col-span-11 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                    <div className="col-span-11 grid grid-cols-1 sm:grid-cols-5 gap-2">
                                         <FormField
                                             control={control}
                                             name={`items.${index}.productId`}
@@ -804,6 +1066,15 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                     selectField.onChange(value);
                                                     if (product) {
                                                     setValue(`items.${index}.cost`, Number(product.cost || 0), {
+                                                        shouldDirty: true,
+                                                        shouldTouch: true,
+                                                    });
+                                                    const taxDefaults = getDefaultTaxForProduct(product.id);
+                                                    setValue(`items.${index}.taxRate`, taxDefaults.taxRate, {
+                                                        shouldDirty: true,
+                                                        shouldTouch: true,
+                                                    });
+                                                    setValue(`items.${index}.taxCalculationMethod`, taxDefaults.taxCalculationMethod, {
                                                         shouldDirty: true,
                                                         shouldTouch: true,
                                                     });
@@ -853,9 +1124,67 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                 </FormControl>
                                             </FormItem>
                                         )} />
+                                        <FormField
+                                            control={control}
+                                            name={`items.${index}.taxRate`}
+                                            rules={{ min: 0 }}
+                                            render={({ field }) => (
+                                                <FormItem>
+                                                    <FormLabel className="text-xs">Tax Rate (%)</FormLabel>
+                                                    <FormControl>
+                                                        <Input
+                                                            type="number"
+                                                            step="0.01"
+                                                            placeholder="VAT %"
+                                                            value={field.value ?? 0}
+                                                            onChange={(e) => field.onChange(e.target.value === '' ? 0 : Number(e.target.value))}
+                                                            disabled
+                                                        />
+                                                    </FormControl>
+                                                </FormItem>
+                                            )}
+                                        />
+                                        <FormField
+                                            control={control}
+                                            name={`items.${index}.taxCalculationMethod`}
+                                            render={({ field }) => (
+                                                <FormItem>
+                                                    <FormLabel className="text-xs">Tax Method</FormLabel>
+                                                    <Select onValueChange={field.onChange} value={field.value || 'exclusive'}>
+                                                        <FormControl>
+                                                            <SelectTrigger disabled={isSubmitting}>
+                                                                <SelectValue placeholder="Method" />
+                                                            </SelectTrigger>
+                                                        </FormControl>
+                                                        <SelectContent>
+                                                            <SelectItem value="exclusive">Exclusive</SelectItem>
+                                                            <SelectItem value="inclusive">Inclusive</SelectItem>
+                                                        </SelectContent>
+                                                    </Select>
+                                                </FormItem>
+                                            )}
+                                        />
                                     </div>
                                     <div className="col-span-1 flex items-center justify-end pt-6">
                                         <Button type="button" variant="ghost" size="icon" onClick={() => remove(index)} className="text-destructive" disabled={isSubmitting}><X className="h-4 w-4" /></Button>
+                                    </div>
+                                </div>
+                                <div className="rounded-md border bg-muted/30 p-3">
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                                        <div>
+                                            <p className="text-xs text-muted-foreground">Subtotal (Excl VAT)</p>
+                                            <p className="font-semibold">{rowSubtotalExVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-muted-foreground">
+                                                VAT ({rowMethod === 'inclusive' ? 'Incl' : 'Excl'})
+                                            </p>
+                                            <p className="font-semibold">{rowVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-muted-foreground">Total (Incl VAT)</p>
+                                            <p className="font-semibold">{rowTotalInclVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                                        </div>
                                     </div>
                                 </div>
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -892,17 +1221,26 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                             </div>
                             );
                         })}
-                         <Button
+                        <Button
                             type="button"
                             variant="outline"
-                            onClick={() => append({ productId: '', quantity: 1, cost: 0, batchNumber: '' })}
+                            onClick={() =>
+                                append({
+                                    productId: '',
+                                    quantity: 1,
+                                    cost: 0,
+                                    taxRate: 0,
+                                    taxCalculationMethod: 'exclusive',
+                                    batchNumber: ''
+                                })
+                            }
                             disabled={isSubmitting}
                         >
                             <Plus className="mr-2 h-4 w-4" /> Add Item
                         </Button>
                         <div className="rounded-lg border bg-muted/30 p-4">
                             <h4 className="text-sm font-medium mb-3">Live Totals</h4>
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                            <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
                                 <div>
                                     <p className="text-xs text-muted-foreground">Products</p>
                                     <p className="font-semibold">{liveTotals.totalItems}</p>
@@ -912,8 +1250,18 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                     <p className="font-semibold">{liveTotals.totalQuantity}</p>
                                 </div>
                                 <div>
-                                    <p className="text-xs text-muted-foreground">Total Cost</p>
-                                    <p className="font-semibold">{liveTotals.totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                                    <p className="text-xs text-muted-foreground">Subtotal (Excl VAT)</p>
+                                    <p className="font-semibold">
+                                        {(liveTotals.totalWithVat - liveTotals.totalVat).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-xs text-muted-foreground">Total VAT</p>
+                                    <p className="font-semibold">{liveTotals.totalVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                                </div>
+                                <div>
+                                    <p className="text-xs text-muted-foreground">Total (Incl VAT)</p>
+                                    <p className="font-semibold">{liveTotals.totalWithVat.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                                 </div>
                             </div>
                         </div>

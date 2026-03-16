@@ -42,6 +42,8 @@ interface PurchaseGroup {
     amountDue: number;
     items: PurchaseRecord[];
     totalCost: number;
+    totalVat: number;
+    totalWithVat: number;
 }
 
 const parseDateCandidate = (...values: unknown[]): Date | null => {
@@ -88,6 +90,35 @@ const formatPurchaseDate = (...values: unknown[]): string => {
 const purchaseDateSortValue = (...values: unknown[]): number => {
     const parsed = parseDateCandidate(...values);
     return parsed ? parsed.getTime() : 0;
+};
+
+const normalizeTaxRate = (value: unknown): number => {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+};
+
+const resolveTaxMethod = (value: unknown): 'inclusive' | 'exclusive' => {
+    return value === 'inclusive' ? 'inclusive' : 'exclusive';
+};
+
+const resolveRecordVat = (record: PurchaseRecord): number => {
+    const taxRate = normalizeTaxRate(record.taxRate);
+    const method = resolveTaxMethod(record.taxCalculationMethod);
+    const base = Number(record.totalCost || 0);
+    if (!Number.isFinite(base) || base <= 0 || taxRate <= 0) {
+        return typeof record.taxAmount === 'number' && Number.isFinite(record.taxAmount) ? record.taxAmount : 0;
+    }
+    if (method === 'inclusive') {
+        return base - base / (1 + taxRate / 100);
+    }
+    return base * (taxRate / 100);
+};
+
+const resolveRecordGross = (record: PurchaseRecord, vatAmount: number): number => {
+    const base = Number(record.totalCost || 0);
+    if (!Number.isFinite(base)) return 0;
+    const method = resolveTaxMethod(record.taxCalculationMethod);
+    return method === 'exclusive' ? base + (vatAmount || 0) : base;
 };
 
 export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, branchId, currency = 'USD' }: PurchasesTabProps) {
@@ -184,6 +215,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                     amountDue: record.amountDue,
                     items: [],
                     totalCost: 0,
+                    totalVat: 0,
+                    totalWithVat: 0,
                 };
             } else if (recordSortDate > groups[key].dateSortValue) {
                 groups[key].receivedDate = record.receivedDate;
@@ -192,7 +225,12 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
             }
             
             groups[key].items.push(record);
+            const vatAmount = resolveRecordVat(record);
+            const grossAmount = resolveRecordGross(record, vatAmount);
+
             groups[key].totalCost += record.totalCost;
+            groups[key].totalVat += vatAmount;
+            groups[key].totalWithVat += grossAmount;
         });
         
         return Object.values(groups).sort((a, b) => 
@@ -223,7 +261,10 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                             <CardDescription>{purchase.displayDate}</CardDescription>
                         </div>
                         <div className="text-right">
-                            <p className="font-semibold text-lg">{currencySymbol} {purchase.totalCost.toFixed(2)}</p>
+                            <p className="font-semibold text-lg">{currencySymbol} {purchase.totalWithVat.toFixed(2)}</p>
+                            {purchase.totalVat > 0 && (
+                                <p className="text-xs text-muted-foreground">VAT: {currencySymbol} {purchase.totalVat.toFixed(2)}</p>
+                            )}
                             <p className="text-xs text-muted-foreground">{itemCount} item{itemCount !== 1 ? 's' : ''}</p>
                         </div>
                     </div>
@@ -269,6 +310,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                                     <TableHead className="text-right">Total Qty</TableHead>
                                     <TableHead>Payment</TableHead>
                                     <TableHead className="text-right">Total Cost</TableHead>
+                                    <TableHead className="text-right">VAT</TableHead>
+                                    <TableHead className="text-right">Total (Incl VAT)</TableHead>
                                     <TableHead className="text-center">Sync Status</TableHead>
                                     <TableHead className="text-center">Action</TableHead>
                                 </TableRow>
@@ -287,6 +330,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                                             <TableCell className="text-right">{totalQuantity}</TableCell>
                                             <TableCell><Badge variant={purchase.paymentStatus === 'Paid' ? 'secondary' : 'outline'} className="text-xs">{purchase.paymentStatus}</Badge></TableCell>
                                             <TableCell className="text-right font-semibold">{currencySymbol} {purchase.totalCost.toFixed(2)}</TableCell>
+                                            <TableCell className="text-right">{currencySymbol} {purchase.totalVat.toFixed(2)}</TableCell>
+                                            <TableCell className="text-right font-semibold">{currencySymbol} {purchase.totalWithVat.toFixed(2)}</TableCell>
                                             <TableCell className="text-center">
                                                 {isDirty ? (
                                                     <div className="flex items-center justify-center gap-1">
@@ -331,7 +376,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                     {selectedPurchase && (
                         <div className="flex-1 overflow-y-auto -mx-6 px-6">
                             {/* Purchase Summary */}
-                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6 p-4 bg-muted rounded-lg">
+                            <div className="grid grid-cols-2 sm:grid-cols-6 gap-4 mb-6 p-4 bg-muted rounded-lg">
                                 <div>
                                     <p className="text-xs text-muted-foreground">Supplier</p>
                                     <p className="font-semibold">{selectedPurchase.supplierName}</p>
@@ -345,8 +390,18 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                                     <Badge variant={selectedPurchase.paymentStatus === 'Paid' ? 'secondary' : 'outline'}>{selectedPurchase.paymentStatus}</Badge>
                                 </div>
                                 <div>
-                                    <p className="text-xs text-muted-foreground">Total Cost</p>
-                                    <p className="font-semibold text-lg">{getCurrencySymbol()} {selectedPurchase.totalCost.toFixed(2)}</p>
+                                    <p className="text-xs text-muted-foreground">Subtotal (Excl VAT)</p>
+                                    <p className="font-semibold text-lg">
+                                        {getCurrencySymbol()} {(selectedPurchase.totalWithVat - selectedPurchase.totalVat).toFixed(2)}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-xs text-muted-foreground">VAT</p>
+                                    <p className="font-semibold text-lg">{getCurrencySymbol()} {selectedPurchase.totalVat.toFixed(2)}</p>
+                                </div>
+                                <div>
+                                    <p className="text-xs text-muted-foreground">Total (Incl VAT)</p>
+                                    <p className="font-semibold text-lg">{getCurrencySymbol()} {selectedPurchase.totalWithVat.toFixed(2)}</p>
                                 </div>
                             </div>
 
@@ -362,6 +417,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                                                 <TableHead className="text-right">Remaining</TableHead>
                                                 <TableHead className="text-right">Unit Cost</TableHead>
                                                 <TableHead className="text-right">Total</TableHead>
+                                                <TableHead className="text-right">VAT (Incl/Excl)</TableHead>
                                                 <TableHead>Batch No.</TableHead>
                                                 <TableHead>Expiry Date</TableHead>
                                             </TableRow>
@@ -371,6 +427,9 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                                                 const isConsumed = item.quantityRemaining === 0;
                                                 const percentRemaining = (item.quantityRemaining / item.quantityReceived) * 100;
                                                 const currencySymbol = getCurrencySymbol();
+                                                const itemVat = resolveRecordVat(item);
+                                                const vatMethod = resolveTaxMethod(item.taxCalculationMethod);
+                                                const vatLabel = vatMethod === 'inclusive' ? 'Incl' : 'Excl';
                                                 return (
                                                     <TableRow key={item.id} className={isConsumed ? 'opacity-60' : ''}>
                                                         <TableCell className="font-medium">{item.productName}</TableCell>
@@ -391,6 +450,9 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                                                         </TableCell>
                                                         <TableCell className="text-right">{currencySymbol} {item.costPerUnit.toFixed(2)}</TableCell>
                                                         <TableCell className="text-right font-semibold">{currencySymbol} {item.totalCost.toFixed(2)}</TableCell>
+                                                        <TableCell className="text-right">
+                                                            {currencySymbol} {itemVat.toFixed(2)} ({vatLabel})
+                                                        </TableCell>
                                                         <TableCell className="font-mono text-xs">{item.batchNumber || 'N/A'}</TableCell>
                                                         <TableCell>{item.expiryDate ? formatPurchaseDate(item.expiryDate) : 'N/A'}</TableCell>
                                                     </TableRow>

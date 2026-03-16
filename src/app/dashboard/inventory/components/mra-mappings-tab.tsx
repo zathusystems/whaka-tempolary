@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { authFetch } from '@/lib/auth-fetch';
 import { toast } from '@/hooks/use-toast';
-import { type InventoryItem } from '@/lib/db';
+import { db, type InventoryItem } from '@/lib/db';
 import { ProductMappingForm } from './product-mapping-form';
 
 import {
@@ -45,7 +45,11 @@ interface MRAMapping {
   branch_name?: string;
   mra_product_code: string;
   mra_product_name: string;
+  mra_tax_type?: string;
   mra_tax_rate: number;
+  mra_unit_measure?: string;
+  tax_calculation_method?: string;
+  taxCalculationMethod?: string;
   is_approved: boolean;
   mra_synced: boolean;
   created_at: string;
@@ -65,6 +69,21 @@ export function MRAMappingsTab({ inventoryData, businessId, branchId }: MRAMappi
   const [isApproving, setIsApproving] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | 'approved' | 'unapproved' | 'synced'>('all');
+
+  const normalizeCalcMethod = (value: unknown): 'inclusive' | 'exclusive' => {
+    const normalized = String(value ?? '').trim().toLowerCase();
+    return normalized.startsWith('excl') ? 'exclusive' : 'inclusive';
+  };
+
+  const normalizeBranchId = (value: unknown): string | undefined => {
+    const normalized = String(value ?? '').trim();
+    if (!normalized) return undefined;
+    const brnMatch = /^BRN-(\d+)$/i.exec(normalized);
+    if (brnMatch) return brnMatch[1];
+    const legacyMatch = /^branch-(\d+)$/i.exec(normalized);
+    if (legacyMatch) return legacyMatch[1];
+    return normalized;
+  };
 
   // Fetch MRA mappings from backend - filtered by branch
   useEffect(() => {
@@ -93,6 +112,48 @@ export function MRAMappingsTab({ inventoryData, businessId, branchId }: MRAMappi
 
         console.log('[MRAMappingsTab] Received', mappingsList.length, 'mappings for branch:', branchId);
         setMappings(mappingsList);
+
+        try {
+          const nowIso = new Date().toISOString();
+          await db.mraMappings.bulkPut(
+            mappingsList
+              .map((mapping) => {
+                const inventoryItemId = String(mapping.inventory_item || '').trim();
+                if (!inventoryItemId) return null;
+                const rawTaxType = mapping.mra_tax_type;
+                const taxType =
+                  rawTaxType === 'zero' || rawTaxType === 'exempt'
+                    ? rawTaxType
+                    : 'standard';
+                const calcMethod = normalizeCalcMethod(
+                  (mapping as any).tax_calculation_method ??
+                  (mapping as any).taxCalculationMethod
+                );
+                return {
+                  id: String(mapping.id),
+                  inventoryItemId,
+                  branchId: normalizeBranchId(mapping.branch),
+                  mraProductCode: mapping.mra_product_code || '',
+                  mraProductName: mapping.mra_product_name || mapping.inventory_item_name || '',
+                  mraTaxType: taxType,
+                  mraTaxRate: Number(mapping.mra_tax_rate ?? 0),
+                  mraUnitMeasure: mapping.mra_unit_measure || '',
+                  taxCalculationMethod: calcMethod,
+                  isApproved: Boolean(mapping.is_approved),
+                  approvedAt: mapping.approved_at || undefined,
+                  mraSynced: Boolean(mapping.mra_synced),
+                  lastSyncedAt: mapping.last_synced_at || undefined,
+                  createdAt: mapping.created_at || nowIso,
+                  updatedAt: nowIso,
+                  _dirty: false,
+                  _synced_at: nowIso,
+                };
+              })
+              .filter(Boolean) as any[]
+          );
+        } catch (syncError) {
+          console.warn('[MRAMappingsTab] Failed to refresh local MRA mapping cache:', syncError);
+        }
       } catch (error) {
         console.error('Failed to fetch MRA mappings:', error);
         toast({
@@ -294,6 +355,7 @@ export function MRAMappingsTab({ inventoryData, businessId, branchId }: MRAMappi
                     <TableHead>MRA Code</TableHead>
                     <TableHead>MRA Product</TableHead>
                     <TableHead>Tax Rate</TableHead>
+                    <TableHead>Calc Method</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Action</TableHead>
                   </TableRow>
@@ -311,6 +373,13 @@ export function MRAMappingsTab({ inventoryData, businessId, branchId }: MRAMappi
                       </TableCell>
                       <TableCell>{mapping.mra_product_name}</TableCell>
                       <TableCell>{mapping.mra_tax_rate}%</TableCell>
+                      <TableCell>
+                        {normalizeCalcMethod(
+                          (mapping as any).tax_calculation_method ??
+                          (mapping as any).taxCalculationMethod ??
+                          'inclusive'
+                        ) === 'exclusive' ? 'Exclusive' : 'Inclusive'}
+                      </TableCell>
                       <TableCell>
                         <div className="flex gap-2">
                           {mapping.is_approved && (

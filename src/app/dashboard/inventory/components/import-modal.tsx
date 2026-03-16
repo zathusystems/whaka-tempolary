@@ -5,11 +5,13 @@ import { Loader2, Upload, X, FileText, Download, GitBranch, CheckSquare, Square 
 import Papa from 'papaparse';
 import { v4 as uuidv4 } from 'uuid';
 
-import { db, type InventoryItem } from '@/lib/db';
+import { db, type InventoryItem, type PurchaseRecord, type PurchaseOrder, type Supplier } from '@/lib/db';
 import { type BusinessType, unitTypesByBusinessType } from '@/lib/inventory/config';
 import { syncService } from '@/lib/services/sync-service';
+import { createSupplier } from '@/lib/services/supplier-service';
 import { isTauriApp } from '@/lib/tauri-init';
 import { Button } from '@/components/ui/button';
+import { Progress } from '@/components/ui/progress';
 import {
   Dialog,
   DialogContent,
@@ -30,6 +32,7 @@ import {
 } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from '@/hooks/use-toast';
+import { useAuth } from '@/hooks/use-auth';
 
 type Branch = { id: string; name: string; address: string; };
 type ImportMode = 'csv' | 'branch';
@@ -77,7 +80,7 @@ const getInventoryItemsForBranch = async (targetBranchId: string): Promise<Inven
   return db.inventory.where('branchId').anyOf(branchCandidates).toArray();
 };
 
-const DEFAULT_REORDER_LEVEL = 5;
+const DEFAULT_REORDER_LEVEL = 10;
 const REORDER_LEVEL_OPTIONS = ['5', '10', '20', '50'];
 const BOOLEAN_OPTIONS = ['true', 'false'];
 const BAR_PORTION_NAME_OPTIONS = ['shot', 'tot', 'glass', 'pint', 'bottle', 'can', 'cup', 'measure', 'custom'];
@@ -87,16 +90,33 @@ type TemplateFieldOption = { field: string; options: string[] };
 
 type CsvRow = Record<string, unknown>;
 
+type ImportInventoryRow = InventoryItem & {
+  importTaxRate?: number;
+  importTaxCalculationMethod?: 'inclusive' | 'exclusive';
+};
+
+type InitialStockEntry = {
+  itemId: string;
+  productName: string;
+  quantity: number;
+  costPerUnit: number;
+  taxRate: number;
+  taxMethod: 'inclusive' | 'exclusive';
+  supplier?: Supplier;
+};
+
 const CSV_FIELD_ALIASES = {
   id: ['id', 'productid', 'itemid'],
   name: ['name', 'itemname', 'productname'],
   itemType: ['itemtype', 'type', 'producttype'],
   category: ['category', 'itemcategory'],
-  stockUnits: ['stockunits', 'stock', 'quantity', 'qty', 'onhand'],
+  stockUnits: ['stockunits', 'stock', 'quantity', 'qty', 'onhand', 'currentstock', 'current_stock', 'openingstock', 'opening_stock', 'initialstock', 'initial_stock'],
   unitType: ['unittype', 'unit', 'uom', 'measureunit'],
   reorderLevel: ['reorderlevel', 'reorder', 'minimumstock', 'minstock'],
   cost: ['cost', 'purchasecost', 'buyingprice', 'costperunit'],
   price: ['price', 'sellingprice', 'saleprice'],
+  taxRate: ['taxrate', 'vat', 'vatrate', 'tax', 'taxpercent', 'vatpercent'],
+  taxCalculationMethod: ['taxmethod', 'taxcalculationmethod', 'vatmethod', 'vatcalculationmethod', 'taxcalc'],
   value: ['value', 'stockvalue'],
   status: ['status', 'stockstatus'],
   supplier: ['supplier', 'suppliername'],
@@ -109,6 +129,7 @@ const CSV_FIELD_ALIASES = {
   sku: ['sku'],
   expiry: ['expiry', 'expirydate', 'expdate'],
   isVariablePrice: ['isvariableprice', 'variableprice'],
+  isFuel: ['isfuel', 'fuel', 'fuelitem', 'isfuelitem'],
   isProduced: ['isproduced', 'produced'],
   onMenu: ['onmenu', 'menu'],
   isSoldInPortions: ['issoldinportions', 'soldinportions'],
@@ -221,6 +242,44 @@ const computeStatus = (
   return 'In Stock';
 };
 
+const normalizeTaxRate = (value: unknown): number => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+};
+
+const resolveTaxMethod = (value: unknown): 'inclusive' | 'exclusive' => {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized.startsWith('inc')) return 'inclusive';
+  if (normalized.startsWith('excl')) return 'exclusive';
+  return 'exclusive';
+};
+
+const calculateItemVat = (
+  costPerUnit: number,
+  quantity: number,
+  taxRate: number,
+  method: 'inclusive' | 'exclusive'
+): number => {
+  const rate = normalizeTaxRate(taxRate);
+  const base = Number(costPerUnit || 0) * Number(quantity || 0);
+  if (!Number.isFinite(base) || base <= 0 || rate <= 0) return 0;
+  if (method === 'inclusive') {
+    return base - base / (1 + rate / 100);
+  }
+  return base * (rate / 100);
+};
+
+const calculateItemGross = (
+  costPerUnit: number,
+  quantity: number,
+  vatAmount: number,
+  method: 'inclusive' | 'exclusive'
+): number => {
+  const base = Number(costPerUnit || 0) * Number(quantity || 0);
+  if (!Number.isFinite(base)) return 0;
+  return method === 'exclusive' ? base + (vatAmount || 0) : base;
+};
+
 const getCsvValue = (
   row: CsvRow,
   aliases: readonly string[]
@@ -245,7 +304,7 @@ const parseInventoryCsvRow = (
   row: CsvRow,
   targetBranchId: string,
   businessType: BusinessType
-): InventoryItem | null => {
+): ImportInventoryRow | null => {
   const name = String(getCsvValue(row, CSV_FIELD_ALIASES.name) ?? '').trim();
   if (!name) {
     return null;
@@ -256,6 +315,8 @@ const parseInventoryCsvRow = (
   const isRestaurantOrBar = businessType === 'Restaurant' || businessType === 'Bar & Liquor';
   const parsedPrice = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.price));
   const parsedCost = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.cost));
+  const parsedTaxRate = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.taxRate));
+  const parsedTaxMethodRaw = getCsvValue(row, CSV_FIELD_ALIASES.taxCalculationMethod);
   const parsedRecipe = parseRecipe(getCsvValue(row, CSV_FIELD_ALIASES.recipe));
   const isProduced = parseCsvBoolean(getCsvValue(row, CSV_FIELD_ALIASES.isProduced), false);
   const itemType = hasExplicitItemType
@@ -304,11 +365,17 @@ const parseInventoryCsvRow = (
     expiry: normalizeExpiryDate(getCsvValue(row, CSV_FIELD_ALIASES.expiry)),
     recipe: parsedRecipe,
     isVariablePrice: parseCsvBoolean(getCsvValue(row, CSV_FIELD_ALIASES.isVariablePrice), false),
+    isFuel: parseCsvBoolean(getCsvValue(row, CSV_FIELD_ALIASES.isFuel), false),
     isProduced,
     onMenu: parseCsvBoolean(getCsvValue(row, CSV_FIELD_ALIASES.onMenu), false),
     isSoldInPortions: parseCsvBoolean(getCsvValue(row, CSV_FIELD_ALIASES.isSoldInPortions), false),
     portionName: String(getCsvValue(row, CSV_FIELD_ALIASES.portionName) ?? '').trim() || undefined,
     portionsPerUnit: parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.portionsPerUnit)),
+    importTaxRate: parsedTaxRate !== undefined ? Number(parsedTaxRate) : undefined,
+    importTaxCalculationMethod:
+      parsedTaxMethodRaw !== undefined && String(parsedTaxMethodRaw ?? '').trim() !== ''
+        ? resolveTaxMethod(parsedTaxMethodRaw)
+        : undefined,
   };
 };
 
@@ -316,20 +383,32 @@ const getTemplateColumnsForBusinessType = (businessType: BusinessType): string[]
   const isRestaurantOrBar = businessType === 'Restaurant' || businessType === 'Bar & Liquor';
 
   if (!isRestaurantOrBar) {
-    const columns = ['name', 'productCode', 'barcode', 'price', 'cost', 'unitType', 'reorderLevel', 'supplier'];
-    if (businessType === 'Grocery' || businessType === 'Supermarket') {
-      columns.push('isVariablePrice');
-    }
+    const columns = [
+      'name',
+      'category',
+      'barcode',
+      'currentStock',
+      'price',
+      'cost',
+      'taxRate',
+      'taxCalculationMethod',
+      'unitType',
+      'reorderLevel',
+      'supplier',
+    ];
     return columns;
   }
 
   const columns = [
     'name',
-    'productCode',
+    'category',
     'barcode',
     'isProduced',
+    'currentStock',
     'price',
     'cost',
+    'taxRate',
+    'taxCalculationMethod',
     'unitType',
     'reorderLevel',
     'supplier',
@@ -357,7 +436,7 @@ const getTemplateFieldOptionsForBusinessType = (
   registerOptions('unitType', unitTypesByBusinessType[businessType] || []);
   registerOptions('reorderLevel', REORDER_LEVEL_OPTIONS);
   registerOptions('isProduced', BOOLEAN_OPTIONS);
-  registerOptions('isVariablePrice', BOOLEAN_OPTIONS);
+  registerOptions('taxCalculationMethod', ['inclusive', 'exclusive']);
   registerOptions('isSoldInPortions', BOOLEAN_OPTIONS);
   registerOptions('portionName', BAR_PORTION_NAME_OPTIONS);
 
@@ -371,26 +450,30 @@ const getTemplateRowsForBusinessType = (businessType: BusinessType): ImportTempl
     return [
       {
         name: 'Milk 300ml',
-        productCode: 'MILK-300',
+        category: 'Dairy & Eggs',
         barcode: '1234567890123',
+        currentStock: 50,
         price: 700,
         cost: 450,
+        taxRate: 16.5,
+        taxCalculationMethod: 'inclusive',
         unitType: 'bottle',
         reorderLevel: DEFAULT_REORDER_LEVEL,
         supplier: 'Local Dairy Ltd',
-        isVariablePrice: false,
       },
     ];
   }
 
   const ingredientRow: ImportTemplateRow = {
     name: 'Flour',
-    productCode: 'FLOUR-001',
     barcode: '',
-    itemType: 'ingredient',
+    category: 'Grains & Flour',
     isProduced: false,
+    currentStock: 25,
     price: '',
     cost: 2500,
+    taxRate: 0,
+    taxCalculationMethod: 'inclusive',
     unitType: 'kg',
     reorderLevel: 20,
     supplier: 'Wholesale Foods',
@@ -402,12 +485,14 @@ const getTemplateRowsForBusinessType = (businessType: BusinessType): ImportTempl
 
   const producedRow: ImportTemplateRow = {
     name: businessType === 'Bar & Liquor' ? 'Signature Mojito' : 'House Pizza',
-    productCode: businessType === 'Bar & Liquor' ? 'MOJITO-SIG' : 'PIZZA-HOUSE',
     barcode: '',
-    itemType: 'sellable',
+    category: businessType === 'Bar & Liquor' ? 'Cocktails' : 'Main Courses',
     isProduced: true,
+    currentStock: 10,
     price: businessType === 'Bar & Liquor' ? 4500 : 8000,
     cost: '',
+    taxRate: 16.5,
+    taxCalculationMethod: 'inclusive',
     unitType: '',
     reorderLevel: '',
     supplier: '',
@@ -422,12 +507,14 @@ const getTemplateRowsForBusinessType = (businessType: BusinessType): ImportTempl
 
   const purchasedSellableRow: ImportTemplateRow = {
     name: businessType === 'Bar & Liquor' ? 'Whisky (Bottle)' : 'Bottled Water',
-    productCode: businessType === 'Bar & Liquor' ? 'WHISKY-750' : 'WATER-500',
     barcode: '',
-    itemType: 'sellable',
     isProduced: false,
+    category: businessType === 'Bar & Liquor' ? 'Spirits' : 'Beverages',
+    currentStock: 40,
     price: businessType === 'Bar & Liquor' ? 2500 : 1000,
     cost: businessType === 'Bar & Liquor' ? 18000 : 600,
+    taxRate: 16.5,
+    taxCalculationMethod: 'inclusive',
     unitType: '',
     reorderLevel: '',
     supplier: businessType === 'Bar & Liquor' ? 'Premium Drinks Ltd' : 'Local Beverages',
@@ -487,13 +574,16 @@ export const ImportModal = ({
   const [file, setFile] = useState<globalThis.File | null>(null);
   const [isParsing, setIsParsing] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
-  const [parsedData, setParsedData] = useState<InventoryItem[]>([]);
+  const [importProgress, setImportProgress] = useState(0);
+  const [importStage, setImportStage] = useState('');
+  const [parsedData, setParsedData] = useState<ImportInventoryRow[]>([]);
   const [parsedHeaders, setParsedHeaders] = useState<string[]>([]);
   const [sourceBranchId, setSourceBranchId] = useState('');
   const [sourceProducts, setSourceProducts] = useState<InventoryItem[]>([]);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [isLoadingSourceProducts, setIsLoadingSourceProducts] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { user } = useAuth();
 
   const sourceBranchOptions = useMemo(
     () => branches.filter((branch) => String(branch.id) !== String(branchId)),
@@ -533,6 +623,8 @@ export const ImportModal = ({
       setSourceBranchId('');
       setSourceProducts([]);
       setSelectedProductIds([]);
+      setImportProgress(0);
+      setImportStage('');
     }
   }, [isOpen]);
 
@@ -542,6 +634,8 @@ export const ImportModal = ({
       setFile(uploadedFile);
       setParsedData([]);
       setParsedHeaders([]);
+      setImportProgress(0);
+      setImportStage('');
       parseFile(uploadedFile);
     }
   };
@@ -783,6 +877,9 @@ export const ImportModal = ({
   }> => {
     if (!branchId) throw new Error('Branch ID is missing.');
 
+    setImportStage('Processing products');
+    setImportProgress(5);
+
     const normalizedHeaderSet = new Set(parsedHeaders.map((header) => normalizeCsvHeader(header)));
     const hasColumn = (field: keyof typeof CSV_FIELD_ALIASES): boolean =>
       CSV_FIELD_ALIASES[field].some((alias) => normalizedHeaderSet.has(normalizeCsvHeader(alias)));
@@ -790,6 +887,38 @@ export const ImportModal = ({
     const currentBranchItems = (await getInventoryItemsForBranch(branchId)).filter(
       (item) => item._operation !== 'delete'
     );
+    const allSuppliers = await db.suppliers.toArray();
+    const supplierLookup = new Map<string, Supplier>();
+    for (const supplier of allSuppliers) {
+      const key = normalizeLookupValue(supplier.name);
+      if (key && !supplierLookup.has(key)) {
+        supplierLookup.set(key, supplier);
+      }
+    }
+    const missingSupplierKeys = new Set<string>();
+    const resolveSupplier = async (value?: string): Promise<Supplier | undefined> => {
+      const rawName = String(value ?? '').trim();
+      const key = normalizeLookupValue(rawName);
+      if (!key) return undefined;
+      if (supplierLookup.has(key)) return supplierLookup.get(key);
+      if (missingSupplierKeys.has(key)) return undefined;
+
+      try {
+        const created = await createSupplier(
+          { name: rawName },
+          user?.uid || 'system-import',
+          user?.displayName || user?.email || 'CSV Import',
+          branchId,
+          user?.businessId
+        );
+        supplierLookup.set(key, created);
+        return created;
+      } catch (error) {
+        console.warn('[ImportModal] Failed to create supplier during import:', error);
+        missingSupplierKeys.add(key);
+        return undefined;
+      }
+    };
 
     const importedIds = parsedData
       .map((item) => String(item.id || '').trim())
@@ -828,8 +957,11 @@ export const ImportModal = ({
     let createdCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
+    const initialStockEntries: InitialStockEntry[] = [];
+    const hasStockColumn = hasColumn('stockUnits');
+    const totalRows = parsedData.length;
 
-    for (const parsedItem of parsedData) {
+    for (const [index, parsedItem] of parsedData.entries()) {
       const parsedId = String(parsedItem.id || '').trim();
       const nameKey = normalizeLookupValue(parsedItem.name);
       if (!nameKey) {
@@ -871,6 +1003,11 @@ export const ImportModal = ({
         parsedItem.value !== undefined
           ? Number(parsedItem.value)
           : Number((stockUnits * (cost || 0)).toFixed(2));
+      const resolvedSupplier = hasColumn('supplier')
+        ? await resolveSupplier(parsedItem.supplier)
+        : undefined;
+      const resolvedSupplierName = resolvedSupplier?.name;
+      const { importTaxRate, importTaxCalculationMethod, ...parsedItemBase } = parsedItem;
 
       if (matchedExistingItem) {
         const nextStockUnits = hasColumn('stockUnits') ? stockUnits : Number(matchedExistingItem.stockUnits || 0);
@@ -907,7 +1044,7 @@ export const ImportModal = ({
         if (hasColumn('itemType')) updatedItem.itemType = parsedItem.itemType;
         if (hasColumn('unitType')) updatedItem.unitType = parsedItem.unitType;
         if (hasColumn('price')) updatedItem.price = parsedItem.price;
-        if (hasColumn('supplier')) updatedItem.supplier = parsedItem.supplier;
+        if (hasColumn('supplier')) updatedItem.supplier = resolvedSupplierName;
         if (hasColumn('manufacturer')) updatedItem.manufacturer = parsedItem.manufacturer;
         if (hasColumn('brand')) updatedItem.brand = parsedItem.brand;
         if (hasColumn('batch')) updatedItem.batch = parsedItem.batch;
@@ -929,15 +1066,27 @@ export const ImportModal = ({
         });
         updatedCount += 1;
       } else {
+        const initialStockQuantity = hasStockColumn ? Math.max(0, stockUnits) : 0;
+        const shouldCreateInitialStock = hasStockColumn && initialStockQuantity > 0;
+        const createdStockUnits = shouldCreateInitialStock ? 0 : stockUnits;
+        const createdValue = shouldCreateInitialStock
+          ? Number((createdStockUnits * (cost || 0)).toFixed(2))
+          : value;
+        const createdStatus = shouldCreateInitialStock
+          ? computeStatus(createdStockUnits, reorderLevel)
+          : parsedItem.status || computeStatus(stockUnits, reorderLevel);
+
         const createdItem: InventoryItem = {
-          ...parsedItem,
+          ...parsedItemBase,
           id: finalId,
           branchId,
-          stockUnits,
+          stockUnits: createdStockUnits,
           reorderLevel,
           cost,
-          value,
-          status: parsedItem.status || computeStatus(stockUnits, reorderLevel),
+          value: createdValue,
+          supplier: hasColumn('supplier') ? resolvedSupplierName : parsedItem.supplier,
+          status: createdStatus,
+          ...(shouldCreateInitialStock ? { initialStockViaPurchase: true } : {}),
         };
 
         itemsToUpsert.push({
@@ -946,6 +1095,18 @@ export const ImportModal = ({
           _operation: 'create',
         });
         createdCount += 1;
+
+        if (shouldCreateInitialStock) {
+          initialStockEntries.push({
+            itemId: finalId,
+            productName: parsedItem.name,
+            quantity: initialStockQuantity,
+            costPerUnit: Number.isFinite(Number(cost)) ? Number(cost) : 0,
+            taxRate: normalizeTaxRate(importTaxRate),
+            taxMethod: importTaxCalculationMethod ?? 'exclusive',
+            supplier: resolvedSupplier,
+          });
+        }
       }
 
       const indexedItem = itemsToUpsert[itemsToUpsert.length - 1];
@@ -953,13 +1114,183 @@ export const ImportModal = ({
       if (nameKey) byName.set(nameKey, indexedItem);
       if (productCodeKey) byProductCode.set(productCodeKey, indexedItem);
       if (barcodeKey) byBarcode.set(barcodeKey, indexedItem);
+
+      if (totalRows > 0 && (index % 10 === 0 || index === totalRows - 1)) {
+        const percent = Math.min(70, Math.round(((index + 1) / totalRows) * 70));
+        setImportProgress(percent);
+      }
     }
 
     if (itemsToUpsert.length === 0) {
       throw new Error('No valid items to import from CSV.');
     }
 
-    await db.inventory.bulkPut(itemsToUpsert);
+    setImportStage(initialStockEntries.length > 0 ? 'Saving products & initial stock' : 'Saving products');
+    setImportProgress((prev) => (prev < 75 ? 75 : prev));
+
+    const purchaseRecordIds: string[] = [];
+    const purchaseOrderIds: string[] = [];
+
+    await db.transaction('rw', db.inventory, db.purchaseHistory, db.purchaseOrders, async () => {
+      await db.inventory.bulkPut(itemsToUpsert);
+
+      if (initialStockEntries.length === 0) {
+        return;
+      }
+
+      const groupedBySupplier = new Map<
+        string,
+        { supplier?: Supplier; entries: InitialStockEntry[] }
+      >();
+
+      for (const entry of initialStockEntries) {
+        const supplierKey =
+          entry.supplier?.id || normalizeLookupValue(entry.supplier?.name) || 'no-supplier';
+        const existingGroup = groupedBySupplier.get(supplierKey);
+        if (existingGroup) {
+          existingGroup.entries.push(entry);
+        } else {
+          groupedBySupplier.set(supplierKey, {
+            supplier: entry.supplier,
+            entries: [entry],
+          });
+        }
+      }
+
+      let receivedIndexOffset = 0;
+      const baseReceivedAt = Date.now();
+      const referenceNumber = `IMPORT-${new Date(baseReceivedAt).toISOString().slice(0, 10).replace(/-/g, '')}`;
+
+      for (const group of groupedBySupplier.values()) {
+        const purchaseOrderId = uuidv4();
+        purchaseOrderIds.push(purchaseOrderId);
+
+        let totalCost = 0;
+        let totalVat = 0;
+        let totalWithVat = 0;
+
+        for (const entry of group.entries) {
+          const quantity = Number(entry.quantity || 0);
+          const costPerUnit = Number(entry.costPerUnit || 0);
+          const taxRate = normalizeTaxRate(entry.taxRate);
+          const taxMethod = entry.taxMethod;
+          const itemVat = calculateItemVat(costPerUnit, quantity, taxRate, taxMethod);
+          const itemGross = calculateItemGross(costPerUnit, quantity, itemVat, taxMethod);
+          totalCost += quantity * costPerUnit;
+          totalVat += itemVat;
+          totalWithVat += itemGross;
+        }
+
+        const paymentStatus: PurchaseOrder['paymentStatus'] = 'Paid';
+        const amountPaid = totalWithVat;
+        const amountDue = 0;
+
+        for (const entry of group.entries) {
+          const quantityReceived = Number(entry.quantity || 0);
+          const costPerUnit = Number(entry.costPerUnit || 0);
+          const itemTotalCost = quantityReceived * costPerUnit;
+          const taxRate = normalizeTaxRate(entry.taxRate);
+          const taxMethod = entry.taxMethod;
+          const itemVatAmount = calculateItemVat(costPerUnit, quantityReceived, taxRate, taxMethod);
+          const itemGross = calculateItemGross(costPerUnit, quantityReceived, itemVatAmount, taxMethod);
+          const itemNetTotal =
+            taxMethod === 'exclusive'
+              ? itemTotalCost
+              : Math.max(0, itemTotalCost - itemVatAmount);
+          const netCostPerUnit = quantityReceived > 0 ? itemNetTotal / quantityReceived : costPerUnit;
+          const normalizedNetCost = Number.isFinite(netCostPerUnit) ? netCostPerUnit : Number(costPerUnit || 0);
+          const receivedDate = new Date(baseReceivedAt + receivedIndexOffset).toISOString();
+          receivedIndexOffset += 1;
+
+          const product = await db.inventory.get(entry.itemId);
+          if (product) {
+            const newStock = (product.stockUnits || 0) + quantityReceived;
+            const nextValue = Number.isFinite(newStock * normalizedNetCost)
+              ? Number((newStock * normalizedNetCost).toFixed(2))
+              : product.value;
+            await db.inventory.update(entry.itemId, {
+              stockUnits: newStock,
+              cost: Number(normalizedNetCost.toFixed(4)),
+              value: nextValue,
+              status:
+                newStock > (product.reorderLevel || 0)
+                  ? 'In Stock'
+                  : newStock > 0
+                    ? 'Low Stock'
+                    : 'Out of Stock',
+            });
+          }
+
+          const purchaseRecordId = uuidv4();
+          await db.purchaseHistory.put({
+            id: purchaseRecordId,
+            purchaseOrderId: purchaseOrderId,
+            referenceNumber: referenceNumber,
+            vatAmount: totalVat,
+            taxRate: taxRate,
+            taxCalculationMethod: taxMethod,
+            taxAmount: itemVatAmount,
+            productId: entry.itemId,
+            productName: entry.productName,
+            supplierId: group.supplier?.id,
+            supplierName: group.supplier?.name || 'No Supplier',
+            branchId: branchId,
+            quantityReceived: quantityReceived,
+            quantityRemaining: quantityReceived,
+            costPerUnit: costPerUnit,
+            totalCost: itemTotalCost,
+            paymentStatus: paymentStatus,
+            amountDue: paymentStatus === 'Paid' ? 0 : itemGross,
+            receivedDate: receivedDate,
+            _dirty: true,
+            _operation: 'create',
+          } as PurchaseRecord);
+          purchaseRecordIds.push(purchaseRecordId);
+        }
+
+        await db.purchaseOrders.add({
+          id: purchaseOrderId,
+          orderNumber: purchaseOrderId,
+          supplierId: group.supplier?.id,
+          supplierName: group.supplier?.name || 'No Supplier',
+          status: 'Received',
+          totalItems: group.entries.length,
+          totalCost: totalCost,
+          referenceNumber: referenceNumber,
+          vatAmount: totalVat,
+          paymentStatus: paymentStatus,
+          amountPaid: amountPaid,
+          amountDue: amountDue,
+          notes: 'Initial stock import',
+          createdBy: user?.displayName || user?.email || 'System',
+          branchId: branchId,
+          items: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          supplierTin: group.supplier?.supplierTin || undefined,
+          supplierVatRegistered: group.supplier?.vatRegistered || false,
+          eisSynced: false,
+          eisSyncedAt: undefined,
+          approvedBy: undefined,
+          approvedAt: undefined,
+          _dirty: true,
+          _operation: 'create',
+        });
+      }
+    });
+
+    setImportStage('Finalizing import');
+    setImportProgress((prev) => (prev < 92 ? 92 : prev));
+
+    for (const recordId of purchaseRecordIds) {
+      await syncService.markAsDirty('PurchaseRecord', recordId, 'create');
+    }
+    for (const orderId of purchaseOrderIds) {
+      await syncService.markAsDirty('PurchaseOrder', orderId, 'create');
+    }
+
+    setImportProgress((prev) => (prev < 80 ? 80 : prev));
+    setImportStage('Import complete');
 
     return {
       createdCount,
@@ -1062,7 +1393,11 @@ export const ImportModal = ({
           description: `CSV import complete: ${summary.join(', ')}.`,
         });
       } else {
+        setImportStage('Importing from branch');
+        setImportProgress(10);
         const result = await handleBranchImport();
+        setImportProgress((prev) => (prev < 80 ? 80 : prev));
+        setImportStage('Import complete');
         const summaryParts = [
           `Imported ${result.importedCount} products`,
           result.skippedCount > 0 ? `skipped ${result.skippedCount} existing` : null,
@@ -1079,10 +1414,36 @@ export const ImportModal = ({
       }
 
       if (typeof window !== 'undefined' && navigator.onLine) {
-        syncService.performFullSync(branchId).catch((error) => {
-          console.error('Inventory sync after import failed:', error);
+        setImportStage('Syncing to server');
+        setImportProgress((prev) => (prev < 80 ? 80 : prev));
+
+        await syncService.performFullSync(branchId, {
+          onProgress: (progress) => {
+            const base = 80;
+            const span = 20;
+            const percent = typeof progress.percent === 'number' ? progress.percent : undefined;
+            let nextValue = base;
+
+            if (progress.stage === 'inventory' && percent !== undefined) {
+              nextValue = base + Math.round((percent / 100) * span);
+            } else if (progress.stage === 'pull') {
+              nextValue = base + Math.round(span * 0.9);
+            } else if (progress.stage === 'done') {
+              nextValue = 100;
+            } else if (progress.stage === 'error') {
+              nextValue = base + Math.round(span * 0.9);
+            }
+
+            setImportProgress((prev) => Math.max(prev, Math.min(100, nextValue)));
+            if (progress.message) {
+              setImportStage(progress.message);
+            }
+          },
         });
       }
+
+      setImportProgress(100);
+      setImportStage('All done');
 
       onOpenChange(false);
     } catch (error: any) {
@@ -1170,6 +1531,18 @@ export const ImportModal = ({
                 </Card>
               )}
 
+              {(isImporting || importProgress > 0) && (
+                <Card>
+                  <CardContent className="p-4 space-y-2">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>{importStage || 'Importing...'}</span>
+                      <span>{Math.round(importProgress)}%</span>
+                    </div>
+                    <Progress value={importProgress} />
+                  </CardContent>
+                </Card>
+              )}
+
               {!isParsing && parsedData.length > 0 && (
                 <Card>
                   <CardContent className="p-4 space-y-3">
@@ -1203,10 +1576,28 @@ export const ImportModal = ({
                                 <span className="text-muted-foreground">Reorder:</span> {formatPreviewNumber(item.reorderLevel)}
                               </p>
                               <p>
+                                <span className="text-muted-foreground">Stock:</span> {formatPreviewNumber(item.stockUnits)}
+                              </p>
+                              <p>
+                                <span className="text-muted-foreground">Category:</span> {item.category || '—'}
+                              </p>
+                              <p>
                                 <span className="text-muted-foreground">Cost:</span> {formatPreviewNumber(item.cost)}
                               </p>
                               <p>
                                 <span className="text-muted-foreground">Price:</span> {formatPreviewNumber(item.price)}
+                              </p>
+                              <p>
+                                <span className="text-muted-foreground">Tax Rate:</span> {formatPreviewNumber(item.importTaxRate)}
+                              </p>
+                              <p>
+                                <span className="text-muted-foreground">Tax Method:</span> {item.importTaxCalculationMethod || '—'}
+                              </p>
+                              <p>
+                                <span className="text-muted-foreground">Supplier:</span> {item.supplier || '—'}
+                              </p>
+                              <p>
+                                <span className="text-muted-foreground">Barcode:</span> {item.barcode || '—'}
                               </p>
                             </div>
                           </div>

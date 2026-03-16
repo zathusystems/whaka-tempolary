@@ -2,12 +2,12 @@
 
 'use client';
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useForm } from 'react-hook-form';
-import { MoreHorizontal, PlusCircle, Edit, Trash2, Package, History, DollarSign, Loader2 } from 'lucide-react';
+import { MoreHorizontal, PlusCircle, Edit, Trash2, Package, History, DollarSign, Loader2, Printer, Download } from 'lucide-react';
 
-import { db, type Supplier, type InventoryItem } from '@/lib/db';
+import { db, type Supplier, type InventoryItem, type PurchaseRecord } from '@/lib/db';
 import { useCurrency } from '@/hooks/use-currency';
 import { useAuth } from '@/hooks/use-auth';
 import { createSupplier, updateSupplier, deleteSupplier } from '@/lib/services/supplier-service';
@@ -131,6 +131,50 @@ const formatDisplayDate = (...values: unknown[]): string => {
 const dateSortValue = (...values: unknown[]): number => {
     const parsed = parseDateCandidate(...values);
     return parsed ? parsed.getTime() : 0;
+};
+
+const normalizeTaxRate = (value: unknown): number => {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+};
+
+const resolveTaxMethod = (value: unknown): 'inclusive' | 'exclusive' => {
+    return value === 'inclusive' ? 'inclusive' : 'exclusive';
+};
+
+const resolveRecordVat = (record: PurchaseRecord): number => {
+    const taxRate = normalizeTaxRate(record.taxRate);
+    const method = resolveTaxMethod(record.taxCalculationMethod);
+    const base = Number(record.totalCost || 0);
+    if (!Number.isFinite(base) || base <= 0 || taxRate <= 0) {
+        return typeof record.taxAmount === 'number' && Number.isFinite(record.taxAmount) ? record.taxAmount : 0;
+    }
+    if (method === 'inclusive') {
+        return base - base / (1 + taxRate / 100);
+    }
+    return base * (taxRate / 100);
+};
+
+const resolveRecordGross = (record: PurchaseRecord, vatAmount: number): number => {
+    const base = Number(record.totalCost || 0);
+    if (!Number.isFinite(base)) return 0;
+    const method = resolveTaxMethod(record.taxCalculationMethod);
+    return method === 'exclusive' ? base + (vatAmount || 0) : base;
+};
+
+type SupplierPurchaseGroup = {
+    groupId: string;
+    displayDate: string;
+    dateSortValue: number;
+    paymentStatus: string;
+    totalCost: number;
+    totalQuantity: number;
+    amountDue: number;
+    totalVat: number;
+    totalWithVat: number;
+    referenceNumber?: string;
+    vatAmount?: number;
+    items: PurchaseRecord[];
 };
 
 
@@ -332,6 +376,9 @@ const SupplierListRow = ({ supplier, onView, onEdit, onDelete, activeBranchId }:
 const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }: { supplier: Supplier, isOpen: boolean, onOpenChange: (open: boolean) => void, activeBranchId: string }) => {
     const [isPaying, setIsPaying] = useState(false);
     const [isSyncingDetails, setIsSyncingDetails] = useState(false);
+    const [isExporting, setIsExporting] = useState(false);
+    const [isPurchaseDetailOpen, setIsPurchaseDetailOpen] = useState(false);
+    const [selectedPurchase, setSelectedPurchase] = useState<SupplierPurchaseGroup | null>(null);
     const { user } = useAuth();
     const { format: formatCurrency } = useCurrency();
     
@@ -374,6 +421,245 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
     );
     
     const amountOwed = purchaseHistory?.filter(p => p.paymentStatus === 'Unpaid').reduce((acc, p) => acc + p.amountDue, 0) || 0;
+    const purchaseGroups = useMemo<SupplierPurchaseGroup[]>(() => {
+        if (!purchaseHistory) return [];
+        const groups: Record<string, SupplierPurchaseGroup> = {};
+
+        const resolveGroupStatus = (statuses: string[]): string => {
+            if (statuses.includes('Unpaid')) return 'Unpaid';
+            if (statuses.includes('Pending')) return 'Pending';
+            if (statuses.includes('Partial')) return 'Partial';
+            if (statuses.includes('Credit')) return 'Credit';
+            return 'Paid';
+        };
+
+        purchaseHistory.forEach((record) => {
+            const groupId = record.purchaseOrderId || `${record.receivedDate}-${record.supplierId}`;
+            const sortValue = dateSortValue(
+                record.receivedDate,
+                (record as any).createdAt,
+                (record as any).updatedAt
+            );
+            if (!groups[groupId]) {
+                groups[groupId] = {
+                    groupId,
+                    displayDate: formatDisplayDate(
+                        record.receivedDate,
+                        (record as any).createdAt,
+                        (record as any).updatedAt
+                    ),
+                    dateSortValue: sortValue,
+                    paymentStatus: record.paymentStatus,
+                    totalCost: 0,
+                    totalQuantity: 0,
+                    amountDue: 0,
+                    totalVat: 0,
+                    totalWithVat: 0,
+                    referenceNumber: record.referenceNumber,
+                    vatAmount: record.vatAmount,
+                    items: [],
+                };
+            }
+
+            const itemVat = resolveRecordVat(record);
+            const itemGross = resolveRecordGross(record, itemVat);
+            groups[groupId].items.push(record);
+            groups[groupId].totalCost += record.totalCost || 0;
+            groups[groupId].totalVat += itemVat;
+            groups[groupId].totalWithVat += itemGross;
+            groups[groupId].totalQuantity += record.quantityReceived || 0;
+            groups[groupId].amountDue += record.amountDue || 0;
+            groups[groupId].paymentStatus = resolveGroupStatus([
+                groups[groupId].paymentStatus,
+                record.paymentStatus,
+            ].filter(Boolean));
+
+            if (!groups[groupId].referenceNumber && record.referenceNumber) {
+                groups[groupId].referenceNumber = record.referenceNumber;
+            }
+            if (groups[groupId].vatAmount === undefined && record.vatAmount !== undefined) {
+                groups[groupId].vatAmount = record.vatAmount;
+            }
+
+            if (sortValue > groups[groupId].dateSortValue) {
+                groups[groupId].dateSortValue = sortValue;
+                groups[groupId].displayDate = formatDisplayDate(
+                    record.receivedDate,
+                    (record as any).createdAt,
+                    (record as any).updatedAt
+                );
+            }
+        });
+
+        return Object.values(groups).sort((a, b) => b.dateSortValue - a.dateSortValue);
+    }, [purchaseHistory]);
+
+    const handleViewPurchaseDetails = (group: SupplierPurchaseGroup) => {
+        setSelectedPurchase(group);
+        setIsPurchaseDetailOpen(true);
+    };
+
+    const handlePurchaseDetailOpenChange = (open: boolean) => {
+        setIsPurchaseDetailOpen(open);
+        if (!open) {
+            setSelectedPurchase(null);
+        }
+    };
+
+    const buildPurchaseDetailHtml = (group: SupplierPurchaseGroup) => {
+        const escapeHtml = (value: string) =>
+            value
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+
+        const vatTotal =
+            typeof group.totalVat === 'number' && group.totalVat > 0
+                ? group.totalVat
+                : group.vatAmount ?? 0;
+        const subtotal = group.totalWithVat - vatTotal;
+        const itemsRows = group.items
+            .map((item) => {
+                const itemVat = resolveRecordVat(item);
+                const vatMethod = resolveTaxMethod(item.taxCalculationMethod);
+                const vatLabel = vatMethod === 'inclusive' ? 'Incl' : 'Excl';
+                return `
+                <tr>
+                    <td>${escapeHtml(item.productName || '')}</td>
+                    <td class="right">${item.quantityReceived}</td>
+                    <td class="right">${formatCurrency(item.costPerUnit || 0)}</td>
+                    <td class="right">${formatCurrency(item.totalCost || 0)}</td>
+                    <td class="right">${formatCurrency(itemVat || 0)} (${vatLabel})</td>
+                    <td>${escapeHtml(item.batchNumber || 'N/A')}</td>
+                    <td>${escapeHtml(formatDisplayDate(item.expiryDate))}</td>
+                </tr>
+            `;
+            })
+            .join('');
+
+        return `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8" />
+                <title>Purchase Details</title>
+                <style>
+                    * { box-sizing: border-box; }
+                    body { font-family: Arial, sans-serif; color: #111; margin: 24px; }
+                    h1 { font-size: 20px; margin-bottom: 4px; }
+                    .subheading { font-size: 12px; color: #555; margin-bottom: 16px; }
+                    .purchase-header { display: grid; grid-template-columns: repeat(6, minmax(140px, 1fr)); gap: 12px; margin-bottom: 12px; font-size: 12px; }
+                    .label { font-size: 10px; text-transform: uppercase; color: #777; }
+                    .value { font-weight: 600; }
+                    table { width: 100%; border-collapse: collapse; font-size: 11px; }
+                    th, td { padding: 6px 8px; border-bottom: 1px solid #eee; }
+                    th { text-align: left; background: #f5f5f5; }
+                    .right { text-align: right; }
+                </style>
+            </head>
+            <body>
+                <h1>Purchase Details</h1>
+                <div class="subheading">${escapeHtml(supplier.name)} · ${escapeHtml(group.displayDate)}</div>
+                <div class="purchase-header">
+                    <div>
+                        <div class="label">Reference</div>
+                        <div class="value">${escapeHtml(group.referenceNumber || 'N/A')}</div>
+                    </div>
+                    <div>
+                        <div class="label">Payment Status</div>
+                        <div class="value">${escapeHtml(group.paymentStatus)}</div>
+                    </div>
+                    <div>
+                        <div class="label">Subtotal (Excl VAT)</div>
+                        <div class="value">${formatCurrency(subtotal)}</div>
+                    </div>
+                    <div>
+                        <div class="label">VAT</div>
+                        <div class="value">${formatCurrency(vatTotal)}</div>
+                    </div>
+                    <div>
+                        <div class="label">Total (Incl VAT)</div>
+                        <div class="value">${formatCurrency(group.totalWithVat)}</div>
+                    </div>
+                    <div>
+                        <div class="label">Amount Due</div>
+                        <div class="value">${formatCurrency(group.amountDue)}</div>
+                    </div>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Product</th>
+                            <th class="right">Qty</th>
+                            <th class="right">Cost/Unit</th>
+                            <th class="right">Total</th>
+                            <th class="right">VAT (Incl/Excl)</th>
+                            <th>Batch</th>
+                            <th>Expiry</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${itemsRows || '<tr><td colspan="7">No items available.</td></tr>'}
+                    </tbody>
+                </table>
+            </body>
+            </html>
+        `;
+    };
+
+    const handlePrintPurchaseDetails = () => {
+        if (!selectedPurchase) {
+            toast({ title: 'Select a purchase', description: 'Choose a purchase to print.' });
+            return;
+        }
+
+        const html = buildPurchaseDetailHtml(selectedPurchase);
+        const printWindow = window.open('', '_blank', 'width=900,height=700');
+        if (!printWindow) {
+            toast({ variant: 'destructive', title: 'Popup blocked', description: 'Allow popups to print.' });
+            return;
+        }
+
+        printWindow.document.write(html);
+        printWindow.document.close();
+        printWindow.focus();
+        printWindow.print();
+    };
+
+    const handleDownloadPurchasePdf = async () => {
+        if (!selectedPurchase) {
+            toast({ title: 'Select a purchase', description: 'Choose a purchase to export.' });
+            return;
+        }
+
+        setIsExporting(true);
+        try {
+            const html2pdf = (await import('html2pdf.js')).default || (await import('html2pdf.js'));
+            const container = document.createElement('div');
+            container.innerHTML = buildPurchaseDetailHtml(selectedPurchase);
+            const safeSupplier = supplier.name.replace(/\s+/g, '_');
+            const safeDate = selectedPurchase.displayDate.replace(/[^\w-]+/g, '_');
+            const filename = `Purchase_${safeSupplier}_${safeDate}.pdf`;
+            await html2pdf()
+                .set({
+                    margin: 0.3,
+                    filename,
+                    image: { type: 'jpeg', quality: 0.98 },
+                    html2canvas: { scale: 2 },
+                    jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
+                })
+                .from(container)
+                .save();
+            toast({ title: 'PDF downloaded', description: 'Purchase exported successfully.' });
+        } catch (error) {
+            console.error('[Supplier Detail] Failed to export PDF:', error);
+            toast({ variant: 'destructive', title: 'PDF export failed', description: 'Please try again.' });
+        } finally {
+            setIsExporting(false);
+        }
+    };
 
     const handleRecordPayment = async () => {
         setIsPaying(true);
@@ -431,7 +717,9 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
                 <DialogHeader>
                     <DialogTitle>{supplier.name}</DialogTitle>
                     <DialogDescription>
-                        Supplier ID: {supplier.id}
+                        {supplier.email || supplier.phone
+                            ? [supplier.email, supplier.phone].filter(Boolean).join(' · ')
+                            : 'Supplier details and purchase history.'}
                     </DialogDescription>
                 </DialogHeader>
                 <Tabs defaultValue="account">
@@ -459,43 +747,77 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
                             </CardContent>
                         </Card>
                     </TabsContent>
-                     <TabsContent value="history">
+                    <TabsContent value="history">
                         <Card>
                             <CardHeader>
-                                <CardTitle>Purchase History</CardTitle>
-                                <CardDescription>Complete purchase record from {supplier.name}.</CardDescription>
+                                <div>
+                                    <CardTitle>Purchase History</CardTitle>
+                                    <CardDescription>Purchase summary for {supplier.name}.</CardDescription>
+                                </div>
                             </CardHeader>
                             <CardContent>
-                                <div className="overflow-x-auto max-h-[400px]">
-                                    <Table>
-                                        <TableHeader>
-                                            <TableRow>
-                                                <TableHead>Date</TableHead>
-                                                <TableHead>Product</TableHead>
-                                                <TableHead>Payment</TableHead>
-                                                <TableHead className="text-right">Total Cost</TableHead>
-                                                <TableHead className="text-right">Amount Due</TableHead>
-                                            </TableRow>
-                                        </TableHeader>
-                                        <TableBody>
-                                            {purchaseHistory?.map((record) => (
-                                                <TableRow key={record.id}>
-                                                    <TableCell>
-                                                        {formatDisplayDate(
-                                                            record.receivedDate,
-                                                            (record as any).createdAt,
-                                                            (record as any).updatedAt
-                                                        )}
-                                                    </TableCell>
-                                                    <TableCell className="font-medium">{record.productName}</TableCell>
-                                                    <TableCell><Badge variant={record.paymentStatus === 'Paid' ? 'secondary' : 'destructive'}>{record.paymentStatus}</Badge></TableCell>
-                                                    <TableCell className="text-right">{formatCurrency(record.totalCost)}</TableCell>
-                                                    <TableCell className="text-right font-semibold">{formatCurrency(record.amountDue)}</TableCell>
-                                                </TableRow>
-                                            ))}
-                                        </TableBody>
-                                    </Table>
-                                </div>
+                                {purchaseGroups.length === 0 ? (
+                                    <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+                                        No purchase history available for this supplier.
+                                    </div>
+                                ) : (
+                                    <div className="max-h-[500px] overflow-y-auto">
+                                        <div className="overflow-x-auto">
+                                            <Table>
+                                                <TableHeader>
+                                                    <TableRow>
+                                                        <TableHead>Date</TableHead>
+                                                        <TableHead>Reference</TableHead>
+                                                        <TableHead>Payment</TableHead>
+                                                        <TableHead className="text-right">Subtotal (Excl VAT)</TableHead>
+                                                        <TableHead className="text-right">VAT</TableHead>
+                                                        <TableHead className="text-right">Total (Incl VAT)</TableHead>
+                                                        <TableHead className="text-right">Amount Due</TableHead>
+                                                        <TableHead className="text-right">Action</TableHead>
+                                                    </TableRow>
+                                                </TableHeader>
+                                                <TableBody>
+                                                    {purchaseGroups.map((group) => {
+                                                        const vatTotal =
+                                                            typeof group.totalVat === 'number' && group.totalVat > 0
+                                                                ? group.totalVat
+                                                                : group.vatAmount ?? 0;
+                                                        const subtotal = group.totalWithVat - vatTotal;
+
+                                                        return (
+                                                            <TableRow key={group.groupId}>
+                                                                <TableCell>{group.displayDate}</TableCell>
+                                                                <TableCell>{group.referenceNumber || 'N/A'}</TableCell>
+                                                                <TableCell>
+                                                                    <Badge
+                                                                        variant={
+                                                                            group.paymentStatus === 'Paid'
+                                                                                ? 'secondary'
+                                                                                : group.paymentStatus === 'Unpaid'
+                                                                                ? 'destructive'
+                                                                                : 'outline'
+                                                                        }
+                                                                    >
+                                                                        {group.paymentStatus}
+                                                                    </Badge>
+                                                                </TableCell>
+                                                                <TableCell className="text-right">{formatCurrency(subtotal)}</TableCell>
+                                                                <TableCell className="text-right">{formatCurrency(vatTotal)}</TableCell>
+                                                                <TableCell className="text-right">{formatCurrency(group.totalWithVat)}</TableCell>
+                                                                <TableCell className="text-right">{formatCurrency(group.amountDue)}</TableCell>
+                                                                <TableCell className="text-right">
+                                                                    <Button variant="ghost" size="sm" onClick={() => handleViewPurchaseDetails(group)}>
+                                                                        Details
+                                                                    </Button>
+                                                                </TableCell>
+                                                            </TableRow>
+                                                        );
+                                                    })}
+                                                </TableBody>
+                                            </Table>
+                                        </div>
+                                    </div>
+                                )}
                             </CardContent>
                         </Card>
                     </TabsContent>
@@ -588,6 +910,121 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
                         </Card>
                     </TabsContent>
                 </Tabs>
+                <Dialog open={isPurchaseDetailOpen} onOpenChange={handlePurchaseDetailOpenChange}>
+                    <DialogContent className="sm:max-w-4xl max-h-[90vh] flex flex-col">
+                        <DialogHeader className="space-y-3">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                    <DialogTitle>Purchase Details</DialogTitle>
+                                    <DialogDescription>
+                                        {selectedPurchase ? `${supplier.name} · ${selectedPurchase.displayDate}` : ''}
+                                    </DialogDescription>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                    <Button variant="outline" onClick={handlePrintPurchaseDetails} disabled={!selectedPurchase}>
+                                        <Printer className="mr-2 h-4 w-4" /> Print
+                                    </Button>
+                                    <Button
+                                        variant="outline"
+                                        onClick={handleDownloadPurchasePdf}
+                                        disabled={!selectedPurchase || isExporting}
+                                    >
+                                        {isExporting ? (
+                                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                        ) : (
+                                            <Download className="mr-2 h-4 w-4" />
+                                        )}
+                                        Download PDF
+                                    </Button>
+                                </div>
+                            </div>
+                        </DialogHeader>
+
+                        {selectedPurchase && (() => {
+                            const vatTotal =
+                                typeof selectedPurchase.totalVat === 'number' && selectedPurchase.totalVat > 0
+                                    ? selectedPurchase.totalVat
+                                    : selectedPurchase.vatAmount ?? 0;
+                            const subtotal = selectedPurchase.totalWithVat - vatTotal;
+
+                            return (
+                                <div className="flex-1 overflow-y-auto -mx-6 px-6">
+                                    <div className="grid grid-cols-2 sm:grid-cols-6 gap-4 mb-6 p-4 bg-muted rounded-lg">
+                                        <div>
+                                            <p className="text-xs text-muted-foreground">Reference</p>
+                                            <p className="font-semibold">{selectedPurchase.referenceNumber || 'N/A'}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-muted-foreground">Payment Status</p>
+                                            <Badge
+                                                variant={
+                                                    selectedPurchase.paymentStatus === 'Paid'
+                                                        ? 'secondary'
+                                                        : selectedPurchase.paymentStatus === 'Unpaid'
+                                                        ? 'destructive'
+                                                        : 'outline'
+                                                }
+                                            >
+                                                {selectedPurchase.paymentStatus}
+                                            </Badge>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-muted-foreground">Subtotal (Excl VAT)</p>
+                                            <p className="font-semibold">{formatCurrency(subtotal)}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-muted-foreground">VAT</p>
+                                            <p className="font-semibold">{formatCurrency(vatTotal)}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-muted-foreground">Total (Incl VAT)</p>
+                                            <p className="font-semibold">{formatCurrency(selectedPurchase.totalWithVat)}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-muted-foreground">Amount Due</p>
+                                            <p className="font-semibold">{formatCurrency(selectedPurchase.amountDue)}</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="mb-4">
+                                        <h3 className="font-semibold mb-3">Items in this Purchase</h3>
+                                        <div className="overflow-x-auto">
+                                            <Table>
+                                                <TableHeader>
+                                                    <TableRow>
+                                                        <TableHead>Product</TableHead>
+                                                        <TableHead className="text-right">Qty</TableHead>
+                                                        <TableHead className="text-right">Cost/Unit</TableHead>
+                                                        <TableHead className="text-right">Total</TableHead>
+                                                        <TableHead className="text-right">VAT (Incl/Excl)</TableHead>
+                                                        <TableHead>Batch</TableHead>
+                                                        <TableHead>Expiry</TableHead>
+                                                    </TableRow>
+                                                </TableHeader>
+                                                <TableBody>
+                                                    {selectedPurchase.items.map((record) => (
+                                                        <TableRow key={record.id}>
+                                                            <TableCell className="font-medium">{record.productName}</TableCell>
+                                                            <TableCell className="text-right">{record.quantityReceived}</TableCell>
+                                                            <TableCell className="text-right">{formatCurrency(record.costPerUnit)}</TableCell>
+                                                            <TableCell className="text-right">{formatCurrency(record.totalCost)}</TableCell>
+                                                            <TableCell className="text-right">
+                                                                {formatCurrency(resolveRecordVat(record))}{' '}
+                                                                ({resolveTaxMethod(record.taxCalculationMethod) === 'inclusive' ? 'Incl' : 'Excl'})
+                                                            </TableCell>
+                                                            <TableCell>{record.batchNumber || 'N/A'}</TableCell>
+                                                            <TableCell>{formatDisplayDate(record.expiryDate)}</TableCell>
+                                                        </TableRow>
+                                                    ))}
+                                                </TableBody>
+                                            </Table>
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })()}
+                    </DialogContent>
+                </Dialog>
             </DialogContent>
         </Dialog>
     );

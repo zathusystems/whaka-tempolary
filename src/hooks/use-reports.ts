@@ -50,6 +50,11 @@ export const useReports = (dateRange?: DateRange) => {
     return Number.isFinite(parsed) ? parsed : fallback;
   };
 
+  const resolveNumber = (value: unknown): number | undefined => {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+
   const normalizeName = (value: unknown): string =>
     String(value ?? '').trim().toLowerCase();
 
@@ -163,10 +168,53 @@ export const useReports = (dateRange?: DateRange) => {
           db.staff.where('branchId').equals(activeBranchId).toArray(),
         ]);
 
+        const ordersToPatch = orders
+          .map((order) => {
+            const vat = resolveNumber((order as any).vatAmount ?? (order as any).vat_amount);
+            const net = resolveNumber((order as any).netAmount ?? (order as any).net_amount);
+            const gross = resolveNumber((order as any).grossAmount ?? (order as any).gross_amount);
+
+            const existingTax = resolveNumber(order.tax);
+            const existingSubtotal = resolveNumber(order.subtotal);
+            const existingTotal = resolveNumber(order.total);
+
+            const resolvedTax = existingTax ?? vat;
+            const resolvedSubtotal =
+              existingSubtotal ??
+              net ??
+              (gross !== undefined && resolvedTax !== undefined ? gross - resolvedTax : undefined);
+            const resolvedTotal =
+              existingTotal ??
+              gross ??
+              (resolvedSubtotal !== undefined && resolvedTax !== undefined
+                ? resolvedSubtotal + resolvedTax
+                : undefined);
+
+            const changes: Partial<Order> = {};
+            if (existingTax === undefined && resolvedTax !== undefined) {
+              changes.tax = resolvedTax;
+            }
+            if (existingSubtotal === undefined && resolvedSubtotal !== undefined) {
+              changes.subtotal = resolvedSubtotal;
+            }
+            if (existingTotal === undefined && resolvedTotal !== undefined) {
+              changes.total = resolvedTotal;
+            }
+
+            return Object.keys(changes).length > 0
+              ? { key: order.id, changes }
+              : null;
+          })
+          .filter(Boolean) as Array<{ key: string; changes: Partial<Order> }>;
+
+        if (ordersToPatch.length > 0) {
+          await db.orders.bulkUpdate(ordersToPatch);
+        }
+
         const normalizedOrders = orders.map((order) => {
-          const total = toFiniteNumber(order.total, 0);
-          const tax = toFiniteNumber(order.tax, 0);
-          const subtotalCandidate = toFiniteNumber(order.subtotal, Number.NaN);
+          const total = toFiniteNumber(order.total ?? order.grossAmount ?? order.gross_amount, 0);
+          const tax = toFiniteNumber(order.tax ?? order.vatAmount ?? order.vat_amount, 0);
+          const subtotalCandidate = toFiniteNumber(order.subtotal ?? order.netAmount ?? order.net_amount, Number.NaN);
           const subtotal = Number.isFinite(subtotalCandidate)
             ? subtotalCandidate
             : Math.max(total - tax, 0);

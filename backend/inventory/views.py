@@ -310,11 +310,14 @@ class MRAProductMappingViewSet(viewsets.ModelViewSet):
 
     def _create_mapping_record(self, inventory_item, mapping_data, user):
         """Create a single MRA mapping and write an audit entry."""
+        mra_product_code = (mapping_data.get('mra_product_code') or '').strip()
+        mra_product_name = (mapping_data.get('mra_product_name') or inventory_item.name or '').strip()
+
         mapping = MRAProductMapping.objects.create(
             inventory_item=inventory_item,
             branch=inventory_item.branch,
-            mra_product_code=mapping_data['mra_product_code'],
-            mra_product_name=mapping_data['mra_product_name'],
+            mra_product_code=mra_product_code,
+            mra_product_name=mra_product_name,
             mra_tax_type=mapping_data['mra_tax_type'],
             mra_tax_rate=mapping_data['mra_tax_rate'],
             mra_unit_measure=mapping_data['mra_unit_measure'],
@@ -332,12 +335,12 @@ class MRAProductMappingViewSet(viewsets.ModelViewSet):
             entity_id=str(mapping.id),
             details={
                 'inventory_item_id': str(inventory_item.id),
-                'mra_product_code': mapping.mra_product_code,
+                'mra_product_code': mapping.mra_product_code or '',
                 'mra_tax_rate': str(mapping.mra_tax_rate),
                 'tax_calculation_method': mapping.tax_calculation_method,
             },
             mra_related=True,
-            mra_reference=mapping.mra_product_code,
+            mra_reference=mapping.mra_product_code or '',
         )
         return mapping
 

@@ -10,9 +10,10 @@ from rest_framework.response import Response
 from django.utils import timezone
 from datetime import datetime
 from django.db import transaction
+from django.db.models import Q
 
-from .models import Supplier, InventoryItem
-from .serializers import InventoryItemSerializer
+from .models import Supplier, InventoryItem, PurchaseOrder
+from .serializers import InventoryItemSerializer, PurchaseOrderSerializer
 from business.models import Business
 
 # Import handlers from specialized sync modules
@@ -238,7 +239,8 @@ def sync_pull(request):
         "pulled_at": "2026-01-09T10:10:00Z",
         "changes": {
             "inventory_items": [...],
-            "suppliers": [...]
+            "suppliers": [...],
+            "purchase_orders": [...]
         }
     }
     """
@@ -292,17 +294,24 @@ def sync_pull(request):
         branch_lookup_error = None
         if isinstance(branch_id, str):
             import re
-            m = re.match(r"^BRN-(\d+)$", branch_id)
+            m = re.match(r"^BRN-(\d+)$", branch_id, flags=re.IGNORECASE)
             if m:
                 try:
                     resolved_branch = Branch.objects.get(pk=int(m.group(1)), business=business)
                 except Exception as e:
                     branch_lookup_error = e
-            elif branch_id.isdigit():
-                try:
-                    resolved_branch = Branch.objects.get(pk=int(branch_id), business=business)
-                except Exception as e:
-                    branch_lookup_error = e
+            else:
+                legacy_match = re.match(r"^branch-(\d+)$", branch_id, flags=re.IGNORECASE)
+                if legacy_match:
+                    try:
+                        resolved_branch = Branch.objects.get(pk=int(legacy_match.group(1)), business=business)
+                    except Exception as e:
+                        branch_lookup_error = e
+                elif branch_id.isdigit():
+                    try:
+                        resolved_branch = Branch.objects.get(pk=int(branch_id), business=business)
+                    except Exception as e:
+                        branch_lookup_error = e
         
         # Fallback: attempt direct PK match as given (covers non-str scenarios)
         if resolved_branch is None:
@@ -311,15 +320,28 @@ def sync_pull(request):
             except Exception as e:
                 branch_lookup_error = e
         
-        # Final fallback: match by name (case-sensitive exact)
+        # Final fallbacks: handle "main" alias, then slug/name matching.
+        if resolved_branch is None and isinstance(branch_id, str):
+            normalized_branch = branch_id.strip().lower()
+            if normalized_branch in {'main', 'main-branch', 'main_branch'}:
+                resolved_branch = (
+                    Branch.objects
+                    .filter(business=business, name__iendswith='Main Branch')
+                    .order_by('created_at', 'id')
+                    .first()
+                )
+
         if resolved_branch is None:
             try:
-                resolved_branch = Branch.objects.get(name=branch_id, business=business)
+                resolved_branch = Branch.objects.get(slug__iexact=branch_id, business=business)
             except Branch.DoesNotExist:
-                return Response(
-                    {'error': f"Branch '{branch_id}' not found for this business"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                try:
+                    resolved_branch = Branch.objects.get(name=branch_id, business=business)
+                except Branch.DoesNotExist:
+                    return Response(
+                        {'error': f"Branch '{branch_id}' not found for this business"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
         
         # Fetch updated inventory items for the resolved branch
         inventory_items = InventoryItem.objects.filter(
@@ -370,13 +392,29 @@ def sync_pull(request):
                 'balance_due': float(supplier.get_balance_due()),
                 'updated_at': supplier.updated_at.isoformat(),
             })
+
+        # Fetch updated purchase orders (include items updated since)
+        purchase_orders = (
+            PurchaseOrder.objects.filter(
+                business=business,
+                branch=resolved_branch,
+            )
+            .filter(Q(updated_at__gte=since_dt) | Q(items__updated_at__gte=since_dt))
+            .distinct()
+            .order_by('updated_at')
+            .prefetch_related('items', 'supplier')
+        )
+        
+        print(f"[Sync Pull] Found {purchase_orders.count()} updated purchase orders")
+        purchase_orders_data = PurchaseOrderSerializer(purchase_orders, many=True).data
         
         return Response({
             'pulled_at': timezone.now().isoformat(),
             'changes': {
-            'inventory_items': inventory_data,
-            'suppliers': suppliers_data
-        }
+                'inventory_items': inventory_data,
+                'suppliers': suppliers_data,
+                'purchase_orders': purchase_orders_data
+            }
         }, status=status.HTTP_200_OK)
         
     except Exception as e:

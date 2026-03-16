@@ -13,6 +13,7 @@ This module provides MRA-compliant inventory management with:
 import uuid
 from decimal import Decimal
 from django.db import models
+from django.core.exceptions import ObjectDoesNotExist
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from django.core.validators import MinValueValidator
@@ -159,11 +160,15 @@ class MRAProductMapping(models.Model):
     # MRA Product Information (IMMUTABLE)
     mra_product_code = models.CharField(
         max_length=100,
-        help_text="MRA-assigned product code"
+        help_text="MRA-assigned product code",
+        null=True,
+        blank=True
     )
     mra_product_name = models.CharField(
         max_length=255,
-        help_text="MRA-approved product name"
+        help_text="MRA-approved product name",
+        null=True,
+        blank=True
     )
     mra_tax_type = models.CharField(
         max_length=20,
@@ -226,7 +231,9 @@ class MRAProductMapping(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.mra_product_name} ({self.mra_product_code})"
+        display_name = self.mra_product_name or 'Unassigned MRA Product'
+        display_code = self.mra_product_code or 'No Code'
+        return f"{display_name} ({display_code})"
 
     def is_ready_for_sale(self):
         """Check if product is ready to be sold"""
@@ -372,11 +379,15 @@ class InventoryItem(models.Model):
         """Check if item is ready for MRA sales"""
         if self.item_type != 'sellable':
             return False
-        
-        if not hasattr(self, 'mra_mapping'):
+        try:
+            mapping = self.mra_mapping
+        except ObjectDoesNotExist:
             return False
-        
-        return self.mra_mapping.is_ready_for_sale()
+
+        if mapping is None:
+            return False
+
+        return mapping.is_ready_for_sale()
 
     def get_available_portions(self):
         """Calculate available portions for Bar & Liquor items"""
@@ -434,6 +445,19 @@ class PurchaseOrder(models.Model):
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='Unpaid')
     amount_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     amount_due = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    reference_number = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text="Supplier invoice or reference number"
+    )
+    vat_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="VAT amount for this purchase"
+    )
     
     # MRA Compliance Fields (NEW)
     supplier_tin = models.CharField(
@@ -516,6 +540,19 @@ class PurchaseOrderItem(models.Model):
     # Cost info
     cost_per_unit = models.DecimalField(max_digits=10, decimal_places=2)
     total_cost = models.DecimalField(max_digits=12, decimal_places=2)
+
+    # VAT info (per-item)
+    TAX_CALCULATION_METHOD = [
+        ('inclusive', 'Inclusive'),
+        ('exclusive', 'Exclusive'),
+    ]
+    tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0'))
+    tax_calculation_method = models.CharField(
+        max_length=10,
+        choices=TAX_CALCULATION_METHOD,
+        default='exclusive'
+    )
+    tax_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0'))
     
     # Batch & Expiry
     batch_number = models.CharField(max_length=100, blank=True)
@@ -555,6 +592,15 @@ class PurchaseOrderItem(models.Model):
     def save(self, *args, **kwargs):
         """Auto-calculate total cost"""
         self.total_cost = self.quantity_ordered * self.cost_per_unit
+        tax_rate = self.tax_rate or Decimal('0')
+        if tax_rate:
+            if self.tax_calculation_method == 'inclusive':
+                divisor = Decimal('1') + (tax_rate / Decimal('100'))
+                self.tax_amount = self.total_cost - (self.total_cost / divisor) if divisor != 0 else Decimal('0')
+            else:
+                self.tax_amount = self.total_cost * (tax_rate / Decimal('100'))
+        else:
+            self.tax_amount = Decimal('0')
         super().save(*args, **kwargs)
 
 

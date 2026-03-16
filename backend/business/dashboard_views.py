@@ -281,6 +281,9 @@ class DashboardViewSet(viewsets.ViewSet):
                 payment_totals['Other'] += order.total
             
             # Calculate COGS and track products
+            if order.cogs and order.cogs > 0:
+                total_cogs += order.cogs
+
             for item in order.items.all():
                 inv_item = inventory_map.get(item.inventory_item_id)
                 if not inv_item:
@@ -289,7 +292,8 @@ class DashboardViewSet(viewsets.ViewSet):
                 cost = inv_item['cost']
                 price = inv_item['price']
                 
-                total_cogs += cost * item.quantity
+                if not order.cogs or order.cogs <= 0:
+                    total_cogs += cost * item.quantity
                 
                 # Track product sales
                 if item.inventory_item_id not in product_sales:

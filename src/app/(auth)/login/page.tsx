@@ -198,9 +198,74 @@ const normalizePumpList = (value: unknown): string[] => {
         undefined,
       isFuelAttendant:
         staffProfile?.is_fuel_attendant ??
-        staffProfile?.isFuelAttendant ??
-        undefined,
+      staffProfile?.isFuelAttendant ??
+      undefined,
     };
+  };
+
+  const syncActiveBranchDetails = (
+    branchId: string,
+    branchesData: Branch[],
+    fetchedBranches: any[]
+  ) => {
+    if (!branchId || typeof window === 'undefined') return;
+    const normalizedBranchId = String(branchId);
+    const fetchedBranch = fetchedBranches.find(
+      (branch) => String(branch?.id) === normalizedBranchId
+    );
+    const summaryBranch = branchesData.find(
+      (branch) => String(branch?.id) === normalizedBranchId
+    );
+    const branchToStore = fetchedBranch || summaryBranch;
+
+    if (!branchToStore) {
+      window.dispatchEvent(new CustomEvent('branchChanged', { detail: { branchId: normalizedBranchId } }));
+      return;
+    }
+
+    try {
+      localStorage.setItem(
+        `handypos-branch-${normalizedBranchId}`,
+        JSON.stringify(branchToStore)
+      );
+    } catch (error) {
+      console.warn('[DEBUG LOGIN] Failed to store active branch details:', error);
+    }
+
+    const normalizedBranch = {
+      id: normalizedBranchId,
+      name: String(branchToStore?.name || summaryBranch?.name || ''),
+      address: String(branchToStore?.address || summaryBranch?.address || ''),
+    };
+
+    try {
+      const storedBranchesRaw = localStorage.getItem('handypos-branches');
+      const storedBranches = storedBranchesRaw ? JSON.parse(storedBranchesRaw) : [];
+      const branchesList = Array.isArray(storedBranches) ? storedBranches : [];
+      const matchIndex = branchesList.findIndex(
+        (branch: any) =>
+          String(branch?.id) === normalizedBranchId ||
+          String(branch?.backendId) === normalizedBranchId
+      );
+
+      if (matchIndex >= 0) {
+        branchesList[matchIndex] = {
+          ...branchesList[matchIndex],
+          ...normalizedBranch,
+        };
+      } else if (normalizedBranch.name) {
+        branchesList.push(normalizedBranch);
+      }
+
+      if (branchesList.length > 0) {
+        localStorage.setItem('handypos-branches', JSON.stringify(branchesList));
+        window.dispatchEvent(new CustomEvent('branchesUpdated', { detail: { branches: branchesList } }));
+      }
+    } catch (error) {
+      console.warn('[DEBUG LOGIN] Failed to update branches cache:', error);
+    }
+
+    window.dispatchEvent(new CustomEvent('branchChanged', { detail: { branchId: normalizedBranchId } }));
   };
 
   const onSubmit = async (data: LoginFormValues) => {
@@ -391,6 +456,7 @@ const normalizePumpList = (value: unknown): string[] => {
         preferAdminForGenericUser: true,
       });
       let branchesData: Branch[] = [];
+      let fetchedBranches: any[] = [];
       let activeBranchId: string | null = assignedBranchId ? String(assignedBranchId) : null;
 
       // Log the values being used
@@ -456,6 +522,10 @@ const normalizePumpList = (value: unknown): string[] => {
           const businessResponse = await authFetch.fetch<any>(
             `/business/businesses/${selectedBiz.id}/`
           );
+
+          fetchedBranches = Array.isArray(businessResponse?.branches)
+            ? businessResponse.branches
+            : [];
 
           if (businessResponse?.tin || businessResponse?.tax_pin || businessResponse?.taxPin) {
             const resolvedTin = businessResponse.tin || businessResponse.tax_pin || businessResponse.taxPin || '';
@@ -545,16 +615,16 @@ const normalizePumpList = (value: unknown): string[] => {
             }));
           }
           
-          if (businessResponse?.branches && businessResponse.branches.length > 0) {
+          if (fetchedBranches.length > 0) {
             // Store all branches for reference
-            branchesData = businessResponse.branches.map((b: any) => ({
+            branchesData = fetchedBranches.map((b: any) => ({
               id: String(b.id),
               name: b.name,
               address: b.address || '',
             }));
             localStorage.setItem('handypos-branches', JSON.stringify(branchesData));
             
-            for (const branch of businessResponse.branches) {
+            for (const branch of fetchedBranches) {
               // Store branch info for later use
               localStorage.setItem(
                 `handypos-branch-${branch.id}`,
@@ -645,6 +715,7 @@ const normalizePumpList = (value: unknown): string[] => {
         localStorage.setItem('handypos-active-branch', activeBranchId);
         localStorage.setItem('handypos-current-branch-id', activeBranchId);
         console.log('[DEBUG LOGIN] Active branch set to:', activeBranchId);
+        syncActiveBranchDetails(activeBranchId, branchesData, fetchedBranches);
       }
 
       // Create user session
@@ -790,6 +861,7 @@ const normalizePumpList = (value: unknown): string[] => {
       // Store the selected branch
       localStorage.setItem('handypos-active-branch', selectedBranch);
       localStorage.setItem('handypos-current-branch-id', selectedBranch);
+      syncActiveBranchDetails(selectedBranch, branches, []);
 
       // Get the selected business
       const selectedBiz = businesses.find(b => b.id === selectedBusiness);

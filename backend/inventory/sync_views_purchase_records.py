@@ -118,6 +118,14 @@ def handle_create_purchase_record(record_id, data, business, branch_id):
             'cost_per_unit',
             Decimal('0')
         )
+        tax_rate = _parse_decimal(
+            data.get('taxRate') or data.get('tax_rate', 0),
+            'tax_rate',
+            Decimal('0')
+        )
+        tax_calc_method = data.get('taxCalculationMethod') or data.get('tax_calculation_method') or 'exclusive'
+        if tax_calc_method not in {'inclusive', 'exclusive'}:
+            tax_calc_method = 'exclusive'
         
         if quantity_received <= 0:
             return {
@@ -138,6 +146,14 @@ def handle_create_purchase_record(record_id, data, business, branch_id):
             # If no PO ID provided, this is a direct receipt without a PO
             # Create a minimal PO just to hold this item
             po_id = str(uuid4())
+            reference_number = data.get('referenceNumber') or data.get('reference_number')
+            vat_amount = data.get('vatAmount')
+            if vat_amount is None:
+                vat_amount = data.get('vat_amount')
+            try:
+                vat_amount_value = float(vat_amount) if vat_amount not in ('', None) else None
+            except (TypeError, ValueError):
+                vat_amount_value = None
             purchase_order = PurchaseOrder.objects.create(
                 id=po_id,
                 business=business,
@@ -148,6 +164,8 @@ def handle_create_purchase_record(record_id, data, business, branch_id):
                 total_items=1,
                 total_cost=quantity_received * cost_per_unit,
                 payment_status='Paid',
+                reference_number=reference_number if reference_number not in ('', None) else None,
+                vat_amount=vat_amount_value,
                 created_by='System',
                 received_date=timezone.now()
             )
@@ -159,6 +177,13 @@ def handle_create_purchase_record(record_id, data, business, branch_id):
             except PurchaseOrder.DoesNotExist:
                 # PO doesn't exist yet - this shouldn't happen if frontend synced it first
                 # Create it now as a fallback
+                raw_vat_amount = data.get('vatAmount')
+                if raw_vat_amount is None:
+                    raw_vat_amount = data.get('vat_amount')
+                try:
+                    vat_amount_value = float(raw_vat_amount) if raw_vat_amount not in ('', None) else None
+                except (TypeError, ValueError):
+                    vat_amount_value = None
                 purchase_order = PurchaseOrder.objects.create(
                     id=po_id,
                     business=business,
@@ -169,6 +194,8 @@ def handle_create_purchase_record(record_id, data, business, branch_id):
                     total_items=1,
                     total_cost=quantity_received * cost_per_unit,
                     payment_status='Paid',
+                    reference_number=(data.get('referenceNumber') or data.get('reference_number')) or None,
+                    vat_amount=vat_amount_value,
                     created_by='System',
                     received_date=timezone.now()
                 )
@@ -185,6 +212,8 @@ def handle_create_purchase_record(record_id, data, business, branch_id):
             quantity_remaining=quantity_received,
             cost_per_unit=cost_per_unit,
             total_cost=quantity_received * cost_per_unit,
+            tax_rate=tax_rate,
+            tax_calculation_method=tax_calc_method,
             batch_number=data.get('batchNumber') or data.get('batch_number') or '',
             expiry_date=data.get('expiryDate') or data.get('expiry_date')
         )
@@ -287,6 +316,18 @@ def handle_update_purchase_record(record_id, data, business, branch_id):
         
         if 'expiryDate' in data or 'expiry_date' in data:
             purchase_item.expiry_date = data.get('expiryDate') or data.get('expiry_date')
+
+        if 'taxRate' in data or 'tax_rate' in data:
+            purchase_item.tax_rate = _parse_decimal(
+                data.get('taxRate') or data.get('tax_rate', 0),
+                f'tax_rate:{record_id}',
+                purchase_item.tax_rate or Decimal('0')
+            )
+
+        if 'taxCalculationMethod' in data or 'tax_calculation_method' in data:
+            tax_calc_method = data.get('taxCalculationMethod') or data.get('tax_calculation_method')
+            if tax_calc_method in {'inclusive', 'exclusive'}:
+                purchase_item.tax_calculation_method = tax_calc_method
         
         purchase_item.save()
         

@@ -99,6 +99,16 @@ def handle_create_purchase_order(po_id, data, business, branch_id):
         # Support both camelCase (from direct API) and snake_case (from sync)
         total_items = int(data.get('totalItems') or data.get('total_items', 0))
         total_cost = float(data.get('totalCost') or data.get('total_cost', 0)) or 0
+        reference_number = data.get('referenceNumber')
+        if reference_number is None:
+            reference_number = data.get('reference_number')
+        vat_amount = data.get('vatAmount')
+        if vat_amount is None:
+            vat_amount = data.get('vat_amount')
+        try:
+            vat_amount_value = float(vat_amount) if vat_amount not in ('', None) else None
+        except (TypeError, ValueError):
+            vat_amount_value = None
         print(f"[Sync] PO totals from data: totalItems={total_items}, totalCost={total_cost}, raw data keys={list(data.keys())}")
         
         po_data = {
@@ -113,6 +123,8 @@ def handle_create_purchase_order(po_id, data, business, branch_id):
             'payment_status': data.get('paymentStatus', 'Unpaid'),
             'amount_paid': float(data.get('amountPaid', 0)) or 0,
             'amount_due': float(data.get('amountDue', 0)) or 0,
+            'reference_number': reference_number if reference_number not in ('', None) else None,
+            'vat_amount': vat_amount_value,
             'supplier_tin': supplier_tin if supplier_tin not in ('', None) else None,
             'supplier_vat_registered': _parse_boolean(supplier_vat_registered, default=False),
             'notes': data.get('notes', ''),
@@ -138,6 +150,10 @@ def handle_create_purchase_order(po_id, data, business, branch_id):
                     # Calculate quantity_remaining: if not provided, default to quantity_received
                     quantity_received = float(item_data.get('quantityReceived', 0))
                     quantity_remaining = float(item_data.get('quantityRemaining', 0))
+                    tax_rate = float(item_data.get('taxRate', item_data.get('tax_rate', 0)) or 0)
+                    tax_calc_method = item_data.get('taxCalculationMethod') or item_data.get('tax_calculation_method') or 'exclusive'
+                    if tax_calc_method not in {'inclusive', 'exclusive'}:
+                        tax_calc_method = 'exclusive'
                     
                     # If quantityRemaining is 0 or not provided, set it to quantityReceived
                     if quantity_remaining == 0 and quantity_received > 0:
@@ -151,6 +167,8 @@ def handle_create_purchase_order(po_id, data, business, branch_id):
                         quantity_received=quantity_received,
                         quantity_remaining=quantity_remaining,
                         cost_per_unit=float(item_data.get('costPerUnit', 0)),
+                        tax_rate=tax_rate,
+                        tax_calculation_method=tax_calc_method,
                         batch_number=item_data.get('batchNumber', ''),
                         expiry_date=item_data.get('expiryDate')
                     )
@@ -197,6 +215,19 @@ def handle_update_purchase_order(po_id, data, business, branch_id):
             po.notes = data['notes']
         if 'totalCost' in data:
             po.total_cost = data['totalCost']
+        if 'referenceNumber' in data or 'reference_number' in data:
+            reference_number = data.get('referenceNumber')
+            if reference_number is None:
+                reference_number = data.get('reference_number')
+            po.reference_number = reference_number if reference_number not in ('', None) else None
+        if 'vatAmount' in data or 'vat_amount' in data:
+            vat_amount = data.get('vatAmount')
+            if vat_amount is None:
+                vat_amount = data.get('vat_amount')
+            try:
+                po.vat_amount = float(vat_amount) if vat_amount not in ('', None) else None
+            except (TypeError, ValueError):
+                po.vat_amount = None
         
         # ✅ Handle supplier update
         if 'supplierId' in data:

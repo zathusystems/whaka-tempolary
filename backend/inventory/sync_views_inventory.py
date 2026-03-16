@@ -165,7 +165,6 @@ def handle_create_inventory_item(item_id, data, business, branch_id):
             'expiry': clean_value(data.get('expiry')),
             'batch': clean_value(data.get('batch')),
             'brand': clean_value(data.get('brand')),
-            'pack_size': _parse_finite_float(data.get('pack_size'), 'pack_size', None),
             'price': _parse_finite_float(data.get('price'), 'price', None),
             'recipe': data.get('recipe') or [],
             'image': clean_value(data.get('image')),
@@ -312,8 +311,6 @@ def handle_update_inventory_item(item_id, data, business, branch_id):
             item.batch = data['batch']
         if 'brand' in data:
             item.brand = data['brand']
-        if 'pack_size' in data:
-            item.pack_size = _parse_finite_float(data.get('pack_size'), 'pack_size', None)
         if 'price' in data:
             item.price = _parse_finite_float(data.get('price'), 'price', None)
         if 'recipe' in data:

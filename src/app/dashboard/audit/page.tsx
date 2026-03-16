@@ -1,12 +1,13 @@
 
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { format } from 'date-fns';
 import { FileSearch, Loader2, UserCheck, Code } from 'lucide-react';
 
 import { db, type AuditLog } from '@/lib/db';
+import { useActiveBranch } from '@/hooks/use-active-branch';
 import {
   Card,
   CardContent,
@@ -31,9 +32,6 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 
-const LOCAL_STORAGE_KEYS = {
-    ACTIVE_BRANCH: 'handypos-active-branch'
-};
 
 const actionDisplay: Record<AuditLog['actionType'], { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
     SESSION_START: { label: 'Session Start', variant: 'default' },
@@ -76,13 +74,8 @@ const DetailsDialog = ({ details, isOpen, onOpenChange }: { details: Record<stri
 };
 
 export default function AuditLogPage() {
-    const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
     const [selectedDetails, setSelectedDetails] = useState<Record<string, any> | null>(null);
-  
-    useEffect(() => {
-        const branchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
-        if (branchId) setActiveBranchId(branchId);
-    }, []);
+    const activeBranchId = useActiveBranch();
 
     const auditLog = useLiveQuery(
         () => {

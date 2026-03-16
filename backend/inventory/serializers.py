@@ -63,11 +63,7 @@ class MRAProductMappingSerializer(serializers.ModelSerializer):
         source='inventory_item.name',
         read_only=True
     )
-    branch_name = serializers.CharField(
-        source='branch.name',
-        read_only=True,
-        allow_null=True
-    )
+    branch_name = serializers.SerializerMethodField()
     
     class Meta:
         model = MRAProductMapping
@@ -81,12 +77,27 @@ class MRAProductMappingSerializer(serializers.ModelSerializer):
             'id', 'branch', 'approved_at', 'last_synced_at', 'created_at'
         ]
 
+    def get_branch_name(self, obj):
+        """Safely derive branch name even when mapping has no branch."""
+        branch = getattr(obj, 'branch', None)
+        return branch.name if branch else None
+
 
 class MRAProductMappingCreateSerializer(serializers.Serializer):
     """Serializer for creating MRA product mappings"""
     inventory_item_id = serializers.UUIDField(required=True)
-    mra_product_code = serializers.CharField(max_length=100, required=True)
-    mra_product_name = serializers.CharField(max_length=255, required=True)
+    mra_product_code = serializers.CharField(
+        max_length=100,
+        required=False,
+        allow_blank=True,
+        allow_null=True
+    )
+    mra_product_name = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        allow_null=True
+    )
     mra_tax_type = serializers.ChoiceField(
         choices=['standard', 'zero', 'exempt'],
         required=True
@@ -185,7 +196,7 @@ class InventoryItemSerializer(serializers.ModelSerializer):
             'unit_type', 'reorder_level', 'status', 'cost', 'price',
             'value', 'is_variable_price', 'is_fuel', 'sku', 'barcode', 'product_code',
             'expiry', 'on_menu', 'supplier', 'manufacturer', 'batch',
-            'brand', 'pack_size', 'is_recipe_ingredient', 'is_produced',
+            'brand', 'is_recipe_ingredient', 'is_produced',
             'is_sold_in_portions', 'portion_name', 'portions_per_unit',
             'recipe', 'mra_mapping', 'is_mra_ready',
             'created_at', 'updated_at'
@@ -298,11 +309,12 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
             'id', 'inventory_item', 'inventory_item_name',
             'quantity_ordered', 'quantity_received', 'quantity_remaining',
             'cost_per_unit', 'total_cost', 'batch_number', 'expiry_date',
+            'tax_rate', 'tax_calculation_method', 'tax_amount',
             'session_id',  # NEW: Session tracking
             'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'id', 'total_cost', 'created_at', 'updated_at'
+            'id', 'total_cost', 'tax_amount', 'created_at', 'updated_at'
         ]
 
 
@@ -319,7 +331,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'order_number', 'supplier', 'supplier_name', 'status',
             'total_items', 'total_cost', 'payment_status', 'amount_paid',
-            'amount_due', 'items', 'created_at', 'updated_at'
+            'amount_due', 'reference_number', 'vat_amount', 'items', 'created_at', 'updated_at'
         ]
         read_only_fields = [
             'id', 'order_number', 'total_items', 'total_cost',
@@ -343,7 +355,8 @@ class PurchaseOrderCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = PurchaseOrder
         fields = [
-            'supplier', 'notes', 'supplier_tin', 'supplier_vat_registered'
+            'supplier', 'notes', 'supplier_tin', 'supplier_vat_registered',
+            'reference_number', 'vat_amount'
         ]
 
 

@@ -6,10 +6,7 @@ import { useState, useEffect } from 'react';
 import { db, type Order, type Expense, type InventoryItem } from '@/lib/db';
 import type { DateRange } from 'react-day-picker';
 import { differenceInCalendarDays, endOfDay, startOfDay } from 'date-fns';
-
-const LOCAL_STORAGE_KEYS = {
-    ACTIVE_BRANCH: 'handypos-active-branch',
-};
+import { useActiveBranch } from '@/hooks/use-active-branch';
 
 export interface ReportData {
   totalRevenue: number;
@@ -126,20 +123,30 @@ export const useReports = (dateRange?: DateRange) => {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
-  const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
-
-  useEffect(() => {
-    const branchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
-    if (branchId) {
-      setActiveBranchId(branchId);
-    } else {
-        setLoading(false);
-    }
-  }, []);
+  const activeBranchId = useActiveBranch();
 
   useEffect(() => {
     if (!dateRange?.from || !activeBranchId) {
       setLoading(false);
+      setError(null);
+      setData({
+        totalRevenue: 0,
+        totalSubtotal: 0,
+        totalTax: 0,
+        totalCogs: 0,
+        grossProfit: 0,
+        totalExpenses: 0,
+        netProfit: 0,
+        profitMargin: 0,
+        totalTransactions: 0,
+        averageOrderValue: 0,
+        averageOrderValueWithTax: 0,
+        topProducts: [],
+        fastMovingProducts: [],
+        slowMovingProducts: [],
+        salesByCategory: [],
+        salesByStaff: [],
+      });
       return;
     }
 

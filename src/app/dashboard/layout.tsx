@@ -1376,11 +1376,18 @@ export default function DashboardLayout({
       }
     }
 
-    if (!user || !hasValidTokens) {
-      if (user || hasValidTokens) {
+    if (!hasValidTokens) {
+      if (user) {
         logout();
       }
       router.replace('/login');
+      return;
+    }
+
+    // Tokens are present; allow auth bootstrap to finish restoring the user model
+    // before treating the session as invalid.
+    if (!user) {
+      return;
     }
   }, [user, loading, logout, router]);
 

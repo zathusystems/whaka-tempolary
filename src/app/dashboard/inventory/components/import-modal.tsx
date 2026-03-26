@@ -5,7 +5,7 @@ import { Loader2, Upload, X, FileText, Download, GitBranch, CheckSquare, Square 
 import Papa from 'papaparse';
 import { v4 as uuidv4 } from 'uuid';
 
-import { db, type InventoryItem, type PurchaseRecord, type PurchaseOrder, type Supplier } from '@/lib/db';
+import { db, type InventoryItem, type MRAMapping, type PurchaseRecord, type PurchaseOrder, type Supplier } from '@/lib/db';
 import { type BusinessType, unitTypesByBusinessType } from '@/lib/inventory/config';
 import { syncService } from '@/lib/services/sync-service';
 import { createSupplier } from '@/lib/services/supplier-service';
@@ -84,6 +84,7 @@ const DEFAULT_REORDER_LEVEL = 10;
 const REORDER_LEVEL_OPTIONS = ['5', '10', '20', '50'];
 const BOOLEAN_OPTIONS = ['true', 'false'];
 const BAR_PORTION_NAME_OPTIONS = ['shot', 'tot', 'glass', 'pint', 'bottle', 'can', 'cup', 'measure', 'custom'];
+const MRA_UNIT_MEASURE_OPTIONS = ['unit', 'kg', 'liter', 'meter', 'box', 'pack', 'bottle', 'can', 'carton'];
 
 type ImportTemplateRow = Record<string, string | number | boolean>;
 type TemplateFieldOption = { field: string; options: string[] };
@@ -93,6 +94,11 @@ type CsvRow = Record<string, unknown>;
 type ImportInventoryRow = InventoryItem & {
   importTaxRate?: number;
   importTaxCalculationMethod?: 'inclusive' | 'exclusive';
+  importMraProductCode?: string;
+  importMraProductName?: string;
+  importMraTaxType?: 'standard' | 'zero' | 'exempt';
+  importMraTaxRate?: number;
+  importMraUnitMeasure?: string;
 };
 
 type InitialStockEntry = {
@@ -128,6 +134,11 @@ const CSV_FIELD_ALIASES = {
   barcode: ['barcode', 'barcodevalue'],
   sku: ['sku'],
   expiry: ['expiry', 'expirydate', 'expdate'],
+  mraProductCode: ['mraproductcode', 'mracode', 'mra_code', 'mraitemcode'],
+  mraProductName: ['mraproductname', 'mraname', 'mra_product_name', 'mraitemname'],
+  mraTaxType: ['mrataxtype', 'mra_tax_type', 'mravattype', 'mra_tax_category'],
+  mraTaxRate: ['mrataxrate', 'mra_tax_rate', 'mravatrate'],
+  mraUnitMeasure: ['mraunitmeasure', 'mra_unit_measure', 'mraunit', 'mrauom'],
   isVariablePrice: ['isvariableprice', 'variableprice'],
   isFuel: ['isfuel', 'fuel', 'fuelitem', 'isfuelitem'],
   isProduced: ['isproduced', 'produced'],
@@ -247,6 +258,40 @@ const normalizeTaxRate = (value: unknown): number => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 };
 
+const normalizeMraTaxType = (
+  value: unknown,
+  fallbackRate?: number
+): 'standard' | 'zero' | 'exempt' => {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized === 'zero' || normalized === 'vat_zero' || normalized === 'zero-rated' || normalized === 'zero_rated') {
+    return 'zero';
+  }
+  if (normalized === 'exempt' || normalized === 'vat_exempt') {
+    return 'exempt';
+  }
+  if (normalized === 'standard' || normalized === 'vat_standard') {
+    return 'standard';
+  }
+
+  return normalizeTaxRate(fallbackRate) === 0 ? 'zero' : 'standard';
+};
+
+const resolveMraTaxRate = (
+  taxType: 'standard' | 'zero' | 'exempt',
+  explicitRate?: number,
+  fallbackRate?: number
+): number => {
+  if (explicitRate !== undefined) {
+    return normalizeTaxRate(explicitRate);
+  }
+
+  if (taxType === 'zero' || taxType === 'exempt') {
+    return 0;
+  }
+
+  return normalizeTaxRate(fallbackRate);
+};
+
 const resolveTaxMethod = (value: unknown): 'inclusive' | 'exclusive' => {
   const normalized = String(value ?? '').trim().toLowerCase();
   if (normalized.startsWith('inc')) return 'inclusive';
@@ -317,6 +362,10 @@ const parseInventoryCsvRow = (
   const parsedCost = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.cost));
   const parsedTaxRate = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.taxRate));
   const parsedTaxMethodRaw = getCsvValue(row, CSV_FIELD_ALIASES.taxCalculationMethod);
+  const parsedMraTaxRate = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.mraTaxRate));
+  const parsedMraProductCode = String(getCsvValue(row, CSV_FIELD_ALIASES.mraProductCode) ?? '').trim();
+  const parsedMraProductName = String(getCsvValue(row, CSV_FIELD_ALIASES.mraProductName) ?? '').trim();
+  const parsedMraUnitMeasure = String(getCsvValue(row, CSV_FIELD_ALIASES.mraUnitMeasure) ?? '').trim();
   const parsedRecipe = parseRecipe(getCsvValue(row, CSV_FIELD_ALIASES.recipe));
   const isProduced = parseCsvBoolean(getCsvValue(row, CSV_FIELD_ALIASES.isProduced), false);
   const itemType = hasExplicitItemType
@@ -376,6 +425,14 @@ const parseInventoryCsvRow = (
       parsedTaxMethodRaw !== undefined && String(parsedTaxMethodRaw ?? '').trim() !== ''
         ? resolveTaxMethod(parsedTaxMethodRaw)
         : undefined,
+    importMraProductCode: parsedMraProductCode || undefined,
+    importMraProductName: parsedMraProductName || undefined,
+    importMraTaxType: normalizeMraTaxType(
+      getCsvValue(row, CSV_FIELD_ALIASES.mraTaxType),
+      parsedMraTaxRate ?? parsedTaxRate ?? 0
+    ),
+    importMraTaxRate: parsedMraTaxRate !== undefined ? Number(parsedMraTaxRate) : undefined,
+    importMraUnitMeasure: parsedMraUnitMeasure || undefined,
   };
 };
 
@@ -392,6 +449,11 @@ const getTemplateColumnsForBusinessType = (businessType: BusinessType): string[]
       'cost',
       'taxRate',
       'taxCalculationMethod',
+      'mraProductCode',
+      'mraProductName',
+      'mraTaxType',
+      'mraTaxRate',
+      'mraUnitMeasure',
       'unitType',
       'reorderLevel',
       'supplier',
@@ -409,6 +471,11 @@ const getTemplateColumnsForBusinessType = (businessType: BusinessType): string[]
     'cost',
     'taxRate',
     'taxCalculationMethod',
+    'mraProductCode',
+    'mraProductName',
+    'mraTaxType',
+    'mraTaxRate',
+    'mraUnitMeasure',
     'unitType',
     'reorderLevel',
     'supplier',
@@ -437,6 +504,8 @@ const getTemplateFieldOptionsForBusinessType = (
   registerOptions('reorderLevel', REORDER_LEVEL_OPTIONS);
   registerOptions('isProduced', BOOLEAN_OPTIONS);
   registerOptions('taxCalculationMethod', ['inclusive', 'exclusive']);
+  registerOptions('mraTaxType', ['standard', 'zero', 'exempt']);
+  registerOptions('mraUnitMeasure', MRA_UNIT_MEASURE_OPTIONS);
   registerOptions('isSoldInPortions', BOOLEAN_OPTIONS);
   registerOptions('portionName', BAR_PORTION_NAME_OPTIONS);
 
@@ -457,6 +526,11 @@ const getTemplateRowsForBusinessType = (businessType: BusinessType): ImportTempl
         cost: 450,
         taxRate: 16.5,
         taxCalculationMethod: 'inclusive',
+        mraProductCode: 'MILK-300ML',
+        mraProductName: 'Milk 300ml',
+        mraTaxType: 'standard',
+        mraTaxRate: 16.5,
+        mraUnitMeasure: 'bottle',
         unitType: 'bottle',
         reorderLevel: DEFAULT_REORDER_LEVEL,
         supplier: 'Local Dairy Ltd',
@@ -474,6 +548,11 @@ const getTemplateRowsForBusinessType = (businessType: BusinessType): ImportTempl
     cost: 2500,
     taxRate: 0,
     taxCalculationMethod: 'inclusive',
+    mraProductCode: 'FLOUR-1KG',
+    mraProductName: 'Flour',
+    mraTaxType: 'zero',
+    mraTaxRate: 0,
+    mraUnitMeasure: 'kg',
     unitType: 'kg',
     reorderLevel: 20,
     supplier: 'Wholesale Foods',
@@ -493,6 +572,11 @@ const getTemplateRowsForBusinessType = (businessType: BusinessType): ImportTempl
     cost: '',
     taxRate: 16.5,
     taxCalculationMethod: 'inclusive',
+    mraProductCode: businessType === 'Bar & Liquor' ? 'MOJITO-001' : 'PIZZA-HOUSE',
+    mraProductName: businessType === 'Bar & Liquor' ? 'Signature Mojito' : 'House Pizza',
+    mraTaxType: 'standard',
+    mraTaxRate: 16.5,
+    mraUnitMeasure: businessType === 'Bar & Liquor' ? 'glass' : 'unit',
     unitType: '',
     reorderLevel: '',
     supplier: '',
@@ -515,6 +599,11 @@ const getTemplateRowsForBusinessType = (businessType: BusinessType): ImportTempl
     cost: businessType === 'Bar & Liquor' ? 18000 : 600,
     taxRate: 16.5,
     taxCalculationMethod: 'inclusive',
+    mraProductCode: businessType === 'Bar & Liquor' ? 'WHISKY-BTL' : 'WATER-BTL',
+    mraProductName: businessType === 'Bar & Liquor' ? 'Whisky (Bottle)' : 'Bottled Water',
+    mraTaxType: 'standard',
+    mraTaxRate: 16.5,
+    mraUnitMeasure: businessType === 'Bar & Liquor' ? 'bottle' : 'bottle',
     unitType: '',
     reorderLevel: '',
     supplier: businessType === 'Bar & Liquor' ? 'Premium Drinks Ltd' : 'Local Beverages',
@@ -954,12 +1043,30 @@ export const ImportModal = ({
     }
 
     const itemsToUpsert: InventoryItem[] = [];
+    const mraMappingsToUpsert: MRAMapping[] = [];
     let createdCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
     const initialStockEntries: InitialStockEntry[] = [];
     const hasStockColumn = hasColumn('stockUnits');
     const totalRows = parsedData.length;
+    const nowIso = new Date().toISOString();
+    const allExistingMappings = await db.mraMappings.toArray();
+    const existingMappingsByItemId = new Map<string, MRAMapping>();
+
+    for (const mapping of allExistingMappings) {
+      const mappingItemId = String(mapping.inventoryItemId || '').trim();
+      if (!mappingItemId) {
+        continue;
+      }
+
+      const mappingBranchId = String(mapping.branchId || '').trim();
+      if (mappingBranchId && mappingBranchId !== String(branchId)) {
+        continue;
+      }
+
+      existingMappingsByItemId.set(mappingItemId, mapping);
+    }
 
     for (const [index, parsedItem] of parsedData.entries()) {
       const parsedId = String(parsedItem.id || '').trim();
@@ -1007,22 +1114,51 @@ export const ImportModal = ({
         ? await resolveSupplier(parsedItem.supplier)
         : undefined;
       const resolvedSupplierName = resolvedSupplier?.name;
-      const { importTaxRate, importTaxCalculationMethod, ...parsedItemBase } = parsedItem;
+      const {
+        importTaxRate,
+        importTaxCalculationMethod,
+        importMraProductCode,
+        importMraProductName,
+        importMraTaxType,
+        importMraTaxRate,
+        importMraUnitMeasure,
+        ...parsedItemBase
+      } = parsedItem;
+      const resolvedMraTaxType = importMraTaxType ?? normalizeMraTaxType(undefined, importMraTaxRate ?? importTaxRate ?? 0);
+      const resolvedMraTaxRate = resolveMraTaxRate(
+        resolvedMraTaxType,
+        importMraTaxRate,
+        importTaxRate
+      );
 
       if (matchedExistingItem) {
-        const nextStockUnits = hasColumn('stockUnits') ? stockUnits : Number(matchedExistingItem.stockUnits || 0);
+        const currentStockUnits = Number(matchedExistingItem.stockUnits || 0);
+        const desiredStockUnits = hasColumn('stockUnits') ? stockUnits : currentStockUnits;
+        const receiptQuantity = hasColumn('stockUnits')
+          ? Math.max(0, desiredStockUnits - currentStockUnits)
+          : 0;
+        const shouldCreateStockReceipt = receiptQuantity > 0;
+        const nextStockUnits = hasColumn('stockUnits')
+          ? shouldCreateStockReceipt
+            ? currentStockUnits
+            : desiredStockUnits
+          : currentStockUnits;
         const nextReorderLevel = hasColumn('reorderLevel')
           ? reorderLevel
           : Number(matchedExistingItem.reorderLevel || DEFAULT_REORDER_LEVEL);
         const nextCost = hasColumn('cost') ? cost : matchedExistingItem.cost;
         const nextValue = hasColumn('value')
           ? value
-          : hasColumn('stockUnits') || hasColumn('cost')
+          : shouldCreateStockReceipt
+            ? matchedExistingItem.value
+            : hasColumn('stockUnits') || hasColumn('cost')
             ? Number((nextStockUnits * Number(nextCost || 0)).toFixed(2))
             : matchedExistingItem.value;
         const nextStatus = hasColumn('status')
           ? parsedItem.status
-          : hasColumn('stockUnits') || hasColumn('reorderLevel')
+          : shouldCreateStockReceipt
+            ? computeStatus(currentStockUnits, nextReorderLevel)
+            : hasColumn('stockUnits') || hasColumn('reorderLevel')
             ? computeStatus(nextStockUnits, nextReorderLevel)
             : matchedExistingItem.status;
 
@@ -1065,6 +1201,22 @@ export const ImportModal = ({
           ...updatedItem,
         });
         updatedCount += 1;
+
+        if (shouldCreateStockReceipt) {
+          const receiptCostPerUnit = hasColumn('cost')
+            ? (Number.isFinite(Number(cost)) ? Number(cost) : 0)
+            : Number(matchedExistingItem.cost || 0);
+
+          initialStockEntries.push({
+            itemId: finalId,
+            productName: parsedItem.name,
+            quantity: receiptQuantity,
+            costPerUnit: receiptCostPerUnit,
+            taxRate: normalizeTaxRate(importTaxRate),
+            taxMethod: importTaxCalculationMethod ?? 'inclusive',
+            supplier: resolvedSupplier,
+          });
+        }
       } else {
         const initialStockQuantity = hasStockColumn ? Math.max(0, stockUnits) : 0;
         const shouldCreateInitialStock = hasStockColumn && initialStockQuantity > 0;
@@ -1103,7 +1255,7 @@ export const ImportModal = ({
             quantity: initialStockQuantity,
             costPerUnit: Number.isFinite(Number(cost)) ? Number(cost) : 0,
             taxRate: normalizeTaxRate(importTaxRate),
-            taxMethod: importTaxCalculationMethod ?? 'exclusive',
+            taxMethod: importTaxCalculationMethod ?? 'inclusive',
             supplier: resolvedSupplier,
           });
         }
@@ -1115,6 +1267,34 @@ export const ImportModal = ({
       if (productCodeKey) byProductCode.set(productCodeKey, indexedItem);
       if (barcodeKey) byBarcode.set(barcodeKey, indexedItem);
 
+      const resolvedMraProductCode = String(importMraProductCode || '').trim();
+      if (resolvedMraProductCode) {
+        const existingMapping = existingMappingsByItemId.get(String(indexedItem.id));
+        const mappingRecord: MRAMapping = {
+          id: existingMapping?.id || `${indexedItem.id}-mra`,
+          inventoryItemId: String(indexedItem.id),
+          branchId,
+          mraProductCode: resolvedMraProductCode,
+          mraProductName: String(importMraProductName || indexedItem.name || '').trim() || indexedItem.name,
+          mraTaxType: resolvedMraTaxType,
+          mraTaxRate: resolvedMraTaxRate,
+          mraUnitMeasure: String(importMraUnitMeasure || indexedItem.unitType || 'unit').trim() || 'unit',
+          taxCalculationMethod: importTaxCalculationMethod ?? 'inclusive',
+          isApproved: true,
+          approvedAt: nowIso,
+          mraSynced: false,
+          lastSyncedAt: existingMapping?.lastSyncedAt,
+          createdAt: existingMapping?.createdAt || nowIso,
+          updatedAt: nowIso,
+          _dirty: true,
+          _operation: existingMapping ? 'update' : 'create',
+          _synced_at: existingMapping?._synced_at,
+        };
+
+        mraMappingsToUpsert.push(mappingRecord);
+        existingMappingsByItemId.set(String(indexedItem.id), mappingRecord);
+      }
+
       if (totalRows > 0 && (index % 10 === 0 || index === totalRows - 1)) {
         const percent = Math.min(70, Math.round(((index + 1) / totalRows) * 70));
         setImportProgress(percent);
@@ -1125,14 +1305,26 @@ export const ImportModal = ({
       throw new Error('No valid items to import from CSV.');
     }
 
-    setImportStage(initialStockEntries.length > 0 ? 'Saving products & initial stock' : 'Saving products');
+    setImportStage(
+      initialStockEntries.length > 0
+        ? mraMappingsToUpsert.length > 0
+          ? 'Saving products, initial stock & MRA mappings'
+          : 'Saving products & initial stock'
+        : mraMappingsToUpsert.length > 0
+          ? 'Saving products & MRA mappings'
+          : 'Saving products'
+    );
     setImportProgress((prev) => (prev < 75 ? 75 : prev));
 
     const purchaseRecordIds: string[] = [];
     const purchaseOrderIds: string[] = [];
 
-    await db.transaction('rw', db.inventory, db.purchaseHistory, db.purchaseOrders, async () => {
+    await db.transaction('rw', db.inventory, db.purchaseHistory, db.purchaseOrders, db.mraMappings, async () => {
       await db.inventory.bulkPut(itemsToUpsert);
+
+      if (mraMappingsToUpsert.length > 0) {
+        await db.mraMappings.bulkPut(mraMappingsToUpsert);
+      }
 
       if (initialStockEntries.length === 0) {
         return;
@@ -1458,6 +1650,22 @@ export const ImportModal = ({
   const isCsvImportReady = parsedData.length > 0;
   const canImport = importMode === 'csv' ? isCsvImportReady : isBranchImportReady;
   const areAllSelected = sourceProducts.length > 0 && selectedProductIds.length === sourceProducts.length;
+  const isImportProgressVisible =
+    isImporting || isParsing || isLoadingSourceProducts || importProgress > 0;
+  const importProgressValue = isImporting
+    ? importProgress
+    : isParsing
+      ? 35
+      : isLoadingSourceProducts
+        ? 45
+        : importProgress;
+  const importProgressLabel = isImporting
+    ? importStage || 'Importing...'
+    : isParsing
+      ? 'Parsing file'
+      : isLoadingSourceProducts
+        ? 'Loading branch products'
+        : importStage || 'Loading...';
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
@@ -1531,14 +1739,14 @@ export const ImportModal = ({
                 </Card>
               )}
 
-              {(isImporting || importProgress > 0) && (
+              {isImportProgressVisible && (
                 <Card>
                   <CardContent className="p-4 space-y-2">
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span>{importStage || 'Importing...'}</span>
-                      <span>{Math.round(importProgress)}%</span>
+                      <span>{importProgressLabel}</span>
+                      <span>{Math.round(importProgressValue)}%</span>
                     </div>
-                    <Progress value={importProgress} />
+                    <Progress value={importProgressValue} />
                   </CardContent>
                 </Card>
               )}

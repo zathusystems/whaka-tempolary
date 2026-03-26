@@ -98,6 +98,138 @@ const pickFirstString = (...values: Array<unknown>): string => {
   return '';
 };
 
+const parseStoredJson = <T,>(value: string | null): T | null => {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
+};
+
+const parseJwtPayload = (token: string): Record<string, unknown> | null => {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) {
+      return null;
+    }
+
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
+    const decoded = atob(`${normalized}${padding}`);
+    return JSON.parse(decoded) as Record<string, unknown>;
+  } catch (error) {
+    console.warn('[Auth] Failed to decode access token payload', error);
+    return null;
+  }
+};
+
+const getStoredBusinessIdFallback = (): string => {
+  const storedBusinessId = pickFirstString(localStorage.getItem('handypos-business-id'));
+  if (storedBusinessId) {
+    return storedBusinessId;
+  }
+
+  const storedBusiness = parseStoredJson<{ id?: unknown }>(localStorage.getItem(AUTH_STORAGE_KEYS.BUSINESS));
+  const storedSettings = parseStoredJson<{ businessId?: unknown }>(localStorage.getItem(AUTH_STORAGE_KEYS.BUSINESS_SETTINGS));
+
+  return pickFirstString(storedBusiness?.id, storedSettings?.businessId);
+};
+
+const buildUserFromToken = (accessToken: string): User | null => {
+  const payload = parseJwtPayload(accessToken);
+  if (!payload) {
+    return null;
+  }
+
+  const email = pickFirstString(payload.email);
+  const phone = pickFirstString(payload.phone);
+  const businessId = pickFirstString(
+    payload.business_id,
+    payload.businessId,
+    payload.business,
+    getStoredBusinessIdFallback()
+  );
+  const branchId = pickFirstString(
+    payload.branch_id,
+    payload.branchId,
+    payload.branch,
+    localStorage.getItem(AUTH_STORAGE_KEYS.ACTIVE_BRANCH)
+  );
+  const uid =
+    pickFirstString(
+      payload.user_id,
+      payload.userId,
+      payload.uid,
+      payload.sub,
+      email,
+      phone
+    ) || 'authenticated-user';
+  const displayName =
+    pickFirstString(
+      payload.display_name,
+      payload.displayName,
+      payload.name,
+      payload.full_name,
+      payload.fullName,
+      payload.username
+    ) ||
+    (email ? email.split('@')[0] : '') ||
+    phone ||
+    'User';
+
+  return {
+    uid,
+    email: email || undefined,
+    phone: phone || undefined,
+    displayName,
+    role: normalizeRole(payload.role ?? payload.user_role ?? payload.userRole, {
+      fallback: 'User',
+      preferAdminForGenericUser: Boolean(businessId),
+    }) as User['role'],
+    branchId: branchId || undefined,
+    businessId: businessId || undefined,
+    isFuelAttendant:
+      typeof payload.is_fuel_attendant === 'boolean'
+        ? payload.is_fuel_attendant
+        : typeof payload.isFuelAttendant === 'boolean'
+          ? payload.isFuelAttendant
+          : undefined,
+  };
+};
+
+const isRecoverableBootstrapError = (error: unknown): boolean => {
+  const status = Number((error as any)?.status);
+  if (status === 401 || status === 403) {
+    return false;
+  }
+
+  const message = String((error as any)?.message ?? '').toLowerCase();
+  if (!message) {
+    return false;
+  }
+
+  if (
+    message.includes('unauthorized') ||
+    message.includes('forbidden') ||
+    message.includes('invalid credentials')
+  ) {
+    return false;
+  }
+
+  return (
+    message.includes('failed to fetch') ||
+    message.includes('network') ||
+    message.includes('timeout') ||
+    message.includes('load failed') ||
+    message.includes('connection') ||
+    (error as any)?.name === 'TypeError'
+  );
+};
+
 const buildUserFromProfiles = (profile: any, staffProfile: any | null): User | null => {
   const email = pickFirstString(
     profile?.email,
@@ -199,61 +331,102 @@ export function AuthProvider({ children }: AuthProviderProps) {
       try {
         const tokens = readValidAuthTokens();
         const hasValidTokens = Boolean(tokens);
+        const fallbackUserFromToken = tokens ? buildUserFromToken(tokens.access) : null;
         const storedUser = localStorage.getItem(AUTH_STORAGE_KEYS.USER);
         const storedBusiness = localStorage.getItem(AUTH_STORAGE_KEYS.BUSINESS);
+        let restoredUser: User | null = null;
 
         if (storedUser && hasValidTokens) {
-          const parsedUser = JSON.parse(storedUser);
-          const normalizedUser: User = {
-            ...parsedUser,
-            role: normalizeRole(parsedUser?.role, {
-              fallback: 'User',
-              preferAdminForGenericUser: Boolean(parsedUser?.businessId),
-            }) as User['role'],
-          };
-          if (!cancelled) {
-            setUser(normalizedUser);
+          try {
+            const parsedUser = JSON.parse(storedUser);
+            const normalizedUser: User = {
+              ...parsedUser,
+              role: normalizeRole(parsedUser?.role, {
+                fallback: 'User',
+                preferAdminForGenericUser: Boolean(parsedUser?.businessId),
+              }) as User['role'],
+            };
+            restoredUser = normalizedUser;
+            if (!cancelled) {
+              setUser(normalizedUser);
+            }
+            localStorage.setItem(AUTH_STORAGE_KEYS.USER, JSON.stringify(normalizedUser));
+          } catch (error) {
+            console.error('[Auth] Failed to parse stored user, attempting recovery from profile', error);
+            localStorage.removeItem(AUTH_STORAGE_KEYS.USER);
           }
-          localStorage.setItem(AUTH_STORAGE_KEYS.USER, JSON.stringify(normalizedUser));
         } else if (storedUser) {
           localStorage.removeItem(AUTH_STORAGE_KEYS.USER);
         }
 
         if (storedBusiness && hasValidTokens) {
-          if (!cancelled) {
-            setBusiness(JSON.parse(storedBusiness));
+          const parsedBusiness = parseStoredJson<Business>(storedBusiness);
+          if (parsedBusiness) {
+            if (!cancelled) {
+              setBusiness(parsedBusiness);
+            }
+          } else {
+            localStorage.removeItem(AUTH_STORAGE_KEYS.BUSINESS);
           }
         } else if (storedBusiness) {
           localStorage.removeItem(AUTH_STORAGE_KEYS.BUSINESS);
         }
 
-        if (hasValidTokens && !storedUser) {
+        if (hasValidTokens && !restoredUser) {
           try {
             const authFetch = require('@/lib/auth-fetch').authFetch;
             let staffProfile: any = null;
             let profile: any = null;
+            let staffProfileError: unknown = null;
+            let profileError: unknown = null;
 
             try {
               staffProfile = await authFetch.fetch<any>('/staff/me/');
             } catch (error) {
+              staffProfileError = error;
               console.warn('[Auth] Staff profile not available, falling back to account profile', error);
             }
 
             try {
               profile = await authFetch.fetch<any>('/accounts/me/');
             } catch (error) {
+              profileError = error;
               console.warn('[Auth] Account profile fetch failed', error);
             }
 
+            const restoreErrors = [staffProfileError, profileError].filter(Boolean);
+            const recoverableFailure =
+              restoreErrors.length > 0 &&
+              restoreErrors.every((error) => isRecoverableBootstrapError(error));
             const rebuiltUser = buildUserFromProfiles(profile, staffProfile);
-            if (rebuiltUser) {
-              localStorage.setItem(AUTH_STORAGE_KEYS.USER, JSON.stringify(rebuiltUser));
+            const nextUser = rebuiltUser ?? (recoverableFailure ? fallbackUserFromToken : null);
+
+            if (nextUser) {
+              restoredUser = nextUser;
+              localStorage.setItem(AUTH_STORAGE_KEYS.USER, JSON.stringify(nextUser));
               if (!cancelled) {
-                setUser(rebuiltUser);
+                setUser(nextUser);
+              }
+            } else {
+              if (recoverableFailure) {
+                console.warn('[Auth] Preserving auth session after recoverable bootstrap failure');
+              } else {
+                console.warn('[Auth] Valid tokens found but no user profile could be restored');
+                clearAuthStorage();
               }
             }
           } catch (error) {
-            console.warn('[Auth] Failed to rebuild user from profile:', error);
+            if (fallbackUserFromToken && isRecoverableBootstrapError(error)) {
+              restoredUser = fallbackUserFromToken;
+              localStorage.setItem(AUTH_STORAGE_KEYS.USER, JSON.stringify(fallbackUserFromToken));
+              if (!cancelled) {
+                setUser(fallbackUserFromToken);
+              }
+              console.warn('[Auth] Restored user from token after recoverable bootstrap failure:', error);
+            } else {
+              console.warn('[Auth] Failed to rebuild user from profile:', error);
+              clearAuthStorage();
+            }
           }
         }
 

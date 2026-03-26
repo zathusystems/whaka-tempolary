@@ -11,17 +11,48 @@ import { CardContent } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { toast } from '@/hooks/use-toast';
 import { syncService } from '@/lib/services/sync-service';
+import { PaginationControls, usePaginatedItems } from './pagination-controls';
 
 interface TransfersTabProps {
     stockTransfersData: StockTransfer[];
     isMobile: boolean;
+    searchTerm: string;
     onTransferStock: () => void;
     branchId: string;
 }
 
-export function TransfersTab({ stockTransfersData, isMobile, onTransferStock, branchId }: TransfersTabProps) {
+export function TransfersTab({ stockTransfersData, isMobile, searchTerm, onTransferStock, branchId }: TransfersTabProps) {
     const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
     const [pendingChanges, setPendingChanges] = useState(0);
+    const normalizedSearchTerm = searchTerm.trim().toLowerCase();
+
+    const filteredTransfersData = React.useMemo(() => {
+        if (!normalizedSearchTerm) return stockTransfersData || [];
+
+        return (stockTransfersData || []).filter((transfer) =>
+            [
+                transfer.itemName,
+                transfer.fromBranchName,
+                transfer.toBranchName,
+                transfer.initiatedBy,
+                transfer.quantity,
+            ].some((value) => String(value || '').toLowerCase().includes(normalizedSearchTerm))
+        );
+    }, [normalizedSearchTerm, stockTransfersData]);
+
+    const {
+        setCurrentPage,
+        totalItems,
+        totalPages,
+        effectiveCurrentPage,
+        pageStartIndex,
+        pageEndIndex,
+        paginatedItems: paginatedTransfersData,
+    } = usePaginatedItems(filteredTransfersData);
+
+    React.useEffect(() => {
+        setCurrentPage(1);
+    }, [normalizedSearchTerm, setCurrentPage]);
 
     // Count pending changes for this branch
     useEffect(() => {
@@ -89,8 +120,9 @@ export function TransfersTab({ stockTransfersData, isMobile, onTransferStock, br
                 )}
             </div>
             {isMobile ? (
+                filteredTransfersData.length > 0 ? (
                 <div className="space-y-3">
-                    {stockTransfersData?.map((transfer) => (
+                    {paginatedTransfersData.map((transfer) => (
                         <div key={transfer.id} className="rounded-lg border bg-card p-4">
                             <div className="flex items-start justify-between gap-3">
                                 <div>
@@ -117,12 +149,12 @@ export function TransfersTab({ stockTransfersData, isMobile, onTransferStock, br
                             </div>
                         </div>
                     ))}
-                    {(!stockTransfersData || stockTransfersData.length === 0) && (
-                        <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-                            No stock transfers have been recorded.
-                        </div>
-                    )}
                 </div>
+                ) : (
+                    <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+                        {normalizedSearchTerm ? `No transfers match "${searchTerm.trim()}".` : 'No stock transfers have been recorded.'}
+                    </div>
+                )
             ) : (
                 <div className="overflow-x-auto">
                     <Table>
@@ -137,7 +169,7 @@ export function TransfersTab({ stockTransfersData, isMobile, onTransferStock, br
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {stockTransfersData?.map((transfer) => (
+                            {filteredTransfersData.length > 0 ? paginatedTransfersData.map((transfer) => (
                                 <TableRow key={transfer.id}>
                                     <TableCell>{format(new Date(transfer.createdAt), 'PPpp')}</TableCell>
                                     <TableCell className="font-medium">{transfer.itemName}</TableCell>
@@ -146,16 +178,26 @@ export function TransfersTab({ stockTransfersData, isMobile, onTransferStock, br
                                     <TableCell>{transfer.toBranchName}</TableCell>
                                     <TableCell>{transfer.initiatedBy}</TableCell>
                                 </TableRow>
-                            ))}
-                            {(!stockTransfersData || stockTransfersData.length === 0) && (
+                            )) : (
                                 <TableRow>
-                                    <TableCell colSpan={6} className="h-24 text-center">No stock transfers have been recorded.</TableCell>
+                                    <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                                        {normalizedSearchTerm ? `No transfers match "${searchTerm.trim()}".` : 'No stock transfers have been recorded.'}
+                                    </TableCell>
                                 </TableRow>
                             )}
                         </TableBody>
                     </Table>
                 </div>
             )}
+            <PaginationControls
+                currentPage={effectiveCurrentPage}
+                totalItems={totalItems}
+                totalPages={totalPages}
+                pageStartIndex={pageStartIndex}
+                pageEndIndex={pageEndIndex}
+                onPageChange={setCurrentPage}
+                itemLabel="transfers"
+            />
         </CardContent>
     );
 }

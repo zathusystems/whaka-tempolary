@@ -10,9 +10,8 @@ import {
   Package,
   History,
   Trash,
+  Trash2,
   Loader2,
-  RefreshCw,
-  AlertCircle,
 } from 'lucide-react';
 
 import { db, type InventoryItem, type Supplier } from '@/lib/db';
@@ -22,6 +21,7 @@ import { useAuth } from '@/hooks/use-auth';
 import { syncInventoryFromBackend, getInventorySyncStatus, markInventorySynced } from '@/lib/services/inventory-sync';
 import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/auth-fetch';
+import { logAuditAction } from '@/lib/audit';
 
 import { AddProductForm } from './components/product-form';
 import { ReceiveStockForm } from './components/receive-stock-form';
@@ -46,6 +46,7 @@ import {
 } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Progress } from '@/components/ui/progress';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -60,6 +61,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 const LOCAL_STORAGE_KEYS = {
     ACTIVE_BRANCH: 'handypos-active-branch',
@@ -110,6 +121,19 @@ const getInventoryItemsForBranch = async (branchId: string): Promise<InventoryIt
   return db.inventory.where('branchId').anyOf(branchCandidates).toArray();
 };
 
+const getBranchScopedRows = async (table: any, branchId: string): Promise<any[]> => {
+  const branchCandidates = getBranchIdCandidates(branchId);
+  if (branchCandidates.length === 0) {
+    return [];
+  }
+
+  if (branchCandidates.length === 1) {
+    return table.where('branchId').equals(branchCandidates[0]).toArray();
+  }
+
+  return table.where('branchId').anyOf(branchCandidates).toArray();
+};
+
 export default function InventoryPage() {
   const { business, user, loading: authLoading } = useAuth();
   const searchParams = useSearchParams();
@@ -128,8 +152,14 @@ export default function InventoryPage() {
   const [syncStatus, setSyncStatus] = useState({ hasPendingSync: false });
   const [activeTab, setActiveTab] = useState('inventory');
   const [businessCurrency, setBusinessCurrency] = useState('USD');
+  const [searchTerm, setSearchTerm] = useState('');
   const [isSearchFocused, setIsSearchFocused] = useState(false);
   const [isLoadingData, setIsLoadingData] = useState(false);
+  const [isDeleteAllInventoryOpen, setIsDeleteAllInventoryOpen] = useState(false);
+  const [isDeletingAllInventory, setIsDeletingAllInventory] = useState(false);
+  const [deleteProgress, setDeleteProgress] = useState(0);
+  const [deleteStage, setDeleteStage] = useState('');
+  const [mraRefreshKey, setMraRefreshKey] = useState(0);
   
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -160,10 +190,13 @@ export default function InventoryPage() {
                 'pharmacy': 'Pharmacy',
                 'restaurant': 'Restaurant',
                 'bar_liquor': 'Bar & Liquor',
+                'bar & liquor': 'Bar & Liquor',
                 'supermarket': 'Supermarket',
                 'grocery': 'Grocery',
                 'beauty_salon': 'Beauty Salon and Spa',
+                'beauty salon and spa': 'Beauty Salon and Spa',
                 'general_retail': 'General Retail',
+                'general retail': 'General Retail',
                 'generic': 'General Retail',
               };
               const mappedType = typeMap[businessProfile.type.toLowerCase()] || 'General Retail';
@@ -221,32 +254,6 @@ export default function InventoryPage() {
         console.log('[InventoryPage] Fetching inventory from backend');
         await syncService.fetchAllInventoryFromBackend(branchId);
         console.log('[InventoryPage] Inventory fetch completed');
-
-        // Reconcile local inventory with backend to reflect deletions/updates
-        try {
-          console.log('[InventoryPage] Reconciling local inventory with backend (deletes)');
-          const invResponse = await authFetch.fetch<any>(`/inventory/items/?branch_id=${backendBranchId}`);
-          let backendItems: any[] = [];
-          if (Array.isArray(invResponse)) {
-            backendItems = invResponse;
-          } else if (invResponse?.results && Array.isArray(invResponse.results)) {
-            backendItems = invResponse.results;
-          }
-          console.log('[InventoryPage] Backend returned', backendItems.length, 'inventory items');
-
-          const backendIds = new Set<string>(backendItems.map((i: any) => i.id));
-          const localItems = await getInventoryItemsForBranch(branchId);
-
-          for (const li of localItems) {
-            // Delete local items that are no longer on the backend (and not pending local sync)
-            if (!backendIds.has(li.id) && !li._dirty) {
-              await db.inventory.delete(li.id);
-              console.log('[InventoryPage] Deleted local inventory item not on backend:', li.id);
-            }
-          }
-        } catch (reconcileError) {
-          console.warn('[InventoryPage] Inventory reconciliation skipped/failed:', reconcileError);
-        }
       } catch (error) {
         console.error('[InventoryPage] Failed to fetch inventory from backend:', error);
         console.log('[InventoryPage] Falling back to local inventory data');
@@ -697,7 +704,11 @@ export default function InventoryPage() {
       return db.purchaseHistory
         .where({ branchId: activeBranchId })
         .toArray()
-        .then(data => data.sort((a, b) => new Date(b.receivedDate).getTime() - new Date(a.receivedDate).getTime()))
+        .then((data) =>
+          data
+            .filter((record) => record._operation !== 'delete')
+            .sort((a, b) => new Date(b.receivedDate).getTime() - new Date(a.receivedDate).getTime())
+        )
     },
     [activeBranchId],
     []
@@ -705,17 +716,288 @@ export default function InventoryPage() {
   
   const stockTransfersData = useLiveQuery(() => {
       if (!activeBranchId) return [];
-      return db.stockTransfers.where('fromBranchId').equals(activeBranchId).or('toBranchId').equals(activeBranchId).reverse().sortBy('createdAt');
+      return db.stockTransfers
+        .where('fromBranchId')
+        .equals(activeBranchId)
+        .or('toBranchId')
+        .equals(activeBranchId)
+        .reverse()
+        .sortBy('createdAt')
+        .then((data) => data.filter((record) => record._operation !== 'delete'));
   }, [activeBranchId], []);
 
   const wasteLogData = useLiveQuery(() => {
       if (!activeBranchId) return [];
-      return db.wasteLog.where({ branchId: activeBranchId }).reverse().sortBy('recordedAt');
+      return db.wasteLog
+        .where({ branchId: activeBranchId })
+        .reverse()
+        .sortBy('recordedAt')
+        .then((data) => data.filter((record) => record._operation !== 'delete'));
   }, [activeBranchId], []);
 
   const isMobile = useIsMobile();
   
   const ingredients = inventoryData?.filter(item => item.itemType === 'ingredient') || [];
+
+  useEffect(() => {
+    if (!isDeleteAllInventoryOpen && !isDeletingAllInventory) {
+      setDeleteProgress(0);
+      setDeleteStage('');
+    }
+  }, [isDeleteAllInventoryOpen, isDeletingAllInventory]);
+
+  const handleDeleteAllInventoryData = async () => {
+    if (!activeBranchId) {
+      return;
+    }
+
+    const branchCandidates = getBranchIdCandidates(activeBranchId);
+    const branchCandidateSet = new Set(branchCandidates);
+    const isOnline = typeof window !== 'undefined' && navigator.onLine;
+
+    setIsDeletingAllInventory(true);
+    setDeleteProgress(5);
+    setDeleteStage('Preparing deletion');
+    try {
+      const [
+        inventoryItems,
+        purchaseHistoryRecords,
+        purchaseOrders,
+        wasteRecords,
+        stockTransfers,
+        inventorySnapshots,
+        stockAudits,
+        cartItems,
+        allMappings,
+      ] = await Promise.all([
+        getInventoryItemsForBranch(activeBranchId),
+        getBranchScopedRows(db.purchaseHistory, activeBranchId),
+        getBranchScopedRows(db.purchaseOrders, activeBranchId),
+        getBranchScopedRows(db.wasteLog, activeBranchId),
+        db.stockTransfers.toArray(),
+        getBranchScopedRows(db.inventorySnapshots, activeBranchId),
+        getBranchScopedRows(db.stockAudits, activeBranchId),
+        getBranchScopedRows(db.cart, activeBranchId),
+        db.mraMappings.toArray(),
+      ]);
+
+      setDeleteProgress(15);
+      setDeleteStage('Collecting records');
+
+      const inventoryIds = new Set(inventoryItems.map((item) => String(item.id)));
+      const branchTransfers = stockTransfers.filter((transfer) => {
+        const fromBranchId = String(transfer.fromBranchId || '').trim();
+        const toBranchId = String(transfer.toBranchId || '').trim();
+        return branchCandidateSet.has(fromBranchId) || branchCandidateSet.has(toBranchId);
+      });
+      const branchMappings = allMappings.filter((mapping) => {
+        const mappingBranchId = String(mapping.branchId || '').trim();
+        return branchCandidateSet.has(mappingBranchId) || inventoryIds.has(String(mapping.inventoryItemId));
+      });
+
+      const totalRecordsToClear =
+        inventoryItems.length +
+        purchaseHistoryRecords.length +
+        purchaseOrders.length +
+        wasteRecords.length +
+        branchTransfers.length +
+        branchMappings.length +
+        inventorySnapshots.length +
+        stockAudits.length +
+        cartItems.length;
+
+      if (totalRecordsToClear === 0) {
+        toast({
+          title: 'Nothing to clear',
+          description: 'There is no inventory data for the current branch.',
+        });
+        setDeleteProgress(0);
+        setDeleteStage('');
+        setIsDeleteAllInventoryOpen(false);
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      let processedRecords = 0;
+      const localWorkWeight = 65;
+      const updateDeleteProgress = (stage: string, increment = 0) => {
+        processedRecords += increment;
+        const nextValue = Math.min(
+          localWorkWeight,
+          15 + Math.round((processedRecords / totalRecordsToClear) * (localWorkWeight - 15))
+        );
+        setDeleteStage(stage);
+        setDeleteProgress((prev) => Math.max(prev, nextValue));
+      };
+
+      await db.transaction(
+        'rw',
+        db.inventory,
+        db.purchaseHistory,
+        db.purchaseOrders,
+        db.wasteLog,
+        db.stockTransfers,
+        db.mraMappings,
+        db.inventorySnapshots,
+        db.stockAudits,
+        db.cart,
+        db.auditLog,
+        async () => {
+          updateDeleteProgress('Queueing inventory items');
+          for (const item of inventoryItems) {
+            await db.inventory.update(item.id, {
+              _dirty: true,
+              _operation: 'delete',
+              _deletedAt: nowIso,
+            } as any);
+            updateDeleteProgress('Queueing inventory items', 1);
+          }
+
+          updateDeleteProgress('Queueing purchase history');
+          for (const record of purchaseHistoryRecords) {
+            const recordId = String(record.id ?? '').trim();
+            if (!recordId || typeof record.id === 'number' || /^\d+$/.test(recordId)) {
+              await db.purchaseHistory.delete(record.id);
+              updateDeleteProgress('Queueing purchase history', 1);
+              continue;
+            }
+
+            await db.purchaseHistory.update(record.id, {
+              _dirty: true,
+              _operation: 'delete',
+            });
+            updateDeleteProgress('Queueing purchase history', 1);
+          }
+
+          updateDeleteProgress('Queueing purchase orders');
+          for (const order of purchaseOrders) {
+            await db.purchaseOrders.update(order.id, {
+              _dirty: true,
+              _operation: 'delete',
+              updatedAt: nowIso,
+            });
+            updateDeleteProgress('Queueing purchase orders', 1);
+          }
+
+          updateDeleteProgress('Queueing waste records');
+          for (const waste of wasteRecords) {
+            await db.wasteLog.update(waste.id, {
+              _dirty: true,
+              _operation: 'delete',
+            });
+            updateDeleteProgress('Queueing waste records', 1);
+          }
+
+          updateDeleteProgress('Queueing stock transfers');
+          for (const transfer of branchTransfers) {
+            await db.stockTransfers.update(transfer.id, {
+              _dirty: true,
+              _operation: 'delete',
+            });
+            updateDeleteProgress('Queueing stock transfers', 1);
+          }
+
+          updateDeleteProgress('Queueing MRA mappings');
+          for (const mapping of branchMappings) {
+            await db.mraMappings.put({
+              ...mapping,
+              _dirty: true,
+              _operation: 'delete',
+              updatedAt: nowIso,
+            });
+            updateDeleteProgress('Queueing MRA mappings', 1);
+          }
+
+          if (inventorySnapshots.length > 0) {
+            await db.inventorySnapshots.bulkDelete(inventorySnapshots.map((snapshot) => snapshot.id));
+            updateDeleteProgress('Removing snapshots', inventorySnapshots.length);
+          }
+
+          if (stockAudits.length > 0) {
+            await db.stockAudits.bulkDelete(stockAudits.map((audit) => audit.id));
+            updateDeleteProgress('Removing stock audits', stockAudits.length);
+          }
+
+          if (cartItems.length > 0) {
+            await db.cart.bulkDelete(cartItems.map((item) => item.id));
+            updateDeleteProgress('Removing saved carts', cartItems.length);
+          }
+
+          await logAuditAction({
+            userId: user?.uid || user?.email || 'system',
+            userName: user?.displayName || user?.email || 'System',
+            branchId: activeBranchId,
+            actionType: 'ITEM_DELETE',
+            entityType: 'InventoryItem',
+            entityId: `branch:${activeBranchId}`,
+            details: {
+              clearedAt: nowIso,
+              inventoryItems: inventoryItems.length,
+              purchaseHistory: purchaseHistoryRecords.length,
+              purchaseOrders: purchaseOrders.length,
+              wasteRecords: wasteRecords.length,
+              stockTransfers: branchTransfers.length,
+              mraMappings: branchMappings.length,
+              inventorySnapshots: inventorySnapshots.length,
+              stockAudits: stockAudits.length,
+              cartItems: cartItems.length,
+            },
+          });
+        }
+      );
+
+      setDeleteProgress(70);
+      setDeleteStage('Syncing deletions');
+      setSearchTerm('');
+      setActiveTab('inventory');
+
+      const { syncService } = await import('@/lib/services/sync-service');
+      await syncService.performFullSync(activeBranchId, {
+        onProgress: (progress) => {
+          const syncBase = 70;
+          const syncSpan = 30;
+          const percent = typeof progress.percent === 'number' ? progress.percent : undefined;
+          let nextValue = syncBase;
+
+          if (progress.stage === 'inventory' && percent !== undefined) {
+            nextValue = syncBase + Math.round((percent / 100) * syncSpan);
+          } else if (progress.stage === 'pull') {
+            nextValue = syncBase + Math.round(syncSpan * 0.85);
+          } else if (progress.stage === 'done') {
+            nextValue = 100;
+          } else if (progress.stage === 'error') {
+            nextValue = syncBase + Math.round(syncSpan * 0.9);
+          }
+
+          setDeleteProgress((prev) => Math.max(prev, Math.min(100, nextValue)));
+          if (progress.message) {
+            setDeleteStage(progress.message);
+          }
+        },
+      });
+      setDeleteProgress(100);
+      setDeleteStage('Deletion complete');
+      setMraRefreshKey((current) => current + 1);
+      setIsDeleteAllInventoryOpen(false);
+
+      toast({
+        title: 'Inventory data cleared',
+        description: isOnline
+          ? 'Current-branch inventory data was cleared locally and sync was requested.'
+          : 'Current-branch inventory data was cleared locally and queued for sync when you are back online.',
+      });
+    } catch (error) {
+      console.error('[InventoryPage] Failed to clear inventory data:', error);
+      toast({
+        variant: 'destructive',
+        title: 'Clear failed',
+        description: 'Could not clear the current branch inventory data.',
+      });
+      setDeleteStage('Deletion failed');
+    } finally {
+      setIsDeletingAllInventory(false);
+    }
+  };
   
   const handleFormOpenChange = (open: boolean) => {
     setAddFormOpen(open);
@@ -729,67 +1011,59 @@ export default function InventoryPage() {
     setAddFormOpen(true);
   };
 
+  const searchPlaceholder =
+    activeTab === 'purchases'
+      ? 'Search supplier, product, batch, or payment...'
+      : activeTab === 'waste'
+        ? 'Search item, reason, or recorded by...'
+        : activeTab === 'transfers'
+          ? 'Search item, branch, or initiated by...'
+          : activeTab === 'mra'
+            ? 'Search product, MRA code, or mapping...'
+            : 'Search products or scan barcode...';
+
   // Barcode scanner listener - search for products by barcode on inventory screen
   React.useEffect(() => {
-    let barcodeBuffer = '';
-    let barcodeTimeout: NodeJS.Timeout | null = null;
-
     const handleBarcodeSearch = (e: KeyboardEvent) => {
       // Only process if we're on the inventory tab AND search field is focused
-      if (activeTab !== 'inventory' || !isSearchFocused) {
+      if (activeTab !== 'inventory' || !isSearchFocused || e.key !== 'Enter') {
         return;
       }
 
-      // Get the search input value
-      const searchValue = searchInputRef.current?.value || '';
+      const searchValue = searchTerm.trim();
 
-      if (e.key === 'Enter') {
-        console.log('[InventoryPage] Enter pressed, searching for barcode:', searchValue);
-        
-        if (searchValue.trim()) {
-          const normalizedActiveBranchId = toBackendBranchId(activeBranchId);
-          db.inventory.where('barcode').equals(searchValue.trim()).toArray().then(products => {
-            const product = products.find(
-              (item) =>
-                toBackendBranchId(item.branchId) === normalizedActiveBranchId &&
-                item._operation !== 'delete'
-            );
+      if (!searchValue) {
+        return;
+      }
 
-            if (product) {
-              console.log('[InventoryPage] Found product by barcode:', product.name);
-              handleEditItem(product);
-              toast({
-                title: 'Product Found',
-                description: `Found: ${product.name}`,
-              });
-              // Clear the search field
-              if (searchInputRef.current) {
-                searchInputRef.current.value = '';
-              }
-            } else {
-              console.log('[InventoryPage] No product found with barcode:', searchValue);
-              toast({
-                variant: 'destructive',
-                title: 'Product Not Found',
-                description: `No product found with barcode: ${searchValue}`,
-              });
-            }
-          }).catch(error => {
-            console.error('[InventoryPage] Error searching for barcode:', error);
+      console.log('[InventoryPage] Enter pressed, searching for barcode:', searchValue);
+      const normalizedActiveBranchId = toBackendBranchId(activeBranchId);
+      db.inventory.where('barcode').equals(searchValue).toArray().then(products => {
+        const product = products.find(
+          (item) =>
+            toBackendBranchId(item.branchId) === normalizedActiveBranchId &&
+            item._operation !== 'delete'
+        );
+
+        if (product) {
+          console.log('[InventoryPage] Found product by barcode:', product.name);
+          handleEditItem(product);
+          toast({
+            title: 'Product Found',
+            description: `Found: ${product.name}`,
           });
+          setSearchTerm('');
         }
-        return;
-      }
+      }).catch(error => {
+        console.error('[InventoryPage] Error searching for barcode:', error);
+      });
     };
 
     window.addEventListener('keydown', handleBarcodeSearch, false);
     return () => {
       window.removeEventListener('keydown', handleBarcodeSearch, false);
-      if (barcodeTimeout) {
-        clearTimeout(barcodeTimeout);
-      }
     };
-  }, [activeTab, isSearchFocused, activeBranchId]);
+  }, [activeTab, isSearchFocused, activeBranchId, searchTerm]);
   
   if (authLoading || !activeBranchId) {
     return (
@@ -842,7 +1116,9 @@ export default function InventoryPage() {
                           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                           <Input 
                             ref={searchInputRef}
-                            placeholder="Search or scan barcode..." 
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            placeholder={searchPlaceholder}
                             className="w-full pl-10 md:w-auto" 
                             onFocus={() => setIsSearchFocused(true)}
                             onBlur={() => setIsSearchFocused(false)}
@@ -867,6 +1143,19 @@ export default function InventoryPage() {
                                 </DropdownMenuCheckboxItem>
                             </DropdownMenuContent>
                         </DropdownMenu>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => setIsDeleteAllInventoryOpen(true)}
+                          disabled={isDeletingAllInventory}
+                        >
+                          {isDeletingAllInventory ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="mr-2 h-4 w-4" />
+                          )}
+                          Clear All Data
+                        </Button>
                     </div>
                 </div>
             </CardHeader>
@@ -875,6 +1164,7 @@ export default function InventoryPage() {
                     inventoryData={inventoryData}
                     isMobile={isMobile}
                     currentBusinessType={currentBusinessType}
+                    searchTerm={searchTerm}
                     onAddItem={() => setAddFormOpen(true)}
                     onEditItem={handleEditItem}
                     onImport={() => setImportModalOpen(true)}
@@ -885,6 +1175,7 @@ export default function InventoryPage() {
                 <PurchasesTab 
                     purchaseHistoryData={purchaseHistoryData}
                     isMobile={isMobile}
+                    searchTerm={searchTerm}
                     onReceiveStock={() => setReceiveStockOpen(true)}
                     branchId={activeBranchId}
                     currency={businessCurrency}
@@ -894,6 +1185,7 @@ export default function InventoryPage() {
                 <TransfersTab
                     stockTransfersData={stockTransfersData}
                     isMobile={isMobile}
+                    searchTerm={searchTerm}
                     onTransferStock={() => setTransferStockOpen(true)}
                     branchId={activeBranchId}
                 />
@@ -902,6 +1194,7 @@ export default function InventoryPage() {
                  <WasteTab 
                     wasteLogData={wasteLogData}
                     isMobile={isMobile}
+                    searchTerm={searchTerm}
                     onRecordWaste={() => setWasteModalOpen(true)}
                     branchId={activeBranchId}
                  />
@@ -911,6 +1204,8 @@ export default function InventoryPage() {
                     inventoryData={inventoryData}
                     businessId={business?.id}
                     branchId={activeBranchId}
+                    searchTerm={searchTerm}
+                    refreshKey={mraRefreshKey}
                 />
             </TabsContent>
         </Tabs>
@@ -993,6 +1288,45 @@ export default function InventoryPage() {
       branches={branches}
       businessType={currentBusinessType}
     />
+    <AlertDialog open={isDeleteAllInventoryOpen} onOpenChange={setIsDeleteAllInventoryOpen}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Clear all inventory data?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This removes the current branch inventory products, purchase history, purchase orders, waste logs, transfers, MRA mappings, snapshots, and stock audits. The records are hidden immediately and queued for backend deletion on sync.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {(isDeletingAllInventory || deleteProgress > 0) && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span>{deleteStage || 'Deleting...'}</span>
+              <span>{Math.round(deleteProgress)}%</span>
+            </div>
+            <Progress value={deleteProgress} />
+          </div>
+        )}
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isDeletingAllInventory}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(event) => {
+              event.preventDefault();
+              void handleDeleteAllInventoryData();
+            }}
+            disabled={isDeletingAllInventory}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            {isDeletingAllInventory ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Clearing...
+              </>
+            ) : (
+              'Delete everything'
+            )}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
     </>
   );
 }

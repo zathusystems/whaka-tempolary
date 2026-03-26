@@ -4,12 +4,13 @@ import { Controller, useForm } from 'react-hook-form';
 import { Loader2, Package } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 
-import { db, type Session } from '@/lib/db';
+import { db, type InventoryItem, type Session } from '@/lib/db';
 import { useAuth } from '@/hooks/use-auth';
 import { useCurrency } from '@/hooks/use-currency';
 import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
+import { syncService } from '@/lib/services/sync-service';
 import {
   Card,
   CardContent,
@@ -20,6 +21,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';
+import { Progress } from '@/components/ui/progress';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
@@ -50,6 +52,11 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
     const [isLoading, setIsLoading] = useState(false);
     const [backendInventory, setBackendInventory] = useState<any[]>([]);
     const [isFetchingInventory, setIsFetchingInventory] = useState(false);
+    const [inventoryRefreshProgress, setInventoryRefreshProgress] = useState(0);
+    const [inventoryRefreshStage, setInventoryRefreshStage] = useState('');
+    const [inventoryRefreshError, setInventoryRefreshError] = useState<string | null>(null);
+    const [hasFreshInventorySnapshot, setHasFreshInventorySnapshot] = useState(false);
+    const [inventoryRefreshAttempt, setInventoryRefreshAttempt] = useState(0);
     const [availablePumps, setAvailablePumps] = useState<string[]>([]);
     const [backendIsFuelAttendant, setBackendIsFuelAttendant] = useState<boolean | null>(null);
     const staffRecords = useLiveQuery(() => db.staff.toArray(), []);
@@ -76,24 +83,41 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
         const normalized = String(branchId || '').trim();
         const prefixed = /^BRN-(\d+)$/i.exec(normalized);
         if (prefixed) return prefixed[1];
+        const legacy = /^branch-(\d+)$/i.exec(normalized);
+        if (legacy) return legacy[1];
         return normalized;
     };
 
-    const normalizeInventoryItem = (item: any, branchId: string) => ({
-        id: String(item?.id ?? ''),
-        name: item?.name || 'Unnamed Item',
-        branchId: String(item?.branchId ?? item?.branch ?? branchId),
-        stockUnits: Number(item?.stockUnits ?? item?.stock_units ?? 0),
-        unitType: item?.unitType || item?.unit_type || 'unit',
-        itemType: item?.itemType || item?.item_type || 'ingredient',
-        sku: item?.sku || '',
-        barcode: item?.barcode || '',
-        category: item?.category || '',
-        price: Number(item?.price ?? 0),
-        cost: Number(item?.cost ?? 0),
-        reorderLevel: Number(item?.reorderLevel ?? item?.reorder_level ?? 0),
-        supplier: item?.supplier || '',
-    });
+    const getBranchIdCandidates = (branchId: string): string[] => {
+        const normalized = String(branchId || '').trim();
+        if (!normalized) return [];
+
+        const backendId = toBackendBranchId(normalized);
+        const candidates = new Set<string>([normalized, backendId]);
+
+        if (/^\d+$/.test(backendId)) {
+            candidates.add(`BRN-${backendId}`);
+            candidates.add(`branch-${backendId}`);
+        }
+
+        return Array.from(candidates).filter((candidate) => candidate.length > 0);
+    };
+
+    const getInventoryItemsForBranch = async (branchId: string): Promise<InventoryItem[]> => {
+        const candidates = getBranchIdCandidates(branchId);
+        if (candidates.length === 0) {
+            return [];
+        }
+
+        if (candidates.length === 1) {
+            return db.inventory.where('branchId').equals(candidates[0]).toArray();
+        }
+
+        return db.inventory.where('branchId').anyOf(candidates).toArray();
+    };
+
+    const filterActiveInventory = (items: InventoryItem[]): InventoryItem[] =>
+        items.filter((item: any) => item?._operation !== 'delete');
 
     useEffect(() => {
         const branchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
@@ -185,58 +209,89 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
 
     // Fetch inventory from backend when branch changes
     useEffect(() => {
+        let cancelled = false;
+
         if (activeBranchId) {
             const fetchInventoryFromBackend = async () => {
                 setIsFetchingInventory(true);
-                const localInventory = await db.inventory.where({ branchId: activeBranchId }).toArray();
+                setHasFreshInventorySnapshot(false);
+                setInventoryRefreshError(null);
+                setInventoryRefreshProgress(5);
+                setInventoryRefreshStage('Loading cached inventory...');
+
                 try {
-                    const backendBranchId = toBackendBranchId(activeBranchId);
-                    
-                    console.log('[Sessions] Fetching inventory from backend for branch:', backendBranchId);
-                    
-                    const result = await authFetch.fetch<any>(
-                        `/inventory/items/?branch_id=${encodeURIComponent(backendBranchId)}`
+                    const localInventory = filterActiveInventory(await getInventoryItemsForBranch(activeBranchId));
+                    if (cancelled) return;
+
+                    setBackendInventory(localInventory);
+                    setInventoryRefreshProgress(localInventory.length > 0 ? 15 : 10);
+                    setInventoryRefreshStage(
+                        localInventory.length > 0
+                            ? `Loaded ${localInventory.length} cached item${localInventory.length === 1 ? '' : 's'}. Refreshing latest backend data...`
+                            : 'No cached inventory found. Refreshing latest backend data...'
                     );
-                    
-                    console.log('[Sessions] Backend response:', result);
-                    
-                    if (result && (Array.isArray(result) || result.results)) {
-                        const rawItems = Array.isArray(result) ? result : result.results || [];
-                        const items = rawItems.map((item: any) => normalizeInventoryItem(item, activeBranchId));
-                        console.log('[Sessions] Received', items.length, 'items from backend for branch', backendBranchId);
-                        console.log('[Sessions] Sample item from backend:', items[0]);
 
-                        if (items.length > 0) {
-                            // Store in state for form display
-                            setBackendInventory(items);
+                    console.log('[Sessions] Refreshing inventory cache for branch:', activeBranchId);
+                    const refreshed = await syncService.fetchAllInventoryFromBackend(activeBranchId, {
+                        onProgress: (progress) => {
+                            if (cancelled) return;
+                            if (typeof progress.percent === 'number') {
+                                setInventoryRefreshProgress(Math.max(0, Math.min(100, Math.round(progress.percent))));
+                            }
+                            if (progress.message) {
+                                setInventoryRefreshStage(progress.message);
+                            }
+                        },
+                    });
 
-                            // Refresh local cache for this branch
-                            for (const item of localInventory) {
-                                await db.inventory.delete(item.id);
-                            }
-                            for (const item of items) {
-                                await db.inventory.put(item);
-                            }
-                            console.log('[Sessions] Stored', items.length, 'items in local DB for branch:', activeBranchId);
-                        } else {
-                            console.warn('[Sessions] Backend returned no inventory items, falling back to local cache.');
-                            setBackendInventory(localInventory);
-                        }
+                    if (cancelled) return;
+
+                    const refreshedInventory = filterActiveInventory(await getInventoryItemsForBranch(activeBranchId));
+                    if (cancelled) return;
+
+                    console.log('[Sessions] Loaded', refreshedInventory.length, 'inventory items for branch:', activeBranchId);
+                    setBackendInventory(refreshedInventory);
+
+                    if (refreshed) {
+                        setHasFreshInventorySnapshot(true);
+                        setInventoryRefreshError(null);
+                        setInventoryRefreshProgress(100);
+                        setInventoryRefreshStage(
+                            `Latest backend inventory ready (${refreshedInventory.length} item${refreshedInventory.length === 1 ? '' : 's'}).`
+                        );
                     } else {
-                        console.log('[Sessions] No valid backend inventory payload, falling back to local cache');
-                        setBackendInventory(localInventory);
+                        setHasFreshInventorySnapshot(false);
+                        setInventoryRefreshError('Failed to refresh inventory from backend. Retry before starting the session.');
+                        setInventoryRefreshStage('Cached inventory is shown below. Session start stays locked until the backend snapshot loads.');
                     }
                 } catch (error) {
                     console.error('[Sessions] Error fetching inventory from backend:', error);
-                    setBackendInventory(localInventory);
+                    if (!cancelled) {
+                        setHasFreshInventorySnapshot(false);
+                        setInventoryRefreshError('Failed to prepare the inventory snapshot. Retry before starting the session.');
+                        setInventoryRefreshStage('Unable to load the latest backend inventory snapshot.');
+                    }
                 } finally {
-                    setIsFetchingInventory(false);
+                    if (!cancelled) {
+                        setIsFetchingInventory(false);
+                    }
                 }
             };
-            
-            fetchInventoryFromBackend();
+
+            void fetchInventoryFromBackend();
+        } else {
+            setBackendInventory([]);
+            setIsFetchingInventory(false);
+            setInventoryRefreshProgress(0);
+            setInventoryRefreshStage('');
+            setInventoryRefreshError(null);
+            setHasFreshInventorySnapshot(false);
         }
-    }, [activeBranchId]);
+
+        return () => {
+            cancelled = true;
+        };
+    }, [activeBranchId, inventoryRefreshAttempt]);
 
     // Use backend inventory for form display (ensures fresh data on session creation)
     const inventory = backendInventory;
@@ -251,6 +306,14 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
     const onSubmit = async () => {
         if (!activeBranchId || !user) {
             toast({ variant: 'destructive', title: 'Error', description: 'No active branch or user found.' });
+            return;
+        }
+        if (!hasFreshInventorySnapshot) {
+            toast({
+                variant: 'destructive',
+                title: 'Inventory still syncing',
+                description: inventoryRefreshError || 'Wait for the latest backend inventory snapshot before starting the session.',
+            });
             return;
         }
         setIsLoading(true);
@@ -431,21 +494,58 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                 </DialogFooter>
                </>
            )}
-           {step === 2 && (
-               <>
-                <div className="space-y-4">
-                    <div className="text-sm">
-                        <p>You are starting your session with an opening float of <span className="font-bold text-xs">{formatCurrency(getValues('openingFloat'))}</span>.</p>
+	           {step === 2 && (
+	               <>
+	                <div className="space-y-4">
+	                    <div className="text-sm">
+	                        <p>You are starting your session with an opening float of <span className="font-bold text-xs">{formatCurrency(getValues('openingFloat'))}</span>.</p>
                         {showPumpField && availablePumps.length > 0 && getValues('pumpName') && (
                             <p className="text-muted-foreground">Assigned pump: <span className="font-medium">{getValues('pumpName')}</span>.</p>
-                        )}
-                        <p className="text-muted-foreground">The following stock levels will be recorded for the start of your session.</p>
-                    </div>
-                    <Card>
-                        <CardHeader className="p-4">
-                           <CardTitle className="text-base flex items-center gap-2"><Package/> Opening Inventory</CardTitle>
-                        </CardHeader>
-                        <CardContent className="p-0">
+	                        )}
+	                        <p className="text-muted-foreground">The following stock levels will be recorded for the start of your session.</p>
+	                    </div>
+                        <Card>
+                            <CardContent className="p-4 space-y-3">
+                                <div className="flex items-center justify-between gap-4">
+                                    <div className="space-y-1">
+                                        <p className="text-sm font-medium">Refreshing inventory from backend</p>
+                                        <p className="text-xs text-muted-foreground">{inventoryRefreshStage || 'Preparing the latest inventory snapshot...'}</p>
+                                    </div>
+                                    <span className="text-xs font-medium text-muted-foreground">
+                                        {Math.max(0, Math.min(100, Math.round(inventoryRefreshProgress)))}%
+                                    </span>
+                                </div>
+                                <Progress value={Math.max(0, Math.min(100, inventoryRefreshProgress))} />
+                                {hasFreshInventorySnapshot ? (
+                                    <p className="text-xs text-green-700">
+                                        The session will start with the latest backend inventory snapshot.
+                                    </p>
+                                ) : (
+                                    <p className="text-xs text-muted-foreground">
+                                        Cached inventory is shown below while the backend snapshot loads. You can review it now, but confirmation stays locked until refresh completes.
+                                    </p>
+                                )}
+                                {inventoryRefreshError && (
+                                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                        <p className="text-xs text-destructive">{inventoryRefreshError}</p>
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => setInventoryRefreshAttempt((current) => current + 1)}
+                                            disabled={isFetchingInventory}
+                                        >
+                                            Retry Refresh
+                                        </Button>
+                                    </div>
+                                )}
+                            </CardContent>
+                        </Card>
+	                    <Card>
+	                        <CardHeader className="p-4">
+	                           <CardTitle className="text-base flex items-center gap-2"><Package/> Opening Inventory</CardTitle>
+	                        </CardHeader>
+	                        <CardContent className="p-0">
                             <ScrollArea className="h-64">
                                 <Table>
                                     <TableHeader className="sticky top-0 bg-muted">
@@ -453,48 +553,54 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                                             <TableHead>Item</TableHead>
                                             <TableHead className="text-right">Quantity</TableHead>
                                         </TableRow>
-                                    </TableHeader>
-                                    <TableBody>
-                                        {isFetchingInventory ? (
-                                            <TableRow>
-                                                <TableCell colSpan={2} className="text-center text-muted-foreground py-4">
-                                                    Loading inventory...
-                                                </TableCell>
-                                            </TableRow>
-                                        ) : openingInventory.length > 0 ? (
-                                            openingInventory.map(item => {
-                                                const quantity = Number(item.stockUnits ?? item.stock_units ?? 0);
-                                                const unitType = item.unitType || item.unit_type || 'unit';
-                                                
-                                                return (
-                                                    <TableRow key={item.id}>
-                                                        <TableCell className="font-medium">{item.name}</TableCell>
-                                                        <TableCell className="text-right">{quantity} {unitType}</TableCell>
-                                                    </TableRow>
-                                                );
-                                            })
-                                        ) : (
-                                            <TableRow>
-                                                <TableCell colSpan={2} className="text-center text-muted-foreground py-4">
-                                                    No inventory items found for this branch
-                                                </TableCell>
+	                                    </TableHeader>
+	                                    <TableBody>
+	                                        {openingInventory.length > 0 ? (
+	                                            openingInventory.map(item => {
+	                                                const quantity = Number(item.stockUnits ?? item.stock_units ?? 0);
+	                                                const unitType = item.unitType || item.unit_type || 'unit';
+
+	                                                return (
+	                                                    <TableRow key={item.id}>
+	                                                        <TableCell className="font-medium">{item.name}</TableCell>
+	                                                        <TableCell className="text-right">{quantity} {unitType}</TableCell>
+	                                                    </TableRow>
+	                                                );
+	                                            })
+	                                        ) : isFetchingInventory ? (
+	                                            <TableRow>
+	                                                <TableCell colSpan={2} className="text-center text-muted-foreground py-4">
+	                                                    Loading inventory...
+	                                                </TableCell>
+	                                            </TableRow>
+	                                        ) : (
+	                                            <TableRow>
+	                                                <TableCell colSpan={2} className="text-center text-muted-foreground py-4">
+	                                                    No inventory items found for this branch
+	                                                </TableCell>
                                             </TableRow>
                                         )}
                                     </TableBody>
                                 </Table>
                             </ScrollArea>
                         </CardContent>
-                    </Card>
-                </div>
-                <DialogFooter className="pt-4">
-                    <Button variant="ghost" onClick={() => setStep(1)} disabled={isLoading}>Back</Button>
-                    <Button type="submit" disabled={isLoading}>
-                         {isLoading && <Loader2 className="mr-2 animate-spin" />}
-                        Confirm & Start Session
-                    </Button>
-                </DialogFooter>
-               </>
-           )}
+	                    </Card>
+	                </div>
+	                <DialogFooter className="pt-4">
+	                    <Button variant="ghost" onClick={() => setStep(1)} disabled={isLoading}>Back</Button>
+	                    <Button type="submit" disabled={isLoading || isFetchingInventory || !hasFreshInventorySnapshot}>
+	                         {isLoading ? <Loader2 className="mr-2 animate-spin" /> : null}
+	                        {isLoading
+	                            ? 'Starting Session...'
+	                            : isFetchingInventory
+	                                ? 'Syncing Inventory...'
+	                                : !hasFreshInventorySnapshot
+	                                    ? 'Waiting for Backend Inventory'
+	                                    : 'Confirm & Start Session'}
+	                    </Button>
+	                </DialogFooter>
+	               </>
+	           )}
         </form>
     );
 };

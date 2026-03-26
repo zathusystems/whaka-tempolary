@@ -62,6 +62,8 @@ export type BuyerDetails = {
 export interface PosProps {
   inventory: InventoryItem[];
   displayItems?: InventoryItem[];
+  emptyStateTitle?: string;
+  emptyStateDescription?: string;
   cart: CartItem[];
   onAddToCart: (item: InventoryItem, quantity?: number, price?: number) => Promise<void>;
   onUpdateQuantity: (itemId: string, quantity: number) => void;
@@ -1978,6 +1980,8 @@ const PaymentDialog = ({
 export const GenericPos = ({
   inventory,
   displayItems,
+  emptyStateTitle = 'No products found',
+  emptyStateDescription = 'Try adjusting your search or inventory filters.',
   cart,
   onAddToCart,
   onUpdateQuantity,
@@ -2352,6 +2356,16 @@ export const GenericPos = ({
 
   const renderProductGrid = () => {
     const itemsToDisplay = displayItems || inventory.filter(item => item.itemType === 'sellable');
+
+    if (itemsToDisplay.length === 0) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center text-center">
+          <Package className="h-16 w-16 text-muted-foreground/30" />
+          <p className="mt-4 text-muted-foreground">{emptyStateTitle}</p>
+          <p className="mt-2 text-sm text-muted-foreground">{emptyStateDescription}</p>
+        </div>
+      );
+    }
     
     return (
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
@@ -2392,6 +2406,16 @@ export const GenericPos = ({
 
   const renderProductList = () => {
     const itemsToDisplay = displayItems || inventory.filter(item => item.itemType === 'sellable');
+
+    if (itemsToDisplay.length === 0) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center text-center">
+          <Package className="h-16 w-16 text-muted-foreground/30" />
+          <p className="mt-4 text-muted-foreground">{emptyStateTitle}</p>
+          <p className="mt-2 text-sm text-muted-foreground">{emptyStateDescription}</p>
+        </div>
+      );
+    }
     
     return (
       <div className="space-y-2">

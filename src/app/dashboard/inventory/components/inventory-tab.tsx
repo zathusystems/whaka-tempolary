@@ -54,6 +54,7 @@ import {
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu';
 import { Separator } from '@/components/ui/separator';
+import { PaginationControls, usePaginatedItems } from './pagination-controls';
 
 const statusBadgeVariant = {
   'In Stock': 'secondary',
@@ -113,6 +114,7 @@ interface InventoryTabProps {
     inventoryData: InventoryItem[];
     isMobile: boolean;
     currentBusinessType: BusinessType;
+    searchTerm: string;
     onAddItem: () => void;
     onEditItem: (item: InventoryItem) => void;
     onImport: () => void;
@@ -123,6 +125,7 @@ export function InventoryTab({
     inventoryData, 
     isMobile,
     currentBusinessType,
+    searchTerm,
     onAddItem,
     onEditItem,
     onImport,
@@ -154,6 +157,41 @@ export function InventoryTab({
     // Product details modal state
     const [selectedProduct, setSelectedProduct] = useState<InventoryItem | null>(null);
     const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
+    const normalizedSearchTerm = searchTerm.trim().toLowerCase();
+    const filteredInventoryData = React.useMemo(() => {
+        if (!normalizedSearchTerm) return inventoryData || [];
+
+        return (inventoryData || []).filter((item) =>
+            [
+                item.name,
+                item.category,
+                item.status,
+                item.itemType,
+                item.unitType,
+                item.supplier,
+                item.manufacturer,
+                item.brand,
+                item.batch,
+                item.productCode,
+                item.barcode,
+                item.sku,
+            ].some((value) => String(value || '').toLowerCase().includes(normalizedSearchTerm))
+        );
+    }, [inventoryData, normalizedSearchTerm]);
+
+    const {
+        setCurrentPage,
+        totalItems,
+        totalPages,
+        effectiveCurrentPage,
+        pageStartIndex,
+        pageEndIndex,
+        paginatedItems: paginatedInventoryData,
+    } = usePaginatedItems(filteredInventoryData);
+
+    React.useEffect(() => {
+        setCurrentPage(1);
+    }, [normalizedSearchTerm, setCurrentPage]);
 
     const handleViewDetails = (item: InventoryItem) => {
         setSelectedProduct(item);
@@ -485,9 +523,15 @@ export function InventoryTab({
                 </div>
             </div>
             {isMobile ? (
+                filteredInventoryData.length > 0 ? (
                 <div>
-                        {inventoryData?.map(renderMobileCard)}
+                        {paginatedInventoryData.map(renderMobileCard)}
                 </div>
+                ) : (
+                <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+                    {normalizedSearchTerm ? `No products match "${searchTerm.trim()}".` : 'No products found.'}
+                </div>
+                )
             ) : (
                 <div className="overflow-x-auto">
                     <Table>
@@ -495,11 +539,29 @@ export function InventoryTab({
                             {renderTableHeader()}
                         </TableHeader>
                         <TableBody>
-                            {inventoryData?.map(renderTableRow)}
+                            {filteredInventoryData.length > 0 ? (
+                                paginatedInventoryData.map(renderTableRow)
+                            ) : (
+                                <TableRow>
+                                    <TableCell colSpan={9} className="h-24 text-center text-muted-foreground">
+                                        {normalizedSearchTerm ? `No products match "${searchTerm.trim()}".` : 'No products found.'}
+                                    </TableCell>
+                                </TableRow>
+                            )}
                         </TableBody>
                     </Table>
                 </div>
             )}
+
+            <PaginationControls
+                currentPage={effectiveCurrentPage}
+                totalItems={totalItems}
+                totalPages={totalPages}
+                pageStartIndex={pageStartIndex}
+                pageEndIndex={pageEndIndex}
+                onPageChange={setCurrentPage}
+                itemLabel="products"
+            />
 
             {/* Product Details Modal */}
             <ProductDetailsModal

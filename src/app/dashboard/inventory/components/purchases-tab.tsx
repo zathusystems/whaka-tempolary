@@ -15,6 +15,7 @@ import { Separator } from '@/components/ui/separator';
 import { toast } from '@/hooks/use-toast';
 import { logAuditAction } from '@/lib/audit';
 import { syncService } from '@/lib/services/sync-service';
+import { PaginationControls, usePaginatedItems } from './pagination-controls';
 import {
   Dialog,
   DialogContent,
@@ -26,6 +27,7 @@ import {
 interface PurchasesTabProps {
     purchaseHistoryData: PurchaseRecord[];
     isMobile: boolean;
+    searchTerm: string;
     onReceiveStock: () => void;
     branchId: string;
     currency?: string;
@@ -121,13 +123,14 @@ const resolveRecordGross = (record: PurchaseRecord, vatAmount: number): number =
     return method === 'exclusive' ? base + (vatAmount || 0) : base;
 };
 
-export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, branchId, currency = 'USD' }: PurchasesTabProps) {
+export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onReceiveStock, branchId, currency = 'USD' }: PurchasesTabProps) {
     const { user, business } = useAuth();
     const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
     const [pendingChanges, setPendingChanges] = useState(0);
     const [selectedPurchase, setSelectedPurchase] = useState<PurchaseGroup | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [businessCurrency, setBusinessCurrency] = useState(currency);
+    const normalizedSearchTerm = searchTerm.trim().toLowerCase();
 
     // Load business currency from IndexedDB
     useEffect(() => {
@@ -238,6 +241,45 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
         );
     }, [purchaseHistoryData]);
 
+    const filteredPurchases = React.useMemo(() => {
+        if (!normalizedSearchTerm) return groupedPurchases;
+
+        return groupedPurchases.filter((purchase) => {
+            const groupMatches = [
+                purchase.supplierName,
+                purchase.paymentStatus,
+                purchase.displayDate,
+                purchase.groupId,
+            ].some((value) => String(value || '').toLowerCase().includes(normalizedSearchTerm));
+
+            if (groupMatches) return true;
+
+            return purchase.items.some((item) =>
+                [
+                    item.productName,
+                    item.referenceNumber,
+                    item.batchNumber,
+                    item.expiryDate,
+                    item.paymentStatus,
+                ].some((value) => String(value || '').toLowerCase().includes(normalizedSearchTerm))
+            );
+        });
+    }, [groupedPurchases, normalizedSearchTerm]);
+
+    const {
+        setCurrentPage,
+        totalItems,
+        totalPages,
+        effectiveCurrentPage,
+        pageStartIndex,
+        pageEndIndex,
+        paginatedItems: paginatedPurchases,
+    } = usePaginatedItems(filteredPurchases);
+
+    React.useEffect(() => {
+        setCurrentPage(1);
+    }, [normalizedSearchTerm, setCurrentPage]);
+
     const handleViewDetails = (purchase: PurchaseGroup) => {
         setSelectedPurchase(purchase);
         setIsModalOpen(true);
@@ -296,9 +338,15 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                     </Button>
                 </div>
                 {isMobile ? (
-                    <div>
-                        {groupedPurchases?.map(renderPurchaseCard)}
-                    </div>
+                    filteredPurchases.length > 0 ? (
+                        <div>
+                            {paginatedPurchases.map(renderPurchaseCard)}
+                        </div>
+                    ) : (
+                        <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+                            {normalizedSearchTerm ? `No purchases match "${searchTerm.trim()}".` : 'No purchases have been recorded.'}
+                        </div>
+                    )
                 ) : (
                     <div className="overflow-x-auto">
                         <Table>
@@ -317,7 +365,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                                 </TableRow>
                             </TableHeader>
                             <TableBody>
-                                {groupedPurchases?.map((purchase) => {
+                                {filteredPurchases.length > 0 ? paginatedPurchases.map((purchase) => {
                                     const totalQuantity = purchase.items.reduce((sum, item) => sum + item.quantityReceived, 0);
                                     const currencySymbol = getCurrencySymbol();
                                     const isDirty = purchase.items.some(item => item._dirty);
@@ -356,11 +404,26 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, onReceiveStock, br
                                             </TableCell>
                                         </TableRow>
                                     );
-                                })}
+                                }) : (
+                                    <TableRow>
+                                        <TableCell colSpan={10} className="h-24 text-center text-muted-foreground">
+                                            {normalizedSearchTerm ? `No purchases match "${searchTerm.trim()}".` : 'No purchases have been recorded.'}
+                                        </TableCell>
+                                    </TableRow>
+                                )}
                             </TableBody>
                         </Table>
                     </div>
                 )}
+                <PaginationControls
+                    currentPage={effectiveCurrentPage}
+                    totalItems={totalItems}
+                    totalPages={totalPages}
+                    pageStartIndex={pageStartIndex}
+                    pageEndIndex={pageEndIndex}
+                    onPageChange={setCurrentPage}
+                    itemLabel="purchases"
+                />
             </CardContent>
 
             {/* Purchase Details Modal */}

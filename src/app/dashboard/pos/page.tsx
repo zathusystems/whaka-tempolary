@@ -426,10 +426,13 @@ export default function PosPage() {
             pharmacy: 'Pharmacy',
             restaurant: 'Restaurant',
             bar_liquor: 'Bar & Liquor',
+            'bar & liquor': 'Bar & Liquor',
             supermarket: 'Supermarket',
             grocery: 'Grocery',
             beauty_salon: 'Beauty Salon and Spa',
+            'beauty salon and spa': 'Beauty Salon and Spa',
             general_retail: 'General Retail',
+            'general retail': 'General Retail',
             generic: 'General Retail',
           };
           const mappedType = typeMap[String(businessData.type).toLowerCase()] || 'Grocery';

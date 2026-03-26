@@ -81,6 +81,49 @@ const normalizePumpList = (value: unknown): string[] => {
   return normalized;
 };
 
+const BUSINESS_TYPE_MAP: Record<string, string> = {
+  Pharmacy: 'pharmacy',
+  Restaurant: 'restaurant',
+  'Bar & Liquor': 'bar_liquor',
+  Supermarket: 'supermarket',
+  Grocery: 'grocery',
+  'Beauty Salon and Spa': 'beauty_salon',
+  Generic: 'generic',
+  'General Retail': 'generic',
+};
+
+const BUSINESS_TYPE_REVERSE_MAP: Record<string, string> = {
+  pharmacy: 'Pharmacy',
+  restaurant: 'Restaurant',
+  bar_liquor: 'Bar & Liquor',
+  supermarket: 'Supermarket',
+  grocery: 'Grocery',
+  beauty_salon: 'Beauty Salon and Spa',
+  generic: 'Generic',
+};
+
+const normalizeBusinessTypeForForm = (value: unknown): string => {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) return '';
+  return BUSINESS_TYPE_REVERSE_MAP[normalized] || normalized;
+};
+
+const normalizeBusinessTypeForBackend = (value: unknown): string => {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) return 'generic';
+  return BUSINESS_TYPE_MAP[normalized] || normalized;
+};
+
+const resolveBusinessTypeFormValue = (...values: Array<unknown>): string => {
+  for (const value of values) {
+    const normalized = normalizeBusinessTypeForForm(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return 'Generic';
+};
+
 // Schemas
 const businessSettingsSchema = z.object({
   businessName: z.string().min(2, 'Business name must be at least 2 characters.'),
@@ -129,7 +172,7 @@ export default function BusinessSettingsPage() {
     resolver: zodResolver(businessSettingsSchema),
     defaultValues: {
       businessName: '',
-      businessType: '',
+      businessType: resolveBusinessTypeFormValue(business?.type),
       currency: 'USD',
       fiscalYearStartMonth: 1,
       email: '',
@@ -202,20 +245,9 @@ export default function BusinessSettingsPage() {
                   blockSalesIfTaxMappingMissing: blockTaxMappingValue,
                 });
                 
-                // Map backend business type to frontend display name
-                const businessTypeReverseMap: Record<string, string> = {
-                  'pharmacy': 'Pharmacy',
-                  'restaurant': 'Restaurant',
-                  'bar_liquor': 'Bar & Liquor',
-                  'supermarket': 'Supermarket',
-                  'grocery': 'Grocery',
-                  'beauty_salon': 'Beauty Salon and Spa',
-                  'generic': 'Generic',
-                };
-                
                 const formData = {
                     businessName: backendBusiness.name || '',
-                    businessType: businessTypeReverseMap[backendBusiness.business_type] || backendBusiness.business_type || '',
+                    businessType: resolveBusinessTypeFormValue(backendBusiness.business_type, business?.type),
                     currency: backendBusiness.settings?.currency || 'USD',
                     fiscalYearStartMonth: cachedFiscalYearStartMonth,
                     email: backendBusiness.email || '',
@@ -256,7 +288,7 @@ export default function BusinessSettingsPage() {
                 // Set defaults
                 businessForm.reset({
                     businessName: '',
-                    businessType: '',
+                    businessType: resolveBusinessTypeFormValue(business?.type),
                     currency: 'USD',
                     fiscalYearStartMonth: cachedFiscalYearStartMonth,
                     email: '',
@@ -285,7 +317,7 @@ export default function BusinessSettingsPage() {
                 const { name, type, currency, email, phone, address, website, tin } = settings;
                 const formData = {
                     businessName: name || '',
-                    businessType: type || '',
+                    businessType: resolveBusinessTypeFormValue(type, business?.type),
                     currency: currency || 'USD',
                     fiscalYearStartMonth: cachedFiscalYearStartMonth,
                     email: email || '',
@@ -307,7 +339,7 @@ export default function BusinessSettingsPage() {
               } else {
                 businessForm.reset({
                     businessName: '',
-                    businessType: '',
+                    businessType: resolveBusinessTypeFormValue(business?.type),
                     currency: 'USD',
                     fiscalYearStartMonth: cachedFiscalYearStartMonth,
                     email: '',
@@ -467,19 +499,9 @@ export default function BusinessSettingsPage() {
       const isOnline = authFetch.getOnlineStatus();
       console.log('[DEBUG SETTINGS] Online status:', isOnline);
 
-      // Map business type to backend format
-      const businessTypeMap: Record<string, string> = {
-        'Pharmacy': 'pharmacy',
-        'Restaurant': 'restaurant',
-        'Bar & Liquor': 'bar_liquor',
-        'Supermarket': 'supermarket',
-        'Grocery': 'grocery',
-        'Beauty Salon and Spa': 'beauty_salon',
-      };
-
       const backendPayload = {
         name: data.businessName,
-        business_type: businessTypeMap[data.businessType] || 'generic',
+        business_type: normalizeBusinessTypeForBackend(data.businessType),
         email: data.email || '',
         phone: data.phone || '',
         address: data.address || '',
@@ -528,7 +550,7 @@ export default function BusinessSettingsPage() {
           
             businessForm.reset({
             businessName: response.name || data.businessName,
-            businessType: response.business_type || data.businessType,
+            businessType: normalizeBusinessTypeForForm(response.business_type || data.businessType),
             currency: response.settings?.currency || data.currency,
             fiscalYearStartMonth: data.fiscalYearStartMonth || 1,
             email: response.email || data.email,
@@ -604,6 +626,28 @@ export default function BusinessSettingsPage() {
           <CardContent className="space-y-6">
             <FormField
               control={businessForm.control}
+              name="businessType"
+              render={({ field }) => (
+                <FormItem className="hidden">
+                  <FormControl>
+                    <Input type="hidden" {...field} />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={businessForm.control}
+              name="currency"
+              render={({ field }) => (
+                <FormItem className="hidden">
+                  <FormControl>
+                    <Input type="hidden" {...field} />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={businessForm.control}
               name="businessName"
               render={({ field }) => (
                 <FormItem>
@@ -611,31 +655,6 @@ export default function BusinessSettingsPage() {
                   <FormControl>
                     <Input placeholder="Your business name" {...field} />
                   </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={businessForm.control}
-              name="businessType"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Business Type</FormLabel>
-                  <Select value={field.value || ''} onValueChange={field.onChange}>
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select a business type" />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      <SelectItem value="Pharmacy">Pharmacy</SelectItem>
-                      <SelectItem value="Restaurant">Restaurant</SelectItem>
-                      <SelectItem value="Bar & Liquor">Bar & Liquor</SelectItem>
-                      <SelectItem value="Supermarket">Supermarket</SelectItem>
-                      <SelectItem value="Grocery">Grocery</SelectItem>
-                      <SelectItem value="Beauty Salon and Spa">Beauty Salon and Spa</SelectItem>
-                    </SelectContent>
-                  </Select>
                   <FormMessage />
                 </FormItem>
               )}
@@ -693,30 +712,6 @@ export default function BusinessSettingsPage() {
                         <FormMessage />
                     </FormItem>
                 )}
-            />
-            <FormField
-              control={businessForm.control}
-              name="currency"
-              render={({ field }) => {
-                console.log('[DEBUG SETTINGS] Currency field value:', field.value);
-                return (
-                  <FormItem>
-                    <FormLabel>Currency</FormLabel>
-                    <Select value={field.value || 'USD'} onValueChange={field.onChange}>
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select a currency" />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value="USD">USD - United States Dollar</SelectItem>
-                        <SelectItem value="MWK">MWK - Malawi Kwacha</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                );
-              }}
             />
             <FormField
               control={businessForm.control}

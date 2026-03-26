@@ -527,6 +527,24 @@ const normalizePumpList = (value: unknown): string[] => {
             ? businessResponse.branches
             : [];
 
+
+             if (fetchedBranches.length === 0) {
+            try {
+              const branchesResponse = await authFetch.fetch<any>(
+                `/business/businesses/${selectedBiz.id}/branches/`
+              );
+              if (Array.isArray(branchesResponse)) {
+                fetchedBranches = branchesResponse;
+              } else if (Array.isArray(branchesResponse?.results)) {
+                fetchedBranches = branchesResponse.results;
+              }
+            } catch (branchesError) {
+              console.warn('[DEBUG LOGIN] Could not fetch branches from branches endpoint:', branchesError);
+            }
+          }
+
+
+
           if (businessResponse?.tin || businessResponse?.tax_pin || businessResponse?.taxPin) {
             const resolvedTin = businessResponse.tin || businessResponse.tax_pin || businessResponse.taxPin || '';
             selectedBiz.tin = resolvedTin;
@@ -652,6 +670,18 @@ const normalizePumpList = (value: unknown): string[] => {
           }
         } catch (error) {
           console.warn('[DEBUG LOGIN] Could not parse cached branches for assignment validation:', error);
+        }
+      }
+
+      if (branchesData.length > 0) {
+        const storedActiveBranch = localStorage.getItem('handypos-active-branch');
+        const storedBranchIsValid = storedActiveBranch
+          ? branchesData.some((branch) => String(branch.id) === String(storedActiveBranch))
+          : false;
+
+        if (storedActiveBranch && !storedBranchIsValid) {
+          localStorage.removeItem('handypos-active-branch');
+          localStorage.removeItem('handypos-current-branch-id');
         }
       }
 

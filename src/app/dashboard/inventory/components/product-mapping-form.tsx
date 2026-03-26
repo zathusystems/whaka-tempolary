@@ -148,7 +148,7 @@ export function ProductMappingForm({
   const [catalogVersion, setCatalogVersion] = useState<string | null>(null);
   const [searchMraProducts, setSearchMraProducts] = useState('');
   const [searchProducts, setSearchProducts] = useState('');
-  const [selectedProduct, setSelectedProduct] = useState<InventoryItem | null>(null);
+  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [selectedMraProduct, setSelectedMraProduct] = useState<MRAProductCode | null>(null);
   const [mappings, setMappings] = useState<ProductMapping[]>([]);
 
@@ -169,6 +169,15 @@ export function ProductMappingForm({
       form.setValue('tax_calculation_method', 'inclusive', { shouldValidate: true });
     }
   }, [zeroOrExemptSelected, form]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setSelectedProductIds([]);
+      setSelectedMraProduct(null);
+      setSearchProducts('');
+      setSearchMraProducts('');
+    }
+  }, [isOpen]);
 
   // Fetch available MRA products and tax rates
   useEffect(() => {
@@ -342,7 +351,7 @@ export function ProductMappingForm({
       });
 
       form.reset();
-      setSelectedProduct(null);
+      setSelectedProductIds([]);
       setSelectedMraProduct(null);
       setMappings([]);
       setIsOpen(false);
@@ -371,12 +380,47 @@ export function ProductMappingForm({
       !mappings.some(m => m.productId === product.id)
   );
 
+  const selectedProducts = inventoryData.filter((product) =>
+    selectedProductIds.includes(product.id) && !mappings.some((mapping) => mapping.productId === product.id)
+  );
+
+  const allFilteredProductsSelected =
+    filteredInventoryProducts.length > 0 &&
+    filteredInventoryProducts.every((product) => selectedProductIds.includes(product.id));
+
+  const toggleProductSelection = (productId: string) => {
+    setSelectedProductIds((current) =>
+      current.includes(productId)
+        ? current.filter((id) => id !== productId)
+        : [...current, productId]
+    );
+  };
+
+  const handleSelectAllProducts = () => {
+    setSelectedProductIds((current) => {
+      const selectedSet = new Set(current);
+      if (allFilteredProductsSelected) {
+        return current.filter((id) => !filteredInventoryProducts.some((product) => product.id === id));
+      }
+
+      for (const product of filteredInventoryProducts) {
+        selectedSet.add(product.id);
+      }
+
+      return Array.from(selectedSet);
+    });
+  };
+
+  const handleClearSelectedProducts = () => {
+    setSelectedProductIds([]);
+  };
+
   const handleAddMapping = () => {
-    if (!selectedProduct) {
+    if (selectedProducts.length === 0) {
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: 'Please select a product',
+        description: 'Please select at least one product',
       });
       return;
     }
@@ -390,17 +434,16 @@ export function ProductMappingForm({
       return;
     }
 
-    // Check if product is already mapped
-    if (mappings.some(m => m.productId === selectedProduct.id)) {
+    const selectedMraCode = selectedMraProduct?.code?.trim() || '';
+
+    if (selectedMraCode && selectedProducts.length > 1) {
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: 'This product is already in the mapping list',
+        description: 'Bulk add works only without a single MRA code. Clear the MRA code or map products one by one.',
       });
       return;
     }
-
-    const selectedMraCode = selectedMraProduct?.code?.trim() || '';
 
     // Check if MRA code is already used (only when provided)
     if (selectedMraCode && mappings.some(m => m.mraCode === selectedMraCode)) {
@@ -421,20 +464,20 @@ export function ProductMappingForm({
       : selectedTaxCalculationMethod;
     const effectiveTaxRate = zeroOrExemptForRow ? 0 : parseFloat(String(selectedTax.rate || 0));
 
-    const newMapping: ProductMapping = {
-      productId: selectedProduct.id,
-      productName: selectedProduct.name,
+    const newMappings: ProductMapping[] = selectedProducts.map((product) => ({
+      productId: product.id,
+      productName: product.name,
       mraCode: selectedMraCode,
-      mraName: selectedMraProduct?.name?.trim() || selectedProduct.name,
+      mraName: selectedMraProduct?.name?.trim() || product.name,
       mraTaxType: normalizedTaxType,
       mraTaxRate: effectiveTaxRate,
       mraUnitMeasure: selectedUnitMeasure,
       taxCalculationMethod: effectiveTaxCalculationMethod,
       taxRateLabel: `${selectedTax.name} (${effectiveTaxRate}%)`,
-    };
+    }));
 
-    setMappings([...mappings, newMapping]);
-    setSelectedProduct(null);
+    setMappings((current) => [...current, ...newMappings]);
+    setSelectedProductIds([]);
     setSelectedMraProduct(null);
     setSearchProducts('');
     setSearchMraProducts('');
@@ -561,7 +604,29 @@ export function ProductMappingForm({
             <div className="grid grid-cols-2 gap-4">
               {/* Select Product */}
               <div className="space-y-2">
-                <FormLabel>Select Product</FormLabel>
+                <div className="flex items-center justify-between gap-2">
+                  <FormLabel>Select Product</FormLabel>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleSelectAllProducts}
+                      disabled={filteredInventoryProducts.length === 0}
+                    >
+                      {allFilteredProductsSelected ? 'Unselect All' : 'Select All'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleClearSelectedProducts}
+                      disabled={selectedProductIds.length === 0}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                </div>
                 <Input
                   placeholder="Search products..."
                   value={searchProducts}
@@ -579,9 +644,9 @@ export function ProductMappingForm({
                         <button
                           key={product.id}
                           type="button"
-                          onClick={() => setSelectedProduct(product)}
+                          onClick={() => toggleProductSelection(product.id)}
                           className={`w-full text-left px-4 py-2 hover:bg-gray-100 border-b last:border-b-0 transition-colors ${
-                            selectedProduct?.id === product.id ? 'bg-blue-50' : ''
+                            selectedProductIds.includes(product.id) ? 'bg-blue-50' : ''
                           }`}
                         >
                           <p className="font-medium text-sm">{product.name}</p>
@@ -591,8 +656,10 @@ export function ProductMappingForm({
                     </div>
                   )}
                 </div>
-                {selectedProduct && (
-                  <Badge className="mt-2">{selectedProduct.name}</Badge>
+                {selectedProducts.length > 0 && (
+                  <Badge className="mt-2">
+                    {selectedProducts.length} product{selectedProducts.length === 1 ? '' : 's'} selected
+                  </Badge>
                 )}
               </div>
 
@@ -650,10 +717,10 @@ export function ProductMappingForm({
               onClick={handleAddMapping}
               variant="outline"
               className="w-full"
-              disabled={!selectedProduct || !selectedTax}
+              disabled={selectedProducts.length === 0 || !selectedTax}
             >
               <Plus className="mr-2 h-4 w-4" />
-              Add Mapping
+              Add {selectedProducts.length || 0} Mapping{selectedProducts.length === 1 ? '' : 's'}
             </Button>
 
             {/* Mappings Table */}

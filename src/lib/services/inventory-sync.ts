@@ -62,6 +62,45 @@ function normalizeTaxCalculationMethod(value: unknown): 'inclusive' | 'exclusive
   return normalized.startsWith('excl') ? 'exclusive' : 'inclusive';
 }
 
+function extractPaginatedItems<T>(result: any, label: string): { items: T[]; next: string | null } {
+  if (Array.isArray(result)) {
+    return { items: result, next: null };
+  }
+
+  if (result && Array.isArray(result.results)) {
+    return {
+      items: result.results,
+      next: typeof result.next === 'string' && result.next.trim().length > 0 ? result.next : null,
+    };
+  }
+
+  throw new Error(`Unexpected ${label} response format`);
+}
+
+async function fetchPaginatedResults<T>(initialUrl: string, label: string): Promise<T[]> {
+  const collected: T[] = [];
+  const visitedUrls = new Set<string>();
+  let nextUrl: string | null = initialUrl;
+  let page = 1;
+
+  while (nextUrl) {
+    if (visitedUrls.has(nextUrl)) {
+      throw new Error(`Pagination loop detected while fetching ${label}`);
+    }
+
+    visitedUrls.add(nextUrl);
+    const result = await authFetch.fetch<any>(nextUrl, { method: 'GET' });
+    const { items, next } = extractPaginatedItems<T>(result, label);
+
+    console.log(`[InventorySync] Fetched ${label} page ${page} with ${items.length} records`);
+    collected.push(...items);
+    nextUrl = next;
+    page += 1;
+  }
+
+  return collected;
+}
+
 function normalizeInventoryProduct(
   backendProduct: any,
   branchId: string,
@@ -178,28 +217,10 @@ export async function syncInventoryFromBackend(branchId: string): Promise<{
     console.log('[InventorySync] Starting sync for branch:', branchId, 'backend ID:', backendBranchId);
 
     // Fetch products from backend
-    const response = await authFetch.fetch<any>(
+    const products = await fetchPaginatedResults<any>(
       `/inventory/products/?branch_id=${backendBranchId}`,
-      { method: 'GET' }
+      'inventory products'
     );
-
-    console.log('[InventorySync] Products response type:', typeof response, 'is array:', Array.isArray(response));
-
-    // Handle both array and paginated responses
-    let products: any[] = [];
-    if (Array.isArray(response)) {
-      products = response;
-    } else if (response?.results && Array.isArray(response.results)) {
-      products = response.results;
-    } else {
-      console.warn('[InventorySync] Unexpected products response format:', response);
-      return {
-        synced: 0,
-        updated: 0,
-        created: 0,
-        error: 'Invalid response from backend',
-      };
-    }
 
     let created = 0;
     let updated = 0;
@@ -241,18 +262,11 @@ export async function syncInventoryFromBackend(branchId: string): Promise<{
     let mraMappingsSynced = 0;
     try {
       console.log('[InventorySync] Fetching MRA mappings for branch:', backendBranchId);
-      
-      const mraMappingsResponse = await authFetch.fetch<any>(
-        `/inventory/mra-mappings/?branch_id=${backendBranchId}`,
-        { method: 'GET' }
-      );
 
-      let mraMappings: any[] = [];
-      if (Array.isArray(mraMappingsResponse)) {
-        mraMappings = mraMappingsResponse;
-      } else if (mraMappingsResponse?.results && Array.isArray(mraMappingsResponse.results)) {
-        mraMappings = mraMappingsResponse.results;
-      }
+      const mraMappings = await fetchPaginatedResults<any>(
+        `/inventory/mra-mappings/?branch_id=${backendBranchId}`,
+        'inventory MRA mappings'
+      );
 
       console.log('[InventorySync] Received MRA mappings:', mraMappings.length);
 

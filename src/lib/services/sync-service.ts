@@ -15,6 +15,14 @@ interface SyncState {
   pending_changes: SyncChange[];
 }
 
+interface SyncProgressUpdate {
+  stage: string;
+  percent?: number;
+  current?: number;
+  total?: number;
+  message?: string;
+}
+
 class SyncService {
   private syncState: SyncState = {
     last_synced_at: null,
@@ -287,6 +295,59 @@ class SyncService {
     if (raw === 'VAT_ZERO' || raw === 'ZERO') return 'VAT_ZERO';
     if (raw === 'VAT_EXEMPT' || raw === 'EXEMPT') return 'VAT_EXEMPT';
     return 'VAT_STANDARD';
+  }
+
+  private extractPaginatedItems<T>(result: any, label: string): { items: T[]; next: string | null; total: number | null } {
+    if (Array.isArray(result)) {
+      return { items: result, next: null, total: result.length };
+    }
+
+    if (result && Array.isArray(result.results)) {
+      return {
+        items: result.results,
+        next: typeof result.next === 'string' && result.next.trim().length > 0 ? result.next : null,
+        total: typeof result.count === 'number' ? result.count : null,
+      };
+    }
+
+    throw new Error(`Unexpected ${label} response format`);
+  }
+
+  private async fetchPaginatedResults<T>(
+    initialUrl: string,
+    label: string,
+    onProgress?: (progress: { current: number; total?: number; page: number; pageSize: number; message: string }) => void
+  ): Promise<T[]> {
+    const collected: T[] = [];
+    const visitedUrls = new Set<string>();
+    let nextUrl: string | null = initialUrl;
+    let page = 1;
+
+    while (nextUrl) {
+      if (visitedUrls.has(nextUrl)) {
+        throw new Error(`Pagination loop detected while fetching ${label}`);
+      }
+
+      visitedUrls.add(nextUrl);
+      const result = await authFetch.fetch<any>(nextUrl);
+      const { items, next, total } = this.extractPaginatedItems<T>(result, label);
+
+      console.log(`[Sync] Fetched ${label} page ${page} with ${items.length} records`);
+      collected.push(...items);
+      onProgress?.({
+        current: collected.length,
+        total: total ?? undefined,
+        page,
+        pageSize: items.length,
+        message: total && total > 0
+          ? `Fetched ${Math.min(collected.length, total)} of ${total} ${label}`
+          : `Fetched ${label} page ${page}`,
+      });
+      nextUrl = next;
+      page += 1;
+    }
+
+    return collected;
   }
 
   private normalizeTaxRecord(record: any, fallbackBusinessId = ''): any | null {
@@ -648,11 +709,27 @@ class SyncService {
 
   private async pushPendingMraMappings(branchId: string): Promise<void> {
     const allMappings = await db.mraMappings.toArray();
+    const branchCandidates = this.getBranchIdCandidates(branchId);
+    const branchCandidateSet = new Set(branchCandidates);
+    const branchInventoryItems =
+      branchCandidates.length > 0
+        ? await db.inventory.where('branchId').anyOf(branchCandidates).toArray()
+        : [];
+    const branchInventoryIds = new Set(
+      branchInventoryItems.map((item) => String(item.id || '').trim()).filter((id) => id.length > 0)
+    );
     const pendingMappings = allMappings.filter(
       (mapping) =>
         mapping._dirty &&
-        (mapping._operation === 'create' || mapping._operation === 'update') &&
-        String(mapping.branchId || '') === String(branchId)
+        (
+          mapping._operation === 'create' ||
+          mapping._operation === 'update' ||
+          mapping._operation === 'delete'
+        ) &&
+        (
+          branchCandidateSet.has(String(mapping.branchId || '').trim()) ||
+          branchInventoryIds.has(String(mapping.inventoryItemId || '').trim())
+        )
     );
 
     if (pendingMappings.length === 0) {
@@ -667,6 +744,7 @@ class SyncService {
       try {
         let backendMappingId = String(pendingMapping.id || '');
         let backendMappingPayload: any | null = null;
+        const desiredSyncedState = pendingMapping.isApproved ? true : pendingMapping.mraSynced;
 
         // Check if backend already has a mapping for this product to avoid duplicates.
         if (pendingMapping.inventoryItemId) {
@@ -684,7 +762,24 @@ class SyncService {
           }
         }
 
-        if (!backendMappingPayload && pendingMapping._operation === 'create') {
+        if (pendingMapping._operation === 'delete') {
+          if (backendMappingId) {
+            await authFetch.fetch<any>(`/inventory/mra-mappings/${backendMappingId}/`, {
+              method: 'DELETE',
+              meta: {
+                domain: 'inventory',
+                entityType: 'MRAMapping',
+                entityId: backendMappingId,
+                metadata: { source: 'deferred-mapping-delete' },
+              },
+            });
+          }
+
+          await db.mraMappings.delete(pendingMapping.id);
+          continue;
+        }
+
+        if (!backendMappingPayload && (pendingMapping._operation === 'create' || pendingMapping._operation === 'update')) {
           backendMappingPayload = await authFetch.fetch<any>('/inventory/mra-mappings/', {
             method: 'POST',
             body: JSON.stringify({
@@ -706,11 +801,32 @@ class SyncService {
           backendMappingId = String(backendMappingPayload?.id || backendMappingId);
         }
 
+        if (backendMappingPayload && pendingMapping._operation === 'update' && backendMappingId) {
+          backendMappingPayload = await authFetch.fetch<any>(`/inventory/mra-mappings/${backendMappingId}/`, {
+            method: 'PUT',
+            body: JSON.stringify({
+              inventory_item: pendingMapping.inventoryItemId,
+              mra_product_code: pendingMapping.mraProductCode,
+              mra_product_name: pendingMapping.mraProductName,
+              mra_tax_type: pendingMapping.mraTaxType,
+              mra_tax_rate: pendingMapping.mraTaxRate,
+              mra_unit_measure: pendingMapping.mraUnitMeasure,
+              tax_calculation_method: pendingMapping.taxCalculationMethod,
+            }),
+            meta: {
+              domain: 'inventory',
+              entityType: 'MRAMapping',
+              entityId: backendMappingId,
+              metadata: { source: 'deferred-mapping-update' },
+            },
+          });
+        }
+
         let finalIsApproved = Boolean(
           backendMappingPayload?.is_approved ?? backendMappingPayload?.isApproved ?? pendingMapping.isApproved
         );
         let finalIsSynced = Boolean(
-          backendMappingPayload?.mra_synced ?? backendMappingPayload?.mraSynced ?? pendingMapping.mraSynced
+          backendMappingPayload?.mra_synced ?? backendMappingPayload?.mraSynced ?? desiredSyncedState
         );
 
         if (pendingMapping.isApproved && backendMappingId) {
@@ -718,7 +834,7 @@ class SyncService {
             method: 'POST',
             body: JSON.stringify({
               is_approved: true,
-              mra_synced: pendingMapping.mraSynced,
+              mra_synced: desiredSyncedState,
             }),
             meta: {
               domain: 'inventory',
@@ -729,7 +845,7 @@ class SyncService {
           });
           finalIsApproved = Boolean(approvedPayload?.is_approved ?? approvedPayload?.isApproved ?? true);
           finalIsSynced = Boolean(
-            approvedPayload?.mra_synced ?? approvedPayload?.mraSynced ?? pendingMapping.mraSynced
+            approvedPayload?.mra_synced ?? approvedPayload?.mraSynced ?? desiredSyncedState
           );
         }
 
@@ -989,10 +1105,12 @@ class SyncService {
       console.log(`[Sync] Collected ${purchaseOrders.filter(p => p._dirty).length} dirty purchase orders`);
 
       // Collect from stock transfers
-      const stockTransfers = await db.stockTransfers
-        .where('fromBranchId')
-        .equals(branchId)
-        .toArray();
+      const transferBranchCandidates = new Set(this.getBranchIdCandidates(branchId));
+      const stockTransfers = (await db.stockTransfers.toArray()).filter((transfer) => {
+        const fromBranchId = String(transfer.fromBranchId || '').trim();
+        const toBranchId = String(transfer.toBranchId || '').trim();
+        return transferBranchCandidates.has(fromBranchId) || transferBranchCandidates.has(toBranchId);
+      });
 
       for (const transfer of stockTransfers) {
         if (transfer._dirty) {
@@ -1562,8 +1680,13 @@ class SyncService {
       // Try stock transfers
       const transfer = await db.stockTransfers.get(id);
       if (transfer) {
-        await db.stockTransfers.update(id, { _dirty: false, _operation: undefined });
-        console.log(`[Sync] Marked stock transfer ${id} as synced`);
+        if (transfer._operation === 'delete') {
+          await db.stockTransfers.delete(id);
+          console.log(`[Sync] Removed deleted stock transfer ${id}`);
+        } else {
+          await db.stockTransfers.update(id, { _dirty: false, _operation: undefined });
+          console.log(`[Sync] Marked stock transfer ${id} as synced`);
+        }
         return;
       }
     } catch (error) {
@@ -1574,8 +1697,13 @@ class SyncService {
       // Try waste records
       const waste = await db.wasteLog.get(id);
       if (waste) {
-        await db.wasteLog.update(id, { _dirty: false, _operation: undefined });
-        console.log(`[Sync] Marked waste record ${id} as synced`);
+        if (waste._operation === 'delete') {
+          await db.wasteLog.delete(id);
+          console.log(`[Sync] Removed deleted waste record ${id}`);
+        } else {
+          await db.wasteLog.update(id, { _dirty: false, _operation: undefined });
+          console.log(`[Sync] Marked waste record ${id} as synced`);
+        }
         return;
       }
     } catch (error) {
@@ -1598,8 +1726,13 @@ class SyncService {
       // Try purchase orders
       const po = await db.purchaseOrders.get(id);
       if (po) {
-        await db.purchaseOrders.update(id, { _dirty: false, _operation: undefined });
-        console.log(`[Sync] Marked purchase order ${id} as synced`);
+        if (po._operation === 'delete') {
+          await db.purchaseOrders.delete(id);
+          console.log(`[Sync] Removed deleted purchase order ${id}`);
+        } else {
+          await db.purchaseOrders.update(id, { _dirty: false, _operation: undefined });
+          console.log(`[Sync] Marked purchase order ${id} as synced`);
+        }
         return;
       }
     } catch (error) {
@@ -1612,9 +1745,14 @@ class SyncService {
       const allPurchases = await db.purchaseHistory.toArray();
       const purchase = allPurchases.find(p => String(p.id) === String(id));
       if (purchase) {
-        // Update using the numeric primary key
-        await db.purchaseHistory.update(purchase.id, { _dirty: false, _operation: undefined });
-        console.log(`[Sync] Marked purchase history record ${id} as synced (numeric id: ${purchase.id})`);
+        if (purchase._operation === 'delete') {
+          await db.purchaseHistory.delete(purchase.id);
+          console.log(`[Sync] Removed deleted purchase history record ${id} (numeric id: ${purchase.id})`);
+        } else {
+          // Update using the numeric primary key
+          await db.purchaseHistory.update(purchase.id, { _dirty: false, _operation: undefined });
+          console.log(`[Sync] Marked purchase history record ${id} as synced (numeric id: ${purchase.id})`);
+        }
         return;
       }
     } catch (error) {
@@ -2448,68 +2586,150 @@ class SyncService {
    * Fetch all inventory items from backend for a branch
    * This is separate from the sync pull and fetches all items regardless of sync timestamp
    */
-  async fetchAllInventoryFromBackend(branchId: string): Promise<void> {
+  async fetchAllInventoryFromBackend(
+    branchId: string,
+    options: { onProgress?: (progress: SyncProgressUpdate) => void } = {}
+  ): Promise<boolean> {
     try {
       console.log('[Sync] Fetching all inventory from backend for branch:', branchId);
       const backendBranchId = this.toBackendBranchId(branchId);
-      
+
       const url = `/inventory/items/?branch_id=${backendBranchId}`;
       console.log('[Sync] Fetch URL:', url);
-      
-      const result = await authFetch.fetch(url);
-      console.log('[Sync] Backend inventory response:', result);
-      console.log('[Sync] Response type:', typeof result);
-      console.log('[Sync] Response keys:', Object.keys(result));
-      
-      // Handle both paginated and direct response formats
-      let items = [];
-      if (result.results && Array.isArray(result.results)) {
-        items = result.results;
-        console.log(`[Sync] Found ${items.length} items in results array`);
-      } else if (Array.isArray(result)) {
-        items = result;
-        console.log(`[Sync] Found ${items.length} items in direct array`);
-      } else {
-        console.warn('[Sync] Unexpected response format:', result);
-        return;
-      }
-      
+
+      options.onProgress?.({
+        stage: 'fetching',
+        percent: 5,
+        message: 'Requesting latest inventory from backend...',
+      });
+
+      const items = await this.fetchPaginatedResults<any>(url, 'inventory items', (progress) => {
+        const fetchPercent = progress.total && progress.total > 0
+          ? Math.min(55, Math.round((progress.current / progress.total) * 55))
+          : Math.min(55, 10 + ((progress.page - 1) * 10));
+
+        options.onProgress?.({
+          stage: 'fetching',
+          percent: fetchPercent,
+          current: progress.current,
+          total: progress.total,
+          message: progress.message,
+        });
+      });
+      const backendIds = new Set<string>();
+
       if (items.length > 0) {
         console.log(`[Sync] Received ${items.length} inventory items from backend`);
         console.log('[Sync] Sample item:', items[0]);
-        
-        // Apply all inventory items to local DB
-        for (const item of items) {
-          try {
-            // Convert snake_case from backend to camelCase for frontend
-            const convertedItem = this.snakeToCamel(item);
-            const existingItem = await db.inventory.get(convertedItem.id);
-            if (existingItem?._dirty) {
-              console.log(`[Sync] Skipping fetch overwrite for dirty inventory item ${convertedItem.id}`);
-              continue;
-            }
-            
-            const itemToStore = {
-              ...(existingItem || {}),
-              ...convertedItem,
-              branchId: branchId, // Ensure branchId is set
-              _dirty: false,
-              _synced_at: new Date().toISOString()
-            };
-            console.log(`[Sync] Storing inventory item:`, itemToStore);
-            await db.inventory.put(itemToStore);
-            console.log(`[Sync] Stored inventory item ${item.id} from backend`);
-          } catch (error) {
-            console.error(`[Sync] Error storing inventory item ${item.id}:`, error);
-          }
-        }
-        console.log(`[Sync] Successfully stored ${items.length} inventory items from backend`);
       } else {
-        console.log('[Sync] No inventory items received from backend');
+        console.log('[Sync] Backend returned zero inventory items for branch:', branchId);
       }
+
+      options.onProgress?.({
+        stage: 'applying',
+        percent: items.length > 0 ? 60 : 90,
+        current: 0,
+        total: items.length,
+        message: items.length > 0
+          ? `Applying ${items.length} inventory items to local cache...`
+          : 'No backend inventory found. Validating local cache...',
+      });
+
+      for (const [index, item] of items.entries()) {
+        const backendItemId = String(item?.id ?? '').trim();
+        if (!backendItemId) {
+          console.warn('[Sync] Skipping inventory item without id:', item);
+          options.onProgress?.({
+            stage: 'applying',
+            percent: 60 + Math.round(((index + 1) / Math.max(items.length, 1)) * 35),
+            current: index + 1,
+            total: items.length,
+            message: `Applying ${index + 1} of ${items.length} inventory items...`,
+          });
+          continue;
+        }
+
+        backendIds.add(backendItemId);
+
+        try {
+          // Convert snake_case from backend to camelCase for frontend
+          const convertedItem = this.snakeToCamel(item);
+          const existingItem = await db.inventory.get(backendItemId);
+          if (existingItem?._dirty) {
+            console.log(`[Sync] Skipping fetch overwrite for dirty inventory item ${backendItemId}`);
+            options.onProgress?.({
+              stage: 'applying',
+              percent: 60 + Math.round(((index + 1) / Math.max(items.length, 1)) * 35),
+              current: index + 1,
+              total: items.length,
+              message: `Applying ${index + 1} of ${items.length} inventory items...`,
+            });
+            continue;
+          }
+
+          const itemToStore = {
+            ...(existingItem || {}),
+            ...convertedItem,
+            branchId, // Preserve the active branch identifier used by the UI
+            _dirty: false,
+            _synced_at: new Date().toISOString()
+          };
+          console.log('[Sync] Storing inventory item:', itemToStore);
+          await db.inventory.put(itemToStore);
+          console.log(`[Sync] Stored inventory item ${backendItemId} from backend`);
+        } catch (error) {
+          console.error(`[Sync] Error storing inventory item ${backendItemId}:`, error);
+        }
+
+        options.onProgress?.({
+          stage: 'applying',
+          percent: 60 + Math.round(((index + 1) / Math.max(items.length, 1)) * 35),
+          current: index + 1,
+          total: items.length,
+          message: `Applying ${index + 1} of ${items.length} inventory items...`,
+        });
+      }
+
+      const branchCandidates = this.getBranchIdCandidates(branchId);
+      if (branchCandidates.length > 0) {
+        options.onProgress?.({
+          stage: 'finalizing',
+          percent: 97,
+          message: 'Finalizing inventory cache...',
+        });
+
+        const localItems = await db.inventory.where('branchId').anyOf(branchCandidates).toArray();
+
+        for (const localItem of localItems) {
+          const localItemId = String(localItem.id ?? '').trim();
+          if (!localItemId || backendIds.has(localItemId) || localItem._dirty) {
+            continue;
+          }
+
+          await db.inventory.delete(localItem.id);
+          await db.mraMappings.where('inventoryItemId').equals(localItemId).delete();
+          console.log(`[Sync] Removed local inventory item missing from backend: ${localItemId}`);
+        }
+      }
+
+      console.log(`[Sync] Successfully refreshed inventory cache with ${items.length} backend items`);
+      options.onProgress?.({
+        stage: 'complete',
+        percent: 100,
+        current: items.length,
+        total: items.length,
+        message: `Inventory refresh complete. Loaded ${items.length} item${items.length === 1 ? '' : 's'}.`,
+      });
+      return true;
     } catch (error) {
       console.error('[Sync] Failed to fetch inventory from backend:', error);
       console.error('[Sync] Error details:', error instanceof Error ? error.message : String(error));
+      options.onProgress?.({
+        stage: 'error',
+        percent: 100,
+        message: error instanceof Error ? error.message : 'Failed to refresh inventory from backend',
+      });
+      return false;
     }
   }
 

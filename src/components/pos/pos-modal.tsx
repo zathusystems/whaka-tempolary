@@ -261,6 +261,14 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   const [barcodeTimeout, setBarcodeTimeout] = useState<NodeJS.Timeout | null>(null);
   const { toast } = useToast();
   const { user, business } = useAuth();
+  const normalizedSearchQuery = searchQuery.toLowerCase().trim();
+  const hasSearchQuery = normalizedSearchQuery.length > 0;
+
+  useEffect(() => {
+    if (!isOpen) {
+      setSearchQuery('');
+    }
+  }, [isOpen]);
 
   // Load persisted POS modal view mode once, with mobile-first default.
   useEffect(() => {
@@ -872,10 +880,14 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                 'pharmacy': 'Pharmacy',
                 'restaurant': 'Restaurant',
                 'bar_liquor': 'Bar & Liquor',
+                'bar & liquor': 'Bar & Liquor',
                 'supermarket': 'Supermarket',
                 'grocery': 'Grocery',
                 'beauty_salon': 'Beauty Salon and Spa',
+                'beauty salon and spa': 'Beauty Salon and Spa',
                 'general_retail': 'General Retail',
+                'general retail': 'General Retail',
+                'generic': 'General Retail',
               };
               const mappedType = typeMap[businessProfile.type.toLowerCase()] || 'Grocery';
               console.log('[POS Modal] Setting business type to:', mappedType);
@@ -991,63 +1003,17 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
             return;
           }
           
-          console.log('[POS Modal] Fetching inventory from backend for branch:', backendBranchId);
-          
-          const result = await authFetch.fetch<any>(`/inventory/items/?branch_id=${encodeURIComponent(backendBranchId)}`);
-          
-          if (result && (Array.isArray(result) || result.results)) {
-            const items = Array.isArray(result) ? result : result.results || [];
-            console.log('[POS Modal] Received', items.length, 'items from backend for branch', backendBranchId);
-            
-            const branchCandidates = getBranchIdCandidates(branchId);
-            const oldItems = branchCandidates.length > 0
-              ? await db.inventory.where('branchId').anyOf(branchCandidates).toArray()
-              : await db.inventory.where({ branchId: branchId }).toArray();
+          console.log('[POS Modal] Refreshing inventory from backend for branch:', backendBranchId);
 
-            const nextItems = items.map((item: any) => ({
-              id: item.id,
-              name: item.name,
-              branchId: branchId,
-              stockUnits: item.stock_units || item.stockUnits || 0,
-              unitType: item.unit_type || item.unitType || 'unit',
-              itemType: item.item_type || item.itemType || 'ingredient',
-              sku: item.sku || '',
-              barcode: item.barcode || '',
-              category: item.category || '',
-              price: item.price || 0,
-              cost: item.cost || 0,
-              reorderLevel: item.reorder_level || item.reorderLevel || 0,
-              supplier: item.supplier || '',
-              isProduced: item.is_produced || item.isProduced || false,
-              isSoldInPortions: item.is_sold_in_portions || item.isSoldInPortions || false,
-              portionName: item.portion_name || item.portionName || '',
-              portionsPerUnit: item.portions_per_unit || item.portionsPerUnit || 0,
-              isVariablePrice: item.is_variable_price || item.isVariablePrice || false,
-              isFuel: item.is_fuel || item.isFuel || false,
-              recipe: item.recipe || [],
-              _dirty: false,
-              _operation: undefined,
-            }));
+          const { syncService } = await import('@/lib/services/sync-service');
+          await syncService.fetchAllInventoryFromBackend(branchId);
 
-            const incomingIds = new Set(nextItems.map((item) => String(item.id)));
-            const dirtyIds = new Set(
-              oldItems.filter((item) => item._dirty).map((item) => String(item.id))
-            );
-            const upsertItems = nextItems.filter((item) => !dirtyIds.has(String(item.id)));
-            const staleIds = oldItems
-              .filter((item) => !incomingIds.has(String(item.id)) && !item._dirty)
-              .map((item) => item.id);
+          const branchCandidates = getBranchIdCandidates(branchId);
+          const refreshedItems = branchCandidates.length > 0
+            ? await db.inventory.where('branchId').anyOf(branchCandidates).toArray()
+            : await db.inventory.where({ branchId: branchId }).toArray();
 
-            await db.transaction('rw', db.inventory, async () => {
-              if (upsertItems.length > 0) {
-                await db.inventory.bulkPut(upsertItems);
-              }
-              if (staleIds.length > 0) {
-                await db.inventory.bulkDelete(staleIds);
-              }
-            });
-
-            console.log('[POS Modal] Stored', nextItems.length, 'items in local DB for branch:', branchId);
+          console.log('[POS Modal] Inventory cache now has', refreshedItems.length, 'items for branch:', branchId);
 
             // Keep MRA mappings in sync with inventory so product cards and add-to-cart checks stay accurate.
             try {
@@ -1109,9 +1075,6 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
             } catch (mappingError) {
               console.warn('[POS Modal] Failed to refresh MRA mappings for POS open:', mappingError);
             }
-          } else {
-            console.log('[POS Modal] No items received from backend for branch:', backendBranchId);
-          }
         } catch (error) {
           console.error('[POS Modal] Error fetching inventory from backend:', error);
           console.log('[POS Modal] Falling back to cached inventory for branch:', branchId);
@@ -1127,7 +1090,6 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   const sellableItems = useMemo(
     () => {
       if (!allInventory) return [];
-      const isCashier = user?.role === 'Cashier';
       const isFuelAttendant = Boolean(user?.isFuelAttendant);
 
       let items = [...allInventory];
@@ -1139,26 +1101,28 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         return !isFuelItem;
       });
 
-      if (searchQuery.trim()) {
-        const query = searchQuery.toLowerCase().trim();
-        items = items.filter((item) => (
-          item.name?.toLowerCase().includes(query) ||
-          item.id?.toLowerCase().includes(query) ||
-          item.barcode?.toLowerCase().includes(query) ||
-          item.sku?.toLowerCase().includes(query) ||
-          item.productCode?.toLowerCase().includes(query) ||
-          item.category?.toLowerCase().includes(query) ||
-          item.supplier?.toLowerCase().includes(query) ||
-          item.manufacturer?.toLowerCase().includes(query) ||
-          item.brand?.toLowerCase().includes(query) ||
-          item.batch?.toLowerCase().includes(query) ||
-          item.unitType?.toLowerCase().includes(query) ||
-          item.packSize?.toString().toLowerCase().includes(query)
-        ));
+      if (!normalizedSearchQuery) {
+        return [];
       }
+
+      items = items.filter((item) => (
+        item.name?.toLowerCase().includes(normalizedSearchQuery) ||
+        item.id?.toLowerCase().includes(normalizedSearchQuery) ||
+        item.barcode?.toLowerCase().includes(normalizedSearchQuery) ||
+        item.sku?.toLowerCase().includes(normalizedSearchQuery) ||
+        item.productCode?.toLowerCase().includes(normalizedSearchQuery) ||
+        item.category?.toLowerCase().includes(normalizedSearchQuery) ||
+        item.supplier?.toLowerCase().includes(normalizedSearchQuery) ||
+        item.manufacturer?.toLowerCase().includes(normalizedSearchQuery) ||
+        item.brand?.toLowerCase().includes(normalizedSearchQuery) ||
+        item.batch?.toLowerCase().includes(normalizedSearchQuery) ||
+        item.unitType?.toLowerCase().includes(normalizedSearchQuery) ||
+        item.packSize?.toString().toLowerCase().includes(normalizedSearchQuery)
+      ));
+
       return items;
     },
-    [allInventory, searchQuery, user?.role, user?.isFuelAttendant]
+    [allInventory, normalizedSearchQuery, user?.isFuelAttendant]
   );
   
   const handleAddToCart = useCallback(async (item: InventoryItem, quantity: number = 1, price?: number, notes?: string) => {
@@ -2190,29 +2154,17 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
           </Card>
         )
     }
-
-    if (sellableItems.length === 0) {
-      const hasSearchQuery = searchQuery.trim().length > 0;
-      const hasInventory = (allInventory?.length || 0) > 0;
-      
-      return (
-        <Card className="flex h-full items-center justify-center">
-          <CardContent className="text-center">
-            {hasSearchQuery ? (
-              <>
-                <p className="text-muted-foreground mb-4">No products found</p>
-                <p className="text-sm text-muted-foreground">Try adjusting your search terms.</p>
-              </>
-            ) : (
-              <>
-                <p className="text-muted-foreground mb-4">No products available</p>
-                <p className="text-sm text-muted-foreground">Add items to inventory to get started.</p>
-              </>
-            )}
-          </CardContent>
-        </Card>
-      );
-    }
+    const hasInventory = (allInventory?.length || 0) > 0;
+    const emptyStateTitle = hasSearchQuery
+      ? 'No products found'
+      : hasInventory
+        ? 'Search to show products'
+        : 'No products available';
+    const emptyStateDescription = hasSearchQuery
+      ? 'Try adjusting your search terms.'
+      : hasInventory
+        ? 'Products stay hidden until you search. Barcode scanning still adds matching items to cart.'
+        : 'Add items to inventory to get started.';
 
     // Calculate tax using MRA mappings if EIS is enabled
     let cartTax = 0;
@@ -2229,6 +2181,8 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     const posProps = {
       inventory: allInventory || [],
       displayItems: sellableItems || [],
+      emptyStateTitle,
+      emptyStateDescription,
       cart,
       branchId,
       onAddToCart: handleAddToCart,
@@ -2298,7 +2252,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
-                    placeholder="Search for products or scan barcode..."
+                    placeholder="Search to show products or scan barcode..."
                     className="w-full pl-10"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}

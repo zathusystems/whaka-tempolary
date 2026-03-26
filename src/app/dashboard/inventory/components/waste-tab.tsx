@@ -12,17 +12,48 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { toast } from '@/hooks/use-toast';
 import { syncService } from '@/lib/services/sync-service';
+import { PaginationControls, usePaginatedItems } from './pagination-controls';
 
 interface WasteTabProps {
     wasteLogData: WasteRecord[];
     isMobile: boolean;
+    searchTerm: string;
     onRecordWaste: () => void;
     branchId: string;
 }
 
-export function WasteTab({ wasteLogData, isMobile, onRecordWaste, branchId }: WasteTabProps) {
+export function WasteTab({ wasteLogData, isMobile, searchTerm, onRecordWaste, branchId }: WasteTabProps) {
     const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
     const [pendingChanges, setPendingChanges] = useState(0);
+    const normalizedSearchTerm = searchTerm.trim().toLowerCase();
+
+    const filteredWasteLogData = React.useMemo(() => {
+        if (!normalizedSearchTerm) return wasteLogData || [];
+
+        return (wasteLogData || []).filter((log) =>
+            [
+                log.itemName,
+                log.reason,
+                log.recordedBy,
+                log.unit,
+                log.notes,
+            ].some((value) => String(value || '').toLowerCase().includes(normalizedSearchTerm))
+        );
+    }, [normalizedSearchTerm, wasteLogData]);
+
+    const {
+        setCurrentPage,
+        totalItems,
+        totalPages,
+        effectiveCurrentPage,
+        pageStartIndex,
+        pageEndIndex,
+        paginatedItems: paginatedWasteLogData,
+    } = usePaginatedItems(filteredWasteLogData);
+
+    React.useEffect(() => {
+        setCurrentPage(1);
+    }, [normalizedSearchTerm, setCurrentPage]);
 
     // Count pending changes for this branch
     useEffect(() => {
@@ -89,8 +120,9 @@ export function WasteTab({ wasteLogData, isMobile, onRecordWaste, branchId }: Wa
                 )}
             </div>
             {isMobile ? (
+                filteredWasteLogData.length > 0 ? (
                 <div className="space-y-3">
-                    {wasteLogData?.map((log) => (
+                    {paginatedWasteLogData.map((log) => (
                         <div key={log.id} className="rounded-lg border bg-card p-4">
                             <div className="flex items-start justify-between gap-3">
                                 <div>
@@ -115,12 +147,12 @@ export function WasteTab({ wasteLogData, isMobile, onRecordWaste, branchId }: Wa
                             </div>
                         </div>
                     ))}
-                    {(!wasteLogData || wasteLogData.length === 0) && (
-                        <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-                            No waste has been recorded.
-                        </div>
-                    )}
                 </div>
+                ) : (
+                    <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+                        {normalizedSearchTerm ? `No waste records match "${searchTerm.trim()}".` : 'No waste has been recorded.'}
+                    </div>
+                )
             ) : (
                 <div className="overflow-x-auto">
                     <Table>
@@ -135,7 +167,7 @@ export function WasteTab({ wasteLogData, isMobile, onRecordWaste, branchId }: Wa
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {wasteLogData?.map(log => (
+                            {filteredWasteLogData.length > 0 ? paginatedWasteLogData.map(log => (
                                 <TableRow key={log.id}>
                                     <TableCell>{format(new Date(log.recordedAt), 'PP')}</TableCell>
                                     <TableCell className="font-medium">{log.itemName}</TableCell>
@@ -144,16 +176,26 @@ export function WasteTab({ wasteLogData, isMobile, onRecordWaste, branchId }: Wa
                                     <TableCell className="text-right font-semibold text-destructive">-${log.cost.toFixed(2)}</TableCell>
                                     <TableCell>{log.recordedBy}</TableCell>
                                 </TableRow>
-                            ))}
-                            {(!wasteLogData || wasteLogData.length === 0) && (
+                            )) : (
                                 <TableRow>
-                                    <TableCell colSpan={6} className="h-24 text-center">No waste has been recorded.</TableCell>
+                                    <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                                        {normalizedSearchTerm ? `No waste records match "${searchTerm.trim()}".` : 'No waste has been recorded.'}
+                                    </TableCell>
                                 </TableRow>
                             )}
                         </TableBody>
                     </Table>
                 </div>
             )}
+            <PaginationControls
+                currentPage={effectiveCurrentPage}
+                totalItems={totalItems}
+                totalPages={totalPages}
+                pageStartIndex={pageStartIndex}
+                pageEndIndex={pageEndIndex}
+                onPageChange={setCurrentPage}
+                itemLabel="waste records"
+            />
         </CardContent>
     );
 }

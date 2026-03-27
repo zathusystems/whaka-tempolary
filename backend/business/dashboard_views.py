@@ -258,6 +258,7 @@ class DashboardViewSet(viewsets.ViewSet):
         
         # Calculate KPIs
         total_sales = Decimal('0.00')
+        total_sales_before_tax = Decimal('0.00')
         total_cogs = Decimal('0.00')
         total_transactions = 0
         payment_totals = {
@@ -271,6 +272,12 @@ class DashboardViewSet(viewsets.ViewSet):
         
         for order in orders:
             total_sales += order.total
+            order_subtotal = (
+                order.net_amount
+                or order.subtotal
+                or (order.total - (order.vat_amount or order.tax or Decimal('0.00')))
+            )
+            total_sales_before_tax += order_subtotal
             total_transactions += 1
             
             # Sum revenue per payment method (not transaction count)
@@ -308,28 +315,28 @@ class DashboardViewSet(viewsets.ViewSet):
                 product_sales[item.inventory_item_id]['revenue'] += price * item.quantity
                 product_sales[item.inventory_item_id]['profit'] += (price - cost) * item.quantity
         
-        gross_profit = total_sales - total_cogs
+        gross_profit = total_sales_before_tax - total_cogs
         avg_sale_value = total_sales / total_transactions if total_transactions > 0 else Decimal('0.00')
         inventory_value = sum(Decimal(str(item['value'])) for item in inventory_map.values())
         
         # Format KPI data
         kpi_data = [
             {
-                'title': 'Total Sales',
+                'title': 'Total Revenue (with Tax)',
                 'value': float(total_sales),
-                'change': '+20.1%',
+                'change': '',
                 'icon': 'DollarSign',
             },
             {
                 'title': 'Gross Profit',
                 'value': float(gross_profit),
-                'change': '+15.2%',
+                'change': '',
                 'icon': 'TrendingUp',
             },
             {
                 'title': 'Total Transactions',
                 'value': total_transactions,
-                'change': '+180.1%',
+                'change': '',
                 'icon': 'ShoppingCart',
             },
             {

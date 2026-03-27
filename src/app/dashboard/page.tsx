@@ -460,7 +460,6 @@ function AdminManagerDashboard({
                   </CardHeader>
                   <CardContent>
                     <div className="text-2xl font-bold">{displayValue}</div>
-                    {kpi.change && <p className="text-xs text-green-600">{kpi.change} vs last period</p>}
                   </CardContent>
                 </Card>
               );

@@ -2161,10 +2161,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         ? 'Search to show products'
         : 'No products available';
     const emptyStateDescription = hasSearchQuery
-      ? 'Try adjusting your search terms.'
+      ? undefined
       : hasInventory
-        ? 'Products stay hidden until you search. Barcode scanning still adds matching items to cart.'
-        : 'Add items to inventory to get started.';
+        ? undefined
+        : undefined;
 
     // Calculate tax using MRA mappings if EIS is enabled
     let cartTax = 0;
@@ -2229,9 +2229,6 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
             <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400 mb-4">
               <AlertTriangle />
             </div>
-            <p className="text-muted-foreground mb-4">
-              You must start a new session before you can make sales.
-            </p>
             <Button onClick={() => onOpenChange(false)}>Close</Button>
           </div>
         </DialogContent>
@@ -2252,7 +2249,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
-                    placeholder="Search to show products or scan barcode..."
+                    placeholder="Search products or scan barcode..."
                     className="w-full pl-10"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}

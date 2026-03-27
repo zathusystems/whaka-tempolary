@@ -1750,7 +1750,6 @@ export default function SessionsPage() {
                         <DialogContent className="sm:max-w-md">
                             <DialogHeader>
                                 <DialogTitle>Start a New Session</DialogTitle>
-                                <DialogDescription>Enter the opening cash float and review inventory to begin your session.</DialogDescription>
                             </DialogHeader>
                             <StartSessionForm onSessionStarted={async () => {
                                 setStartModalOpen(false);

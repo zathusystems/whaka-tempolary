@@ -66,8 +66,6 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
   // Check if low stock
   const isLowStock = product.status === 'Low Stock';
   const isOutOfStock = product.status === 'Out of Stock';
-  const showItemTypeBadge =
-    currentBusinessType === 'Restaurant' || currentBusinessType === 'Bar & Liquor';
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
@@ -145,25 +143,8 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
 
           {/* Overview Tab */}
           <TabsContent value="overview" className="space-y-4">
-            {/* Status & Type */}
-            <div className="grid grid-cols-2 gap-4">
-              <Card>
-                <CardContent className="pt-6">
-                  <div className="space-y-2">
-                    <p className="text-sm text-muted-foreground">Item Type</p>
-                    {showItemTypeBadge ? (
-                      <Badge variant={isSellable ? 'default' : 'outline'} className="text-base py-1 px-3">
-                        {product.itemType === 'sellable' ? 'Sellable Product' : 'Ingredient'}
-                      </Badge>
-                    ) : (
-                      <p className="text-base font-medium">
-                        {product.itemType === 'sellable' ? 'Sellable Product' : 'Ingredient'}
-                      </p>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-
+            {/* Status */}
+            <div className="grid grid-cols-1 gap-4">
               <Card>
                 <CardContent className="pt-6">
                   <div className="space-y-2">
@@ -192,13 +173,13 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
                 </Card>
               )}
 
-              {!isSellable && product.stockUnits !== undefined && (
+              {product.stockUnits !== undefined && product.stockUnits !== null && (
                 <Card>
                   <CardContent className="pt-6">
                     <div className="space-y-2">
                       <div className="flex items-center gap-2">
                         <Package className="h-4 w-4 text-muted-foreground" />
-                        <p className="text-sm text-muted-foreground">Current Stock</p>
+                        <p className="text-sm text-muted-foreground">Remaining Quantity</p>
                       </div>
                       <p className="text-2xl font-bold">{product.stockUnits} <span className="text-sm text-muted-foreground">{product.unitType}</span></p>
                       {product.value !== undefined && product.value !== null && (

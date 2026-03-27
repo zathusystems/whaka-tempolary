@@ -102,6 +102,7 @@ import {
 } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { ThemeCustomizer } from '@/components/theme-customizer';
+import { syncBusinessBranchesFromServer } from '@/lib/branch-sync';
 
 // Helper to remove auth sync items from queue
 const removeAuthSyncItem = (itemId: string) => {
@@ -503,7 +504,7 @@ type Branch = { id: string; name: string; address: string; };
 
 const getInitialBranches = (): Branch[] => {
     if (typeof window === 'undefined') {
-        return [{ id: 'main', name: 'Main Branch', address: '' }];
+        return [];
     }
 
     let branches: Branch[];
@@ -515,12 +516,6 @@ const getInitialBranches = (): Branch[] => {
         console.error("Failed to parse branches from localStorage", e);
     }
     
-    if (branches.length === 0) {
-        const defaultBranch = { id: 'main', name: 'Main Branch', 'address': '123 Default Street' };
-        branches = [defaultBranch];
-        localStorage.setItem(LOCAL_STORAGE_KEYS.BRANCHES, JSON.stringify(branches));
-    }
-
     return branches;
 };
 
@@ -744,17 +739,29 @@ function Header() {
     clearFailedOrders();
   }, []);
 
+  const syncHeaderBranchState = (nextBranches: Branch[], preferredBranchId?: string | null) => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const storedActiveBranchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
+    const resolvedBranchId = preferredBranchId || storedActiveBranchId || nextBranches[0]?.id || null;
+    const resolvedActiveBranch =
+      (resolvedBranchId
+        ? nextBranches.find((branch) => String(branch.id) === String(resolvedBranchId))
+        : null) ||
+      nextBranches[0] ||
+      null;
+
+    setBranches(nextBranches);
+    setActiveBranchId(resolvedActiveBranch?.id || resolvedBranchId || null);
+    setActiveBranch(resolvedActiveBranch);
+  };
+
   useEffect(() => {
     if (typeof window !== 'undefined') {
         const allBranches = getInitialBranches();
-        setBranches(allBranches);
-
-        const storedActiveBranchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
-        const branchId = storedActiveBranchId || allBranches[0]?.id || null;
-        setActiveBranchId(branchId);
-        
-        const active = allBranches.find(b => b.id === branchId) || allBranches[0] || { id: 'main', name: 'Main Branch', address: '' };
-        setActiveBranch(active);
+        syncHeaderBranchState(allBranches);
 
         // Listen for branches updated event
         const handleBranchesUpdated = (event: Event) => {
@@ -762,14 +769,68 @@ function Header() {
             const updatedBranches = customEvent.detail?.branches;
             if (updatedBranches && Array.isArray(updatedBranches)) {
                 console.log('[Header] Branches updated event received:', updatedBranches);
-                setBranches(updatedBranches);
+                syncHeaderBranchState(updatedBranches);
             }
         };
 
+        const handleBranchChanged = (event: Event) => {
+            const customEvent = event as CustomEvent;
+            const nextBranchId = String(customEvent.detail?.branchId || '').trim();
+            const nextBranches = getInitialBranches();
+            console.log('[Header] Branch changed event received:', nextBranchId);
+            syncHeaderBranchState(nextBranches, nextBranchId || undefined);
+        };
+
         window.addEventListener('branchesUpdated', handleBranchesUpdated);
-        return () => window.removeEventListener('branchesUpdated', handleBranchesUpdated);
+        window.addEventListener('branchChanged', handleBranchChanged);
+        return () => {
+          window.removeEventListener('branchesUpdated', handleBranchesUpdated);
+          window.removeEventListener('branchChanged', handleBranchChanged);
+        };
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !business?.id) {
+      return;
+    }
+
+    const needsBranchSync =
+      branches.length === 0 ||
+      (activeBranchId !== null &&
+        !branches.some((branch) => String(branch.id) === String(activeBranchId))) ||
+      (!activeBranch && Boolean(activeBranchId));
+
+    if (!needsBranchSync) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncBranches = async () => {
+      try {
+        const { branches: syncedBranches, activeBranchId: syncedActiveBranchId } =
+          await syncBusinessBranchesFromServer(
+            business.id,
+            user?.branchId || activeBranchId || undefined
+          );
+
+        if (cancelled) {
+          return;
+        }
+
+        syncHeaderBranchState(syncedBranches, syncedActiveBranchId);
+      } catch (error) {
+        console.warn('[Header] Failed to sync branches from server:', error);
+      }
+    };
+
+    void syncBranches();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [business?.id, user?.branchId, branches, activeBranchId, activeBranch]);
 
   const lowStockItems = useLiveQuery(
     () => activeBranchId ? db.inventory

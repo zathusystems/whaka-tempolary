@@ -6,7 +6,6 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { db, type InventoryItem, type Session } from '@/lib/db';
 import { useAuth } from '@/hooks/use-auth';
-import { useCurrency } from '@/hooks/use-currency';
 import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
@@ -46,7 +45,6 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
         },
     });
     const { user } = useAuth();
-    const { format: formatCurrency } = useCurrency();
     const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
     const [step, setStep] = useState(1);
     const [isLoading, setIsLoading] = useState(false);
@@ -217,7 +215,7 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                 setHasFreshInventorySnapshot(false);
                 setInventoryRefreshError(null);
                 setInventoryRefreshProgress(5);
-                setInventoryRefreshStage('Loading cached inventory...');
+                setInventoryRefreshStage('Loading inventory...');
 
                 try {
                     const localInventory = filterActiveInventory(await getInventoryItemsForBranch(activeBranchId));
@@ -225,11 +223,7 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
 
                     setBackendInventory(localInventory);
                     setInventoryRefreshProgress(localInventory.length > 0 ? 15 : 10);
-                    setInventoryRefreshStage(
-                        localInventory.length > 0
-                            ? `Loaded ${localInventory.length} cached item${localInventory.length === 1 ? '' : 's'}. Refreshing latest backend data...`
-                            : 'No cached inventory found. Refreshing latest backend data...'
-                    );
+                    setInventoryRefreshStage('Refreshing inventory...');
 
                     console.log('[Sessions] Refreshing inventory cache for branch:', activeBranchId);
                     const refreshed = await syncService.fetchAllInventoryFromBackend(activeBranchId, {
@@ -237,9 +231,6 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                             if (cancelled) return;
                             if (typeof progress.percent === 'number') {
                                 setInventoryRefreshProgress(Math.max(0, Math.min(100, Math.round(progress.percent))));
-                            }
-                            if (progress.message) {
-                                setInventoryRefreshStage(progress.message);
                             }
                         },
                     });
@@ -256,20 +247,18 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                         setHasFreshInventorySnapshot(true);
                         setInventoryRefreshError(null);
                         setInventoryRefreshProgress(100);
-                        setInventoryRefreshStage(
-                            `Latest backend inventory ready (${refreshedInventory.length} item${refreshedInventory.length === 1 ? '' : 's'}).`
-                        );
+                        setInventoryRefreshStage('Inventory ready');
                     } else {
                         setHasFreshInventorySnapshot(false);
                         setInventoryRefreshError('Failed to refresh inventory from backend. Retry before starting the session.');
-                        setInventoryRefreshStage('Cached inventory is shown below. Session start stays locked until the backend snapshot loads.');
+                        setInventoryRefreshStage('Refresh failed');
                     }
                 } catch (error) {
                     console.error('[Sessions] Error fetching inventory from backend:', error);
                     if (!cancelled) {
                         setHasFreshInventorySnapshot(false);
                         setInventoryRefreshError('Failed to prepare the inventory snapshot. Retry before starting the session.');
-                        setInventoryRefreshStage('Unable to load the latest backend inventory snapshot.');
+                        setInventoryRefreshStage('Unable to load inventory');
                     }
                 } finally {
                     if (!cancelled) {
@@ -497,13 +486,6 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
 	           {step === 2 && (
 	               <>
 	                <div className="space-y-4">
-	                    <div className="text-sm">
-	                        <p>You are starting your session with an opening float of <span className="font-bold text-xs">{formatCurrency(getValues('openingFloat'))}</span>.</p>
-                        {showPumpField && availablePumps.length > 0 && getValues('pumpName') && (
-                            <p className="text-muted-foreground">Assigned pump: <span className="font-medium">{getValues('pumpName')}</span>.</p>
-	                        )}
-	                        <p className="text-muted-foreground">The following stock levels will be recorded for the start of your session.</p>
-	                    </div>
                         <Card>
                             <CardContent className="p-4 space-y-3">
                                 <div className="flex items-center justify-between gap-4">
@@ -516,15 +498,6 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                                     </span>
                                 </div>
                                 <Progress value={Math.max(0, Math.min(100, inventoryRefreshProgress))} />
-                                {hasFreshInventorySnapshot ? (
-                                    <p className="text-xs text-green-700">
-                                        The session will start with the latest backend inventory snapshot.
-                                    </p>
-                                ) : (
-                                    <p className="text-xs text-muted-foreground">
-                                        Cached inventory is shown below while the backend snapshot loads. You can review it now, but confirmation stays locked until refresh completes.
-                                    </p>
-                                )}
                                 {inventoryRefreshError && (
                                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                         <p className="text-xs text-destructive">{inventoryRefreshError}</p>

@@ -4,6 +4,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { syncService } from '@/lib/services/sync-service';
 import { normalizeRole } from '@/lib/rbac/role-utils';
+import { clearSessionContextStorage } from '@/lib/session-context-storage';
 
 // Define the shape of the user object and the auth context
 export interface User {
@@ -316,6 +317,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     localStorage.removeItem(AUTH_STORAGE_KEYS.LEGACY_TOKENS);
     localStorage.removeItem(AUTH_STORAGE_KEYS.BUSINESS_CACHE);
     localStorage.removeItem(AUTH_STORAGE_KEYS.BUSINESS_SETTINGS);
+    clearSessionContextStorage();
 
     const authFetch = require('@/lib/auth-fetch').authFetch;
     if (authFetch && authFetch.logout) {

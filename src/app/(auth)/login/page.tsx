@@ -32,6 +32,8 @@ import { useAuth } from '@/hooks/use-auth';
 import { authFetch } from '@/lib/auth-fetch';
 import { db } from '@/lib/db';
 import { normalizeRole, type AppRole } from '@/lib/rbac/role-utils';
+import { clearSessionContextStorage } from '@/lib/session-context-storage';
+import { syncBusinessBranchesFromServer } from '@/lib/branch-sync';
 
 const loginSchema = z.object({
   identifier: z.string().min(1, 'Email or phone is required.'),
@@ -89,16 +91,19 @@ export default function LoginPage() {
             // Tokens exist but are invalid, clear user and stay on login
             localStorage.removeItem('handy-pos-user');
             localStorage.removeItem('handy-pos-business');
+            clearSessionContextStorage();
           }
         } catch (e) {
           // Failed to parse tokens, clear user and stay on login
           localStorage.removeItem('handy-pos-user');
           localStorage.removeItem('handy-pos-business');
+          clearSessionContextStorage();
         }
       } else {
         // No tokens found, clear user and stay on login
         localStorage.removeItem('handy-pos-user');
         localStorage.removeItem('handy-pos-business');
+        clearSessionContextStorage();
       }
     }
   }, [user, router]);
@@ -448,6 +453,7 @@ const normalizePumpList = (value: unknown): string[] => {
     try {
       setIsLoading(true);
       setError('');
+      clearSessionContextStorage();
 
       // Use preloaded values if provided, otherwise use defaults
       let assignedBranchId = preloadedAssignedBranchId || null;
@@ -519,31 +525,12 @@ const normalizePumpList = (value: unknown): string[] => {
 
         // Fetch and sync all branches
         try {
-          const businessResponse = await authFetch.fetch<any>(
-            `/business/businesses/${selectedBiz.id}/`
-          );
+          const { businessResponse, rawBranches, branches, activeBranchId: syncedActiveBranchId } =
+            await syncBusinessBranchesFromServer(selectedBiz.id, activeBranchId);
 
-          fetchedBranches = Array.isArray(businessResponse?.branches)
-            ? businessResponse.branches
-            : [];
-
-
-             if (fetchedBranches.length === 0) {
-            try {
-              const branchesResponse = await authFetch.fetch<any>(
-                `/business/businesses/${selectedBiz.id}/branches/`
-              );
-              if (Array.isArray(branchesResponse)) {
-                fetchedBranches = branchesResponse;
-              } else if (Array.isArray(branchesResponse?.results)) {
-                fetchedBranches = branchesResponse.results;
-              }
-            } catch (branchesError) {
-              console.warn('[DEBUG LOGIN] Could not fetch branches from branches endpoint:', branchesError);
-            }
-          }
-
-
+          fetchedBranches = rawBranches;
+          branchesData = branches;
+          activeBranchId = syncedActiveBranchId;
 
           if (businessResponse?.tin || businessResponse?.tax_pin || businessResponse?.taxPin) {
             const resolvedTin = businessResponse.tin || businessResponse.tax_pin || businessResponse.taxPin || '';
@@ -633,23 +620,6 @@ const normalizePumpList = (value: unknown): string[] => {
             }));
           }
           
-          if (fetchedBranches.length > 0) {
-            // Store all branches for reference
-            branchesData = fetchedBranches.map((b: any) => ({
-              id: String(b.id),
-              name: b.name,
-              address: b.address || '',
-            }));
-            localStorage.setItem('handypos-branches', JSON.stringify(branchesData));
-            
-            for (const branch of fetchedBranches) {
-              // Store branch info for later use
-              localStorage.setItem(
-                `handypos-branch-${branch.id}`,
-                JSON.stringify(branch)
-              );
-            }
-          }
         } catch (e) {
           console.warn('[DEBUG LOGIN] Could not fetch branches:', e);
         }
@@ -790,20 +760,23 @@ const normalizePumpList = (value: unknown): string[] => {
         description: `Welcome to ${selectedBiz.name}! (Role: ${user.role})`,
       });
 
-      // Pull all data for the selected business and branch
+      router.replace('/dashboard');
+
+      // Pull all data for the selected business and branch in the background.
+      // Login should not wait on sync because slow or hanging network calls here
+      // make authentication look flaky even after tokens are stored successfully.
       if (activeBranchId) {
         console.log('[DEBUG LOGIN] Pulling all data for branch:', activeBranchId);
-        try {
-          const { syncService } = await import('@/lib/services/sync-service');
-          await syncService.performFullSync(activeBranchId);
-          console.log('[DEBUG LOGIN] Full sync completed');
-        } catch (syncError) {
-          console.error('[DEBUG LOGIN] Sync error (non-blocking):', syncError);
-          // Don't block login if sync fails
-        }
+        void import('@/lib/services/sync-service')
+          .then(({ syncService }) => syncService.performFullSync(activeBranchId))
+          .then(() => {
+            console.log('[DEBUG LOGIN] Full sync completed');
+          })
+          .catch((syncError) => {
+            console.error('[DEBUG LOGIN] Sync error (non-blocking):', syncError);
+          });
       }
-
-      router.push('/dashboard');
+      return;
     } catch (error: any) {
       console.error('Business selection error:', error);
       const errorMsg = error.message || 'Failed to process login. Please try again.';
@@ -932,17 +905,19 @@ const normalizePumpList = (value: unknown): string[] => {
         description: `Welcome to ${selectedBiz.name}!`,
       });
 
-      // Pull all data for the selected branch
-      console.log('[DEBUG LOGIN] Pulling all data for branch:', selectedBranch);
-      try {
-        const { syncService } = await import('@/lib/services/sync-service');
-        await syncService.performFullSync(selectedBranch);
-        console.log('[DEBUG LOGIN] Full sync completed');
-      } catch (syncError) {
-        console.error('[DEBUG LOGIN] Sync error (non-blocking):', syncError);
-      }
+      router.replace('/dashboard');
 
-      router.push('/dashboard');
+      // Pull all data for the selected branch in the background.
+      console.log('[DEBUG LOGIN] Pulling all data for branch:', selectedBranch);
+      void import('@/lib/services/sync-service')
+        .then(({ syncService }) => syncService.performFullSync(selectedBranch))
+        .then(() => {
+          console.log('[DEBUG LOGIN] Full sync completed');
+        })
+        .catch((syncError) => {
+          console.error('[DEBUG LOGIN] Sync error (non-blocking):', syncError);
+        });
+      return;
     } catch (error: any) {
       console.error('Branch selection error:', error);
       const errorMsg = error.message || 'Failed to select branch. Please try again.';

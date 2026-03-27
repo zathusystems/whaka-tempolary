@@ -3,7 +3,7 @@
 import React from 'react';
 import { useForm, FormProvider, useFieldArray, useWatch } from 'react-hook-form';
 import { format } from 'date-fns';
-import { Plus, X, Calendar as CalendarIcon, Loader2 } from 'lucide-react';
+import { Plus, X, Calendar as CalendarIcon, Loader2, ChevronsUpDown, Check } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { useLiveQuery } from 'dexie-react-hooks';
 
@@ -240,6 +240,8 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     const [resolvedSessionHasPump, setResolvedSessionHasPump] = React.useState<boolean | null>(null);
     const [availableSessions, setAvailableSessions] = React.useState<SessionChoice[]>([]);
     const [isLoadingSessionChoices, setIsLoadingSessionChoices] = React.useState(false);
+    const [productSearchTerms, setProductSearchTerms] = React.useState<Record<string, string>>({});
+    const [productPickerOpen, setProductPickerOpen] = React.useState<Record<string, boolean>>({});
     
     React.useEffect(() => {
         let isCancelled = false;
@@ -544,6 +546,70 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
             return !selectedProductIds.has(product.id);
         });
     }, [filteredProducts, selectedProductIds, watchedItems]);
+
+    const filterProductsBySearch = React.useCallback((products: InventoryItem[], searchTerm: string) => {
+        const normalizedSearch = String(searchTerm || '').trim().toLowerCase();
+        if (!normalizedSearch) {
+            return products;
+        }
+
+        return products.filter((product) =>
+            [
+                product.name,
+                product.category,
+                product.supplier,
+                product.productCode,
+                product.sku,
+                product.barcode,
+            ]
+                .map((value) => String(value || '').toLowerCase())
+                .some((value) => value.includes(normalizedSearch))
+        );
+    }, []);
+
+    const handleProductSelect = React.useCallback((
+        rowIndex: number,
+        rowFieldId: string,
+        productId: string,
+        availableProducts: InventoryItem[],
+        onChange: (value: string) => void
+    ) => {
+        const product = availableProducts.find((item) => item.id === productId);
+        onChange(productId);
+
+        if (product) {
+            setValue(`items.${rowIndex}.cost`, Number(product.cost || 0), {
+                shouldDirty: true,
+                shouldTouch: true,
+            });
+            const taxDefaults = getDefaultTaxForProduct(product.id);
+            setValue(`items.${rowIndex}.taxRate`, taxDefaults.taxRate, {
+                shouldDirty: true,
+                shouldTouch: true,
+            });
+            setValue(`items.${rowIndex}.taxCalculationMethod`, taxDefaults.taxCalculationMethod, {
+                shouldDirty: true,
+                shouldTouch: true,
+            });
+        }
+
+        const currentQty = Number(getValues(`items.${rowIndex}.quantity`) || 0);
+        if (!currentQty || currentQty <= 0) {
+            setValue(`items.${rowIndex}.quantity`, 1, {
+                shouldDirty: true,
+                shouldTouch: true,
+            });
+        }
+
+        setProductSearchTerms((current) => ({
+            ...current,
+            [rowFieldId]: '',
+        }));
+        setProductPickerOpen((current) => ({
+            ...current,
+            [rowFieldId]: false,
+        }));
+    }, [getDefaultTaxForProduct, getValues, setValue]);
 
     const liveTotals = React.useMemo(() => {
         const items = (watchedItems || []).filter(
@@ -1041,6 +1107,8 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                     <div className="space-y-4">
                         {fields.map((field, index) => {
                             const availableProducts = getAvailableProductsForRow(index);
+                            const productSearchTerm = productSearchTerms[field.id] || '';
+                            const searchableProducts = filterProductsBySearch(availableProducts, productSearchTerm);
                             const rowItem = watchedItems?.[index];
                             const rowQuantity = Number(rowItem?.quantity || 0);
                             const rowCost = Number(rowItem?.cost || 0);
@@ -1060,38 +1128,90 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                             render={({ field: selectField }) => (
                                                 <FormItem>
                                                     <FormLabel className="text-xs">Product</FormLabel>
-                                                    <Select
-                                                    onValueChange={(value) => {
-                                                    const product = availableProducts.find(p => p.id === value);
-                                                    selectField.onChange(value);
-                                                    if (product) {
-                                                    setValue(`items.${index}.cost`, Number(product.cost || 0), {
-                                                        shouldDirty: true,
-                                                        shouldTouch: true,
-                                                    });
-                                                    const taxDefaults = getDefaultTaxForProduct(product.id);
-                                                    setValue(`items.${index}.taxRate`, taxDefaults.taxRate, {
-                                                        shouldDirty: true,
-                                                        shouldTouch: true,
-                                                    });
-                                                    setValue(`items.${index}.taxCalculationMethod`, taxDefaults.taxCalculationMethod, {
-                                                        shouldDirty: true,
-                                                        shouldTouch: true,
-                                                    });
-                                                    }
-                                                    const currentQty = Number(getValues(`items.${index}.quantity`) || 0);
-                                                    if (!currentQty || currentQty <= 0) {
-                                                        setValue(`items.${index}.quantity`, 1, {
-                                                            shouldDirty: true,
-                                                            shouldTouch: true,
-                                                        });
-                                                    }
-                                                    }}
-                                                    defaultValue={selectField.value}
+                                                    <Popover
+                                                        open={Boolean(productPickerOpen[field.id])}
+                                                        onOpenChange={(open) =>
+                                                            setProductPickerOpen((current) => ({
+                                                                ...current,
+                                                                [field.id]: open,
+                                                            }))
+                                                        }
                                                     >
-                                                    <FormControl><SelectTrigger disabled={isSubmitting}><SelectValue placeholder="Select product" /></SelectTrigger></FormControl>
-                                                    <SelectContent>{availableProducts.map(p => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
-                                                    </Select>
+                                                        <PopoverTrigger asChild>
+                                                            <FormControl>
+                                                                <Button
+                                                                    type="button"
+                                                                    variant="outline"
+                                                                    role="combobox"
+                                                                    className={cn(
+                                                                        'w-full justify-between',
+                                                                        !selectField.value && 'text-muted-foreground'
+                                                                    )}
+                                                                    disabled={isSubmitting}
+                                                                >
+                                                                    <span className="truncate">
+                                                                        {availableProducts.find((product) => product.id === selectField.value)?.name ||
+                                                                            filteredProducts.find((product) => product.id === selectField.value)?.name ||
+                                                                            'Select product'}
+                                                                    </span>
+                                                                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                                                                </Button>
+                                                            </FormControl>
+                                                        </PopoverTrigger>
+                                                        <PopoverContent className="w-[320px] p-0" align="start">
+                                                            <div className="border-b p-2">
+                                                                <Input
+                                                                    placeholder="Search products..."
+                                                                    value={productSearchTerm}
+                                                                    onChange={(e) =>
+                                                                        setProductSearchTerms((current) => ({
+                                                                            ...current,
+                                                                            [field.id]: e.target.value,
+                                                                        }))
+                                                                    }
+                                                                    disabled={isSubmitting}
+                                                                />
+                                                            </div>
+                                                            <div className="max-h-60 overflow-y-auto py-1">
+                                                                {searchableProducts.length > 0 ? (
+                                                                    searchableProducts.map((product) => (
+                                                                        <button
+                                                                            key={product.id}
+                                                                            type="button"
+                                                                            className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-muted"
+                                                                            onClick={() =>
+                                                                                handleProductSelect(
+                                                                                    index,
+                                                                                    field.id,
+                                                                                    product.id,
+                                                                                    availableProducts,
+                                                                                    selectField.onChange
+                                                                                )
+                                                                            }
+                                                                            disabled={isSubmitting}
+                                                                        >
+                                                                            <div className="min-w-0">
+                                                                                <p className="truncate text-sm font-medium">{product.name}</p>
+                                                                                <p className="truncate text-xs text-muted-foreground">
+                                                                                    {product.category || 'Uncategorized'}
+                                                                                </p>
+                                                                            </div>
+                                                                            <Check
+                                                                                className={cn(
+                                                                                    'h-4 w-4 shrink-0',
+                                                                                    selectField.value === product.id ? 'opacity-100' : 'opacity-0'
+                                                                                )}
+                                                                            />
+                                                                        </button>
+                                                                    ))
+                                                                ) : (
+                                                                    <div className="px-3 py-4 text-sm text-muted-foreground">
+                                                                        No matching products
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </PopoverContent>
+                                                    </Popover>
                                                 </FormItem>
                                             )}
                                         />

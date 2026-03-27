@@ -47,6 +47,25 @@ export const useReports = (dateRange?: DateRange) => {
     return Number.isFinite(parsed) ? parsed : fallback;
   };
 
+  const toTrimmedString = (value: unknown): string => String(value ?? '').trim();
+
+  const normalizeStatus = (value: unknown): string => toTrimmedString(value).toLowerCase();
+
+  const getBranchIdCandidates = (branchId: string): string[] => {
+    const normalized = toTrimmedString(branchId);
+    if (!normalized) return [];
+
+    const candidates = new Set<string>([normalized]);
+    const numericMatch = normalized.match(/\d+/)?.[0];
+
+    if (numericMatch) {
+      candidates.add(numericMatch);
+      candidates.add(`BRN-${numericMatch}`);
+    }
+
+    return Array.from(candidates);
+  };
+
   const resolveNumber = (value: unknown): number | undefined => {
     const parsed = typeof value === 'number' ? value : Number(value);
     return Number.isFinite(parsed) ? parsed : undefined;
@@ -156,6 +175,9 @@ export const useReports = (dateRange?: DateRange) => {
       try {
         const from = startOfDay(dateRange.from!).toISOString();
         const to = endOfDay(dateRange.to || dateRange.from!).toISOString();
+        const fromMs = Date.parse(from);
+        const toMs = Date.parse(to);
+        const branchCandidates = new Set(getBranchIdCandidates(activeBranchId));
 
         const [orders, allExpenses, inventory, staff] = await Promise.all([
           db.orders
@@ -167,13 +189,46 @@ export const useReports = (dateRange?: DateRange) => {
               order.status !== 'Cancelled'
             )
             .toArray(),
-          db.expenses
-            .where('branchId').equals(activeBranchId)
-            .and(expense => expense.status === 'Approved' && expense.date >= from && expense.date <= to)
-            .toArray(),
+          db.expenses.toArray(),
           db.inventory.where('branchId').equals(activeBranchId).toArray(),
           db.staff.where('branchId').equals(activeBranchId).toArray(),
         ]);
+
+        const normalizedExpenses = allExpenses.filter((expense) => {
+          if (expense._operation === 'delete') {
+            return false;
+          }
+
+          const expenseBranchId = toTrimmedString(
+            expense.branchId ?? (expense as any).branch_id ?? (expense as any).branch
+          );
+          if (!expenseBranchId || !branchCandidates.has(expenseBranchId)) {
+            return false;
+          }
+
+          const expenseStatus = normalizeStatus(
+            expense.status ?? (expense as any).approvalStatus ?? (expense as any).approval_status
+          );
+          if (expenseStatus !== 'approved') {
+            return false;
+          }
+
+          const expenseDateRaw = toTrimmedString(
+            expense.date ??
+              (expense as any).expenseDate ??
+              (expense as any).expense_date ??
+              expense.approvedAt ??
+              (expense as any).approved_at ??
+              (expense as any).createdAt ??
+              (expense as any).created_at
+          );
+          const expenseDateMs = Date.parse(expenseDateRaw);
+          if (!Number.isFinite(expenseDateMs)) {
+            return false;
+          }
+
+          return expenseDateMs >= fromMs && expenseDateMs <= toMs;
+        });
 
         const ordersToPatch = orders
           .map((order) => {
@@ -254,7 +309,7 @@ export const useReports = (dateRange?: DateRange) => {
         const totalTax = normalizedOrders.reduce((acc, order) => acc + order.tax, 0);
         const totalRevenue = normalizedOrders.reduce((acc, order) => acc + order.total, 0);
         const totalCogs = normalizedOrders.reduce((acc, order) => acc + order.cogs, 0);
-        const totalExpenses = allExpenses.reduce((acc, expense) => acc + toFiniteNumber(expense.amount, 0), 0);
+        const totalExpenses = normalizedExpenses.reduce((acc, expense) => acc + toFiniteNumber(expense.amount, 0), 0);
         
         // Gross Profit = Revenue - COGS (before tax consideration)
         const grossProfit = totalSubtotal - totalCogs;

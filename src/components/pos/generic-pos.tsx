@@ -1981,7 +1981,7 @@ export const GenericPos = ({
   inventory,
   displayItems,
   emptyStateTitle = 'No products found',
-  emptyStateDescription = 'Try adjusting your search or inventory filters.',
+  emptyStateDescription = '',
   cart,
   onAddToCart,
   onUpdateQuantity,
@@ -2362,7 +2362,9 @@ export const GenericPos = ({
         <div className="flex h-full flex-col items-center justify-center text-center">
           <Package className="h-16 w-16 text-muted-foreground/30" />
           <p className="mt-4 text-muted-foreground">{emptyStateTitle}</p>
-          <p className="mt-2 text-sm text-muted-foreground">{emptyStateDescription}</p>
+          {emptyStateDescription ? (
+            <p className="mt-2 text-sm text-muted-foreground">{emptyStateDescription}</p>
+          ) : null}
         </div>
       );
     }
@@ -2412,7 +2414,9 @@ export const GenericPos = ({
         <div className="flex h-full flex-col items-center justify-center text-center">
           <Package className="h-16 w-16 text-muted-foreground/30" />
           <p className="mt-4 text-muted-foreground">{emptyStateTitle}</p>
-          <p className="mt-2 text-sm text-muted-foreground">{emptyStateDescription}</p>
+          {emptyStateDescription ? (
+            <p className="mt-2 text-sm text-muted-foreground">{emptyStateDescription}</p>
+          ) : null}
         </div>
       );
     }

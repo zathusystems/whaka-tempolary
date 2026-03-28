@@ -176,10 +176,20 @@ const resolveBuyerDetails = (order: Order | null | undefined) => {
     };
 };
 
-const resolveEisStatusForOrder = (order: Order | null | undefined, eisEnabled: boolean): string => {
+const resolveEisStatusForOrder = (
+    order: Order | null | undefined,
+    eisEnabled: boolean
+): Order['eis_status'] | undefined => {
     const source = order as any;
     const status = toTrimmedString(source?.eisStatus ?? source?.eis_status).toUpperCase();
-    if (status) return status;
+    if (
+        status === 'PENDING' ||
+        status === 'SUBMITTED' ||
+        status === 'ACCEPTED' ||
+        status === 'REJECTED'
+    ) {
+        return status;
+    }
 
     const fiscalInvoice = toTrimmedString(
         source?.fiscalInvoiceNumber ?? source?.fiscal_invoice_number
@@ -192,7 +202,7 @@ const resolveEisStatusForOrder = (order: Order | null | undefined, eisEnabled: b
         return 'PENDING';
     }
 
-    return '';
+    return undefined;
 };
 
 const formatOptionalDateTime = (value?: string) => {
@@ -227,6 +237,36 @@ const EMPTY_EIS_SUMMARY = {
     lastFiscalInvoice: '',
     firstSubmissionAt: '',
     lastSubmissionAt: '',
+};
+
+const toFiniteNumber = (value: unknown, fallback = 0): number => {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizeOrderForReport = (order: Order) => {
+    const total = toFiniteNumber(
+        order.total ?? (order as any).grossAmount ?? (order as any).gross_amount,
+        0
+    );
+    const tax = toFiniteNumber(
+        order.tax ?? (order as any).vatAmount ?? (order as any).vat_amount,
+        0
+    );
+    const subtotalCandidate = toFiniteNumber(
+        order.subtotal ?? (order as any).netAmount ?? (order as any).net_amount,
+        Number.NaN
+    );
+    const subtotal = Number.isFinite(subtotalCandidate)
+        ? subtotalCandidate
+        : Math.max(total - tax, 0);
+
+    return {
+        ...order,
+        total,
+        tax,
+        subtotal,
+    };
 };
 
 const RefundDialog = ({
@@ -455,10 +495,12 @@ export default function ReportsPage() {
         return sortOrdersByMostRecent(orders);
     }, [activeBranchId, fromDate, toDate]);
 
-    // Filter orders excluding voided and cancelled (for orders tab)
+    // Normalize report orders so charts and KPIs use the same non-voided totals
     const activeOrders = useMemo(() => {
         if (!allOrders) return undefined;
-        return allOrders.filter(order => order.status !== 'Voided' && order.status !== 'Cancelled');
+        return allOrders
+            .filter(order => order.status !== 'Voided' && order.status !== 'Cancelled')
+            .map(normalizeOrderForReport);
     }, [allOrders]);
 
     const normalizedOrdersForEis = useMemo(() => {
@@ -479,14 +521,14 @@ export default function ReportsPage() {
     }, [normalizedOrdersForEis]);
 
     const salesChartData = React.useMemo(() => {
-        if (!allOrders || !date?.from) return [];
+        if (!activeOrders || !date?.from) return [];
         
         const intervalDays = eachDayOfInterval({ start: date.from, end: date.to || date.from });
         
         const dataByDay = intervalDays.map(day => {
             const dayStart = startOfDay(day);
             const dayEnd = endOfDay(day);
-            const daySales = allOrders
+            const daySales = activeOrders
                 .filter(order => {
                     const orderDate = new Date(order.createdAt);
                     return orderDate >= dayStart && orderDate <= dayEnd;
@@ -500,7 +542,7 @@ export default function ReportsPage() {
         });
         return dataByDay;
 
-    }, [allOrders, date]);
+    }, [activeOrders, date]);
     
     const categoryChartData = React.useMemo(() => {
         return data.salesByCategory.map((cat, index) => ({

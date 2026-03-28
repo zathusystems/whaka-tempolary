@@ -6,7 +6,8 @@ import { Invoice } from '@/lib/db';
  */
 export async function generateInvoicePDF(invoice: Invoice, businessName: string, businessAddress: string) {
   // Dynamically import html2pdf to avoid SSR issues
-  const html2pdf = (await import('html2pdf.js')).default || (await import('html2pdf.js'));
+  const html2pdfModule = await import('html2pdf.js');
+  const html2pdf = ((html2pdfModule as any).default ?? html2pdfModule) as any;
 
   const generateInvoiceCopy = (copyType: 'customer' | 'business') => `
     <!DOCTYPE html>

@@ -832,16 +832,18 @@ export default function InventoryPage() {
 
       await db.transaction(
         'rw',
-        db.inventory,
-        db.purchaseHistory,
-        db.purchaseOrders,
-        db.wasteLog,
-        db.stockTransfers,
-        db.mraMappings,
-        db.inventorySnapshots,
-        db.stockAudits,
-        db.cart,
-        db.auditLog,
+        [
+          db.inventory,
+          db.purchaseHistory,
+          db.purchaseOrders,
+          db.wasteLog,
+          db.stockTransfers,
+          db.mraMappings,
+          db.inventorySnapshots,
+          db.stockAudits,
+          db.cart,
+          db.auditLog,
+        ],
         async () => {
           updateDeleteProgress('Queueing inventory items');
           for (const item of inventoryItems) {

@@ -2,10 +2,9 @@
 
 import React, { useState, useEffect } from 'react';
 import { format } from 'date-fns';
-import { Truck, AlertCircle, CheckCircle2, Loader2, ChevronDown, Cloud, CloudOff, Lock } from 'lucide-react';
-import { useLiveQuery } from 'dexie-react-hooks';
+import { Truck, Loader2, ChevronDown, Cloud, CloudOff, Download } from 'lucide-react';
 
-import { db, type PurchaseRecord, type PurchaseOrder } from '@/lib/db';
+import { db, type Business as BusinessRecord, type PurchaseRecord } from '@/lib/db';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -15,6 +14,7 @@ import { Separator } from '@/components/ui/separator';
 import { toast } from '@/hooks/use-toast';
 import { logAuditAction } from '@/lib/audit';
 import { syncService } from '@/lib/services/sync-service';
+import { generatePurchaseInvoicePDF } from '@/lib/purchase-invoice-pdf';
 import { PaginationControls, usePaginatedItems } from './pagination-controls';
 import {
   Dialog,
@@ -123,6 +123,14 @@ const resolveRecordGross = (record: PurchaseRecord, vatAmount: number): number =
     return method === 'exclusive' ? base + (vatAmount || 0) : base;
 };
 
+const resolveGroupStatus = (statuses: string[]): string => {
+    if (statuses.includes('Unpaid')) return 'Unpaid';
+    if (statuses.includes('Pending')) return 'Pending';
+    if (statuses.includes('Partial')) return 'Partial';
+    if (statuses.includes('Credit')) return 'Credit';
+    return 'Paid';
+};
+
 export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onReceiveStock, branchId, currency = 'USD' }: PurchasesTabProps) {
     const { user, business } = useAuth();
     const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
@@ -130,6 +138,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
     const [selectedPurchase, setSelectedPurchase] = useState<PurchaseGroup | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [businessCurrency, setBusinessCurrency] = useState(currency);
+    const [businessProfile, setBusinessProfile] = useState<BusinessRecord | null>(null);
+    const [isExportingInvoice, setIsExportingInvoice] = useState(false);
     const normalizedSearchTerm = searchTerm.trim().toLowerCase();
 
     // Load business currency from IndexedDB
@@ -138,6 +148,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
             if (business?.id) {
                 try {
                     const businessProfile = await db.business.get(business.id);
+                    setBusinessProfile(businessProfile ?? null);
                     if (businessProfile?.currency) {
                         setBusinessCurrency(businessProfile.currency);
                     }
@@ -215,7 +226,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                     supplierId: record.supplierId,
                     supplierName: record.supplierName,
                     paymentStatus: record.paymentStatus,
-                    amountDue: record.amountDue,
+                    amountDue: 0,
                     items: [],
                     totalCost: 0,
                     totalVat: 0,
@@ -226,7 +237,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                 groups[key].displayDate = recordDisplayDate;
                 groups[key].dateSortValue = recordSortDate;
             }
-            
+
             groups[key].items.push(record);
             const vatAmount = resolveRecordVat(record);
             const grossAmount = resolveRecordGross(record, vatAmount);
@@ -234,6 +245,11 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
             groups[key].totalCost += record.totalCost;
             groups[key].totalVat += vatAmount;
             groups[key].totalWithVat += grossAmount;
+            groups[key].amountDue += Number(record.amountDue || 0);
+            groups[key].paymentStatus = resolveGroupStatus([
+                groups[key].paymentStatus,
+                record.paymentStatus,
+            ].filter(Boolean));
         });
         
         return Object.values(groups).sort((a, b) => 
@@ -283,6 +299,44 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
     const handleViewDetails = (purchase: PurchaseGroup) => {
         setSelectedPurchase(purchase);
         setIsModalOpen(true);
+    };
+
+    const handleDownloadInvoicePdf = async () => {
+        if (!selectedPurchase) {
+            toast({
+                title: 'Select a purchase',
+                description: 'Choose a purchase to export as an invoice.',
+            });
+            return;
+        }
+
+        setIsExportingInvoice(true);
+        try {
+            await generatePurchaseInvoicePDF({
+                purchase: selectedPurchase,
+                business: {
+                    name: businessProfile?.name || business?.name || 'Business',
+                    address: businessProfile?.address,
+                    phone: businessProfile?.phone,
+                    email: businessProfile?.email,
+                    tin: businessProfile?.tin,
+                },
+                currencyCode: businessCurrency,
+            });
+            toast({
+                title: 'Invoice downloaded',
+                description: 'Purchase invoice PDF was downloaded successfully.',
+            });
+        } catch (error) {
+            console.error('[Purchases] Failed to export purchase invoice PDF:', error);
+            toast({
+                variant: 'destructive',
+                title: 'Download failed',
+                description: 'Could not generate the purchase invoice PDF. Please try again.',
+            });
+        } finally {
+            setIsExportingInvoice(false);
+        }
     };
 
     const getCurrencySymbol = () => {
@@ -428,21 +482,41 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
 
             {/* Purchase Details Modal */}
             <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-                <DialogContent className="sm:max-w-3xl max-h-[90vh] flex flex-col">
-                    <DialogHeader className="sticky top-0 bg-background z-10 pt-6">
-                        <DialogTitle>Purchase Order Details</DialogTitle>
-                        <DialogDescription>
-                            {selectedPurchase && `${selectedPurchase.supplierName} - ${selectedPurchase.displayDate}`}
-                        </DialogDescription>
+                <DialogContent className="sm:max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
+                    <DialogHeader className="sticky top-0 bg-background z-10 pt-6 pb-2">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                                <DialogTitle>Purchase Order Details</DialogTitle>
+                                <DialogDescription>
+                                    {selectedPurchase && `${selectedPurchase.supplierName} - ${selectedPurchase.displayDate}`}
+                                </DialogDescription>
+                            </div>
+                            <Button
+                                variant="outline"
+                                onClick={handleDownloadInvoicePdf}
+                                disabled={!selectedPurchase || isExportingInvoice}
+                            >
+                                {isExportingInvoice ? (
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                ) : (
+                                    <Download className="mr-2 h-4 w-4" />
+                                )}
+                                Download Invoice PDF
+                            </Button>
+                        </div>
                     </DialogHeader>
                     
                     {selectedPurchase && (
                         <div className="flex-1 overflow-y-auto -mx-6 px-6">
                             {/* Purchase Summary */}
-                            <div className="grid grid-cols-2 sm:grid-cols-6 gap-4 mb-6 p-4 bg-muted rounded-lg">
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6 p-4 bg-muted rounded-lg">
                                 <div>
                                     <p className="text-xs text-muted-foreground">Supplier</p>
                                     <p className="font-semibold">{selectedPurchase.supplierName}</p>
+                                </div>
+                                <div>
+                                    <p className="text-xs text-muted-foreground">Purchase Ref</p>
+                                    <p className="font-semibold break-all">{selectedPurchase.groupId}</p>
                                 </div>
                                 <div>
                                     <p className="text-xs text-muted-foreground">Date Received</p>
@@ -465,6 +539,10 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                                 <div>
                                     <p className="text-xs text-muted-foreground">Total (Incl VAT)</p>
                                     <p className="font-semibold text-lg">{getCurrencySymbol()} {selectedPurchase.totalWithVat.toFixed(2)}</p>
+                                </div>
+                                <div>
+                                    <p className="text-xs text-muted-foreground">Amount Due</p>
+                                    <p className="font-semibold text-lg">{getCurrencySymbol()} {selectedPurchase.amountDue.toFixed(2)}</p>
                                 </div>
                             </div>
 

@@ -822,12 +822,12 @@ export function MRAMappingsTab({ inventoryData, businessId, branchId, searchTerm
           </div>
 
           <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={closeEditDialog}
-              disabled={isSavingEdit}
-            >
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => closeEditDialog()}
+                disabled={isSavingEdit}
+              >
               Cancel
             </Button>
             <Button

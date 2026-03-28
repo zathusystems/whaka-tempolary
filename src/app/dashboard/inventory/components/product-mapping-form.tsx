@@ -239,7 +239,7 @@ export function ProductMappingForm({
               isDefault: Boolean(tax?.is_default ?? tax?.isDefault),
             };
           })
-          .filter((tax): tax is TaxRate => tax !== null);
+          .filter(Boolean) as TaxRate[];
 
         return formattedTaxes;
       };

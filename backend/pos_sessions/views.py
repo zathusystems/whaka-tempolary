@@ -320,7 +320,12 @@ class SessionViewSet(viewsets.ModelViewSet):
     serializer_class = SessionSerializer
     permission_classes = [IsAuthenticated]
 
-    def _get_scoped_queryset(self, include_user_filter=True, branch_reference=None):
+    def _get_scoped_queryset(
+        self,
+        include_user_filter=True,
+        branch_reference=None,
+        include_manager_full_scope=False,
+    ):
         """
         Resolve session visibility scope by role:
         - Owner / Admin staff: all sessions in their business scope
@@ -346,11 +351,16 @@ class SessionViewSet(viewsets.ModelViewSet):
         ).first()
 
         is_owner = len(owned_business_ids) > 0
-        is_admin_staff = bool(staff_profile and staff_profile.role == StaffRole.ADMIN)
+        full_scope_staff_roles = {StaffRole.ADMIN}
+        if include_manager_full_scope:
+            full_scope_staff_roles.add(StaffRole.MANAGER)
+        is_full_scope_staff = bool(staff_profile and staff_profile.role in full_scope_staff_roles)
         is_global_admin = bool(getattr(user, 'is_superuser', False))
-        can_view_all_sessions = is_owner or is_admin_staff or is_global_admin
+        can_view_all_sessions = is_owner or is_full_scope_staff or is_global_admin
 
-        if is_owner:
+        if is_global_admin:
+            queryset = Session.objects.all()
+        elif is_owner:
             queryset = Session.objects.filter(business_id__in=owned_business_ids)
         elif staff_profile and staff_profile.business_id:
             queryset = Session.objects.filter(business_id=staff_profile.business_id)
@@ -441,6 +451,23 @@ class SessionViewSet(viewsets.ModelViewSet):
         - branch_id (optional): if provided, limit to one branch.
         """
         queryset = self.get_queryset().filter(status='active').order_by('-started_at')
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def closed_list(self, request):
+        """
+        Get closed sessions in current visibility scope for history/reprint workflows.
+        Cashiers see only their own closed sessions; admins, managers, and owners can see all in scope.
+
+        Query params:
+        - branch_id (optional): if provided, limit to one branch.
+        - business_id (optional): if provided, limit to one business.
+        """
+        queryset = self._get_scoped_queryset(
+            include_user_filter=True,
+            include_manager_full_scope=True,
+        ).filter(status='closed').order_by('-started_at')
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 

@@ -135,7 +135,7 @@ export async function getStockBreakdown(itemId: string, branchId: string): Promi
   itemId: string;
   totalStock: number;
   batches: Array<{
-    batchId: number;
+    batchId: string | number;
     batchNumber?: string;
     quantityRemaining: number;
     expiryDate?: string;

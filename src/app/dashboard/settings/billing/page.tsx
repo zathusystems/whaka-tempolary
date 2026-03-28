@@ -1096,7 +1096,7 @@ export default function BillingPage() {
               <div className="p-3 bg-blue-50 border border-blue-200 dark:bg-blue-950/40 dark:border-blue-800 rounded-lg">
                 <p className="text-sm text-blue-900 dark:text-blue-100">
                   <strong>Features Total:</strong> {formatMoney(
-                    subscriptionFeatures.reduce((sum, f) => sum + parseFloat(f.feature_price), 0)
+                    subscriptionFeatures.reduce((sum, f) => sum + Number(f.feature_price || 0), 0)
                   )} / day
                 </p>
               </div>

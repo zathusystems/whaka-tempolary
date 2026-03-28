@@ -78,7 +78,11 @@ export interface Subscription {
 export interface Supplier {
     id: string;
     businessId?: string; // Reference to the business this supplier belongs to
+    branchId?: string;
     name: string;
+    contactPerson?: string;
+    createdAt?: string;
+    updatedAt?: string;
     email?: string;
     phone?: string;
     address?: string;
@@ -114,10 +118,13 @@ export interface InventoryItem {
     
     // Fields for ingredients
     stockUnits?: number; // This will now be a calculated sum of all batch quantities
+    stock_units?: number;
     unitType?: string;
+    unit_type?: string;
     reorderLevel?: number;
     cost?: number; // This will be the latest or average cost
     value?: number;
+    isRecipeIngredient?: boolean;
     // Local-only flag: initial stock was created via purchase records
     initialStockViaPurchase?: boolean;
     status?: 'In Stock' | 'Low Stock' | 'Out of Stock';
@@ -137,6 +144,9 @@ export interface InventoryItem {
     isProduced?: boolean; // For restaurant/bar: true if made in-house, false if purchased
     onMenu?: boolean;
     image?: string; // Base64 encoded image or image URL
+    is_mra_ready?: boolean;
+    price_locked?: boolean;
+    tax_locked?: boolean;
     
     // Bar & Liquor specific fields
     isSoldInPortions?: boolean; // For bar/liquor: true if sold in portions (shots, tots, etc)
@@ -150,7 +160,7 @@ export interface InventoryItem {
 }
 
 export interface PurchaseRecord {
-    id?: number;
+    id?: string | number;
     purchaseOrderId?: string; // ID of the purchase order this item belongs to
     sessionId?: string; // Link to the session when stock was received
     referenceNumber?: string; // Supplier reference / invoice number
@@ -172,6 +182,8 @@ export interface PurchaseRecord {
     batchNumber?: string;
     expiryDate?: string;
     receivedDate: string; // ISO string
+    createdAt?: string;
+    updatedAt?: string;
     // Sync fields
     _dirty?: boolean;
     _operation?: 'create' | 'update' | 'delete';
@@ -181,6 +193,7 @@ export interface PurchaseRecord {
 export interface OrderItem {
     id: string;
     inventoryItemId?: string; // Reference to the original inventory item
+    inventory_item_id?: string;
     name: string;
     quantity: number;
     notes?: string;
@@ -213,7 +226,7 @@ export interface Order {
     pumpName?: string; // Fuel pump used for this order (optional)
     orderType?: 'sale' | 'return' | 'adjustment'; // Type of order
     items: OrderItem[];
-    status: 'New' | 'Preparing' | 'Ready' | 'Completed' | 'Voided' | 'Cancelled';
+    status: 'New' | 'Preparing' | 'Ready' | 'Completed' | 'Voided' | 'Cancelled' | 'Refunded' | 'Partially Refunded';
     subtotal: number;
     total: number;
     tax?: number; // Tax amount for this order (legacy field)
@@ -269,6 +282,21 @@ export interface Order {
     createdAt: string; // ISO string
     updatedAt: string; // ISO string
     // Sync fields
+    _dirty?: boolean;
+    _operation?: 'create' | 'update' | 'delete';
+    _synced_at?: string;
+}
+
+export interface Refund {
+    id: string;
+    branchId: string;
+    orderId: string;
+    orderNumber: number;
+    items: OrderItem[];
+    total: number;
+    reason?: string;
+    refundedBy: string;
+    refundedAt: string;
     _dirty?: boolean;
     _operation?: 'create' | 'update' | 'delete';
     _synced_at?: string;
@@ -336,6 +364,7 @@ export interface Session {
     totalOnAccountSales: number;
     totalOtherSales: number;
     totalTips: number;
+    totalRefunds?: number;
     startedAt: string; // ISO String
     closedAt?: string; // ISO String
     // Sync fields
@@ -352,7 +381,7 @@ export interface Staff {
     branchId: string;
     assignedProductType?: string;
     isFuelAttendant?: boolean;
-    password: string; // For POS login
+    password?: string; // For POS login
 }
 
 export interface StockTakeItem {
@@ -385,7 +414,7 @@ export interface Expense {
     title: string;
     category: 'Utilities' | 'Rent' | 'Salaries' | 'Supplies' | 'Marketing' | 'Maintenance' | 'Other';
     amount: number;
-    date: string; // ISO String
+    date: string | Date; // ISO string in storage, Date in edit forms
     notes?: string;
     status: 'Pending' | 'Approved' | 'Rejected';
     createdBy: string;
@@ -447,18 +476,18 @@ export interface Invoice {
 
 export interface TaxRate {
     id: string;
-    businessId: string; // Reference to the business this tax rate belongs to
+    businessId?: string; // Reference to the business this tax rate belongs to
     name: string;
     rate: number; // Stored as a percentage, e.g., 16.50 for 16.50%
     taxType: 'VAT_STANDARD' | 'VAT_ZERO' | 'VAT_EXEMPT';
-    isDefault: boolean;
-    effectiveFrom: string; // ISO date string
+    isDefault?: boolean;
+    effectiveFrom?: string; // ISO date string
     effectiveTo?: string; // ISO date string, nullable
-    isActive: boolean;
+    isActive?: boolean;
     createdBy?: string; // User ID who created this tax rate
     createdByName?: string; // User's full name
-    createdAt: string; // ISO timestamp
-    updatedAt: string; // ISO timestamp
+    createdAt?: string; // ISO timestamp
+    updatedAt?: string; // ISO timestamp
     // Sync fields
     _dirty?: boolean;
     _operation?: 'create' | 'update' | 'delete';
@@ -467,6 +496,7 @@ export interface TaxRate {
 
 export interface StockTransfer {
     id: string;
+    branchId?: string;
     fromBranchId: string;
     fromBranchName: string;
     toBranchId: string;
@@ -476,6 +506,9 @@ export interface StockTransfer {
     quantity: number;
     initiatedBy: string;
     createdAt: string; // ISO string
+    _dirty?: boolean;
+    _operation?: 'create' | 'update' | 'delete';
+    _synced_at?: string;
 }
 
 export interface WasteRecord {
@@ -489,9 +522,13 @@ export interface WasteRecord {
     unit?: string;
     cost: number;
     reason: 'Expired' | 'Damaged' | 'Spoilage' | 'Error' | 'Other';
+    affectsTax?: boolean;
     notes?: string;
+    approvedBy?: string;
+    approvedAt?: string;
     recordedBy: string;
     recordedAt: string; // ISO string
+    createdAt?: string;
     // Sync fields
     _dirty?: boolean;
     _operation?: 'create' | 'update' | 'delete';
@@ -520,6 +557,7 @@ export interface PurchaseOrderItem {
 export interface PurchaseOrder {
     id: string;
     orderNumber: string;
+    order_number?: string;
     supplierId?: string;
     supplierName?: string;
     referenceNumber?: string; // Supplier reference / invoice number
@@ -560,9 +598,10 @@ export type ActionType =
     | 'SESSION_START' | 'SESSION_END'
     | 'ITEM_CREATE' | 'ITEM_UPDATE' | 'ITEM_DELETE'
     | 'ORDER_CREATE' | 'ORDER_STATUS_UPDATE' | 'ORDER_REFUND' | 'ORDER_VOID'
-    | 'STOCK_RECEIVE' | 'STOCK_TRANSFER' | 'STOCK_WASTE' | 'STOCK_AUDIT_SUBMIT' | 'STOCK_AUDIT_APPROVE' | 'STOCK_AUDIT_REJECT'
+    | 'STOCK_RECEIVE' | 'STOCK_RECEIVE_UPDATE' | 'STOCK_RECEIVE_DELETE' | 'STOCK_TRANSFER' | 'STOCK_WASTE' | 'STOCK_AUDIT_SUBMIT' | 'STOCK_AUDIT_APPROVE' | 'STOCK_AUDIT_REJECT'
     | 'EXPENSE_CREATE' | 'EXPENSE_APPROVE' | 'EXPENSE_REJECT'
-    | 'STAFF_CREATE' | 'STAFF_UPDATE' | 'STAFF_DELETE';
+    | 'STAFF_CREATE' | 'STAFF_UPDATE' | 'STAFF_DELETE'
+    | 'SUPPLIER_CREATE' | 'SUPPLIER_UPDATE' | 'SUPPLIER_DELETE';
 
 export interface AuditLog {
     id: string; // AUDIT-timestamp
@@ -571,7 +610,21 @@ export interface AuditLog {
     userName: string;
     branchId: string;
     actionType: ActionType;
-    entityType: 'Session' | 'InventoryItem' | 'Order' | 'Purchase' | 'Expense' | 'Staff' | 'StockTake' | 'Waste' | 'Refund';
+    entityType:
+        | 'Session'
+        | 'InventoryItem'
+        | 'Order'
+        | 'Purchase'
+        | 'PurchaseOrder'
+        | 'PurchaseRecord'
+        | 'Expense'
+        | 'Staff'
+        | 'StockTake'
+        | 'StockTransfer'
+        | 'Waste'
+        | 'WasteRecord'
+        | 'Refund'
+        | 'Supplier';
     entityId: string;
     details: Record<string, any>;
 }
@@ -586,13 +639,20 @@ export interface CartItem extends InventoryItem {
 export interface MRAMapping {
     id: string;
     inventoryItemId: string;
+    inventory_item_id?: string;
     branchId?: string;
     mraProductCode: string;
     mraProductName: string;
     mraTaxType: 'standard' | 'zero' | 'exempt';
+    mra_tax_type?: 'standard' | 'zero' | 'exempt';
     mraTaxRate: number;
+    mra_tax_rate?: number;
     mraUnitMeasure: string;
     taxCalculationMethod: 'inclusive' | 'exclusive';
+    taxType?: string;
+    tax_type?: string;
+    taxRate?: number;
+    tax_rate?: number;
     isApproved: boolean;
     approvedAt?: string;
     mraSynced: boolean;
@@ -649,6 +709,7 @@ export class HandyPosDatabase extends Dexie {
     purchaseHistory!: EntityTable<PurchaseRecord, 'id'>;
     purchaseOrders!: EntityTable<PurchaseOrder, 'id'>;
     orders!: EntityTable<Order, 'id'>;
+    refunds!: EntityTable<Refund, 'id'>;
     takeOrders!: EntityTable<TakeOrder, 'id'>;
     sessions!: EntityTable<Session, 'id'>;
     staff!: EntityTable<Staff, 'id'>;
@@ -672,12 +733,13 @@ export class HandyPosDatabase extends Dexie {
     constructor() {
         super('handypos');
 
-        this.version(35).stores({
+        this.version(36).stores({
             inventory: 'id, name, category, itemType, supplier, status, onMenu, branchId, _dirty, [branchId+itemType], &[branchId+itemType+onMenu]',
             suppliers: 'id, name, businessId, _dirty, [businessId+name]',
             purchaseHistory: '++id, productId, supplierId, receivedDate, branchId, paymentStatus, sessionId, _dirty, &[branchId+receivedDate], [branchId+productId+receivedDate], [sessionId]',
             purchaseOrders: 'id, orderNumber, status, branchId, supplierId, createdAt, _dirty, [branchId+status], [branchId+createdAt]',
             orders: 'id, orderNumber, status, createdAt, updatedAt, branchId, sessionId, _dirty, &[branchId+status+createdAt]',
+            refunds: 'id, branchId, orderId, refundedAt, _dirty',
             takeOrders: 'id, orderNumber, status, branchId, createdAt, _dirty, [branchId+status], [branchId+createdAt]',
             sessions: 'id, branchId, status, userId, startedAt, _dirty, [branchId+status], [branchId+userId+status]',
             staff: 'id, name, email, role, branchId',

@@ -51,6 +51,7 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from '@/hooks/use-toast';
 import { Badge } from '@/components/ui/badge';
+import { generatePurchaseInvoicePDF } from '@/lib/purchase-invoice-pdf';
 
 
 const resolveStoredBusinessId = (): string => {
@@ -164,6 +165,7 @@ const resolveRecordGross = (record: PurchaseRecord, vatAmount: number): number =
 
 type SupplierPurchaseGroup = {
     groupId: string;
+    supplierName: string;
     displayDate: string;
     dateSortValue: number;
     paymentStatus: string;
@@ -379,7 +381,7 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
     const [isExporting, setIsExporting] = useState(false);
     const [isPurchaseDetailOpen, setIsPurchaseDetailOpen] = useState(false);
     const [selectedPurchase, setSelectedPurchase] = useState<SupplierPurchaseGroup | null>(null);
-    const { user } = useAuth();
+    const { user, business } = useAuth();
     const { format: formatCurrency } = useCurrency();
     
     // Note: Purchase history is stored locally in purchaseHistory table
@@ -419,6 +421,14 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
         },
         [supplier.name, activeBranchId]
     );
+
+    const businessProfile = useLiveQuery(
+        async () => {
+            if (!business?.id) return undefined;
+            return db.business.get(business.id);
+        },
+        [business?.id]
+    );
     
     const amountOwed = purchaseHistory?.filter(p => p.paymentStatus === 'Unpaid').reduce((acc, p) => acc + p.amountDue, 0) || 0;
     const purchaseGroups = useMemo<SupplierPurchaseGroup[]>(() => {
@@ -443,6 +453,7 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
             if (!groups[groupId]) {
                 groups[groupId] = {
                     groupId,
+                    supplierName: supplier.name,
                     displayDate: formatDisplayDate(
                         record.receivedDate,
                         (record as any).createdAt,
@@ -636,26 +647,29 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
 
         setIsExporting(true);
         try {
-            const html2pdf = (await import('html2pdf.js')).default || (await import('html2pdf.js'));
-            const container = document.createElement('div');
-            container.innerHTML = buildPurchaseDetailHtml(selectedPurchase);
-            const safeSupplier = supplier.name.replace(/\s+/g, '_');
-            const safeDate = selectedPurchase.displayDate.replace(/[^\w-]+/g, '_');
-            const filename = `Purchase_${safeSupplier}_${safeDate}.pdf`;
-            await html2pdf()
-                .set({
-                    margin: 0.3,
-                    filename,
-                    image: { type: 'jpeg', quality: 0.98 },
-                    html2canvas: { scale: 2 },
-                    jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
-                })
-                .from(container)
-                .save();
-            toast({ title: 'PDF downloaded', description: 'Purchase exported successfully.' });
+            const vatTotal =
+                typeof selectedPurchase.totalVat === 'number' && selectedPurchase.totalVat > 0
+                    ? selectedPurchase.totalVat
+                    : selectedPurchase.vatAmount ?? 0;
+
+            await generatePurchaseInvoicePDF({
+                purchase: {
+                    ...selectedPurchase,
+                    totalVat: vatTotal,
+                },
+                business: {
+                    name: businessProfile?.name || business?.name || 'Business',
+                    address: businessProfile?.address,
+                    phone: businessProfile?.phone,
+                    email: businessProfile?.email,
+                    tin: businessProfile?.tin,
+                },
+                currencyCode: businessProfile?.currency || business?.currency || 'USD',
+            });
+            toast({ title: 'Invoice downloaded', description: 'Purchase invoice PDF was downloaded successfully.' });
         } catch (error) {
-            console.error('[Supplier Detail] Failed to export PDF:', error);
-            toast({ variant: 'destructive', title: 'PDF export failed', description: 'Please try again.' });
+            console.error('[Supplier Detail] Failed to export purchase invoice PDF:', error);
+            toast({ variant: 'destructive', title: 'Download failed', description: 'Could not generate the purchase invoice PDF. Please try again.' });
         } finally {
             setIsExporting(false);
         }
@@ -934,7 +948,7 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
                                         ) : (
                                             <Download className="mr-2 h-4 w-4" />
                                         )}
-                                        Download PDF
+                                        Download Invoice PDF
                                     </Button>
                                 </div>
                             </div>

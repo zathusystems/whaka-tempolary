@@ -124,18 +124,48 @@ class StaffViewSet(viewsets.ModelViewSet):
                 {'error': 'You do not have permission to update this staff member.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-        
-        # Check if user is trying to update someone else's role/business
+
         instance = self.get_object()
-        user_staff = Staff.objects.get(user=request.user)
-        
-        # Only Admin can change role or business
-        if user_staff.role != StaffRole.ADMIN and instance.id != user_staff.id:
+        is_business_owner = instance.business.owner_id == request.user.id
+        requester_staff = None
+
+        if not is_business_owner:
+            requester_staff = Staff.objects.filter(
+                user=request.user,
+                business=instance.business,
+                is_active=True,
+            ).first()
+
+            if not requester_staff:
+                return Response(
+                    {'error': 'You do not have permission to update this staff member.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+        # Non-admin staff can only update their own basic profile details.
+        if requester_staff and requester_staff.role != StaffRole.ADMIN and instance.id != requester_staff.id:
             return Response(
                 {'error': 'You can only update your own profile.'},
                 status=status.HTTP_403_FORBIDDEN
             )
-        
+
+        if requester_staff and requester_staff.role != StaffRole.ADMIN:
+            restricted_fields = {
+                'role',
+                'branch',
+                'is_active',
+                'assigned_product_type',
+                'is_fuel_attendant',
+            }
+            attempted_restricted_fields = sorted(
+                field_name for field_name in restricted_fields if field_name in request.data
+            )
+            if attempted_restricted_fields:
+                return Response(
+                    {'error': 'You do not have permission to change role, branch, or staff status.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):

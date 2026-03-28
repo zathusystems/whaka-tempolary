@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Example usage of authenticated fetch with offline-first support
  * 

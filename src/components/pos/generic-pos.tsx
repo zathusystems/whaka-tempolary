@@ -65,7 +65,7 @@ export interface PosProps {
   emptyStateTitle?: string;
   emptyStateDescription?: string;
   cart: CartItem[];
-  onAddToCart: (item: InventoryItem, quantity?: number, price?: number) => Promise<void>;
+  onAddToCart: (item: InventoryItem, quantity?: number, price?: number) => void | Promise<void>;
   onUpdateQuantity: (itemId: string, quantity: number) => void;
   onClearCart: () => void;
   onCheckout: (paymentMethod: PaymentMethod, tip: number, buyerDetails?: BuyerDetails) => Promise<Order | null>;
@@ -1880,10 +1880,10 @@ const PaymentDialog = ({
                 <div>
                     <h4 className="text-sm font-medium mb-2">Payment Method</h4>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                       <Button size="md" variant={selectedPaymentMethod === 'Cash' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Cash')} className="text-sm h-11" disabled={isProcessingPayment}><Wallet className="mr-1 h-4 w-4"/>Cash</Button>
-                       <Button size="md" variant={selectedPaymentMethod === 'Card' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Card')} className="text-sm h-11" disabled={isProcessingPayment}><CreditCard className="mr-1 h-4 w-4"/>Card</Button>
-                       <Button size="md" variant={selectedPaymentMethod === 'Mobile Money' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Mobile Money')} className="text-sm h-11" disabled={isProcessingPayment}><Smartphone className="mr-1 h-4 w-4"/>Mobile</Button>
-                       <Button size="md" variant={selectedPaymentMethod === 'On Account' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('On Account')} className="text-sm h-11" disabled={isProcessingPayment}><UserPlus className="mr-1 h-4 w-4"/>Account</Button>
+                       <Button size="default" variant={selectedPaymentMethod === 'Cash' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Cash')} className="text-sm h-11" disabled={isProcessingPayment}><Wallet className="mr-1 h-4 w-4"/>Cash</Button>
+                       <Button size="default" variant={selectedPaymentMethod === 'Card' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Card')} className="text-sm h-11" disabled={isProcessingPayment}><CreditCard className="mr-1 h-4 w-4"/>Card</Button>
+                       <Button size="default" variant={selectedPaymentMethod === 'Mobile Money' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Mobile Money')} className="text-sm h-11" disabled={isProcessingPayment}><Smartphone className="mr-1 h-4 w-4"/>Mobile</Button>
+                       <Button size="default" variant={selectedPaymentMethod === 'On Account' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('On Account')} className="text-sm h-11" disabled={isProcessingPayment}><UserPlus className="mr-1 h-4 w-4"/>Account</Button>
                     </div>
                 </div>
 

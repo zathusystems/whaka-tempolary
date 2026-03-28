@@ -20,9 +20,12 @@ export interface ESCPOSConfig {
   lineHeight: number;
 }
 
+type WebBluetoothDevice = any;
+type WebBluetoothRemoteGATTCharacteristic = any;
+
 class ESCPOSService {
-  private device: BluetoothDevice | null = null;
-  private characteristic: BluetoothRemoteGATTCharacteristic | null = null;
+  private device: WebBluetoothDevice | null = null;
+  private characteristic: WebBluetoothRemoteGATTCharacteristic | null = null;
   private config: ESCPOSConfig = {
     paperWidth: 80,
     charPerLine: 42, // 80mm / 2 pixels per char
@@ -49,7 +52,7 @@ class ESCPOSService {
   /**
    * Request Bluetooth device
    */
-  async requestDevice(): Promise<BluetoothDevice | null> {
+  async requestDevice(): Promise<WebBluetoothDevice | null> {
     try {
       if (!this.supportsWebBluetooth()) {
         throw new Error('Web Bluetooth API not supported in this browser');
@@ -87,7 +90,7 @@ class ESCPOSService {
   /**
    * Connect to Bluetooth printer
    */
-  async connect(device?: BluetoothDevice): Promise<boolean> {
+  async connect(device?: WebBluetoothDevice): Promise<boolean> {
     try {
       const targetDevice = device || this.device;
       if (!targetDevice) {

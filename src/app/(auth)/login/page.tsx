@@ -128,7 +128,7 @@ export default function LoginPage() {
     return parsed ? parsed : null;
   };
 
-const normalizeBusiness = (businessResponse: any): Business | null => {
+  const normalizeBusiness = (businessResponse: any): Business | null => {
     if (!businessResponse?.id || !businessResponse?.name) return null;
     return {
       id: String(businessResponse.id),
@@ -139,20 +139,20 @@ const normalizeBusiness = (businessResponse: any): Business | null => {
       phone: businessResponse.phone,
       address: businessResponse.address,
       website: businessResponse.website,
-};
+    };
+  };
 
-const normalizePumpList = (value: unknown): string[] => {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  const normalized: string[] = [];
-  for (const entry of value) {
-    const pump = String(entry ?? '').trim();
-    if (!pump || seen.has(pump)) continue;
-    seen.add(pump);
-    normalized.push(pump);
-  }
-  return normalized;
-};
+  const normalizePumpList = (value: unknown): string[] => {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const entry of value) {
+      const pump = String(entry ?? '').trim();
+      if (!pump || seen.has(pump)) continue;
+      seen.add(pump);
+      normalized.push(pump);
+    }
+    return normalized;
   };
 
   const buildAuthUser = (

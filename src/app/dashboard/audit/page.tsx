@@ -44,6 +44,8 @@ const actionDisplay: Record<AuditLog['actionType'], { label: string; variant: 'd
     ORDER_REFUND: { label: 'Order Refund', variant: 'destructive' },
     ORDER_VOID: { label: 'Order Void', variant: 'destructive' },
     STOCK_RECEIVE: { label: 'Stock Receive', variant: 'default' },
+    STOCK_RECEIVE_UPDATE: { label: 'Stock Receive Update', variant: 'secondary' },
+    STOCK_RECEIVE_DELETE: { label: 'Stock Receive Delete', variant: 'destructive' },
     STOCK_TRANSFER: { label: 'Stock Transfer', variant: 'secondary' },
     STOCK_WASTE: { label: 'Stock Waste', variant: 'destructive' },
     STOCK_AUDIT_SUBMIT: { label: 'Audit Submit', variant: 'secondary' },
@@ -55,6 +57,9 @@ const actionDisplay: Record<AuditLog['actionType'], { label: string; variant: 'd
     STAFF_CREATE: { label: 'Staff Create', variant: 'default' },
     STAFF_UPDATE: { label: 'Staff Update', variant: 'secondary' },
     STAFF_DELETE: { label: 'Staff Delete', variant: 'destructive' },
+    SUPPLIER_CREATE: { label: 'Supplier Create', variant: 'default' },
+    SUPPLIER_UPDATE: { label: 'Supplier Update', variant: 'secondary' },
+    SUPPLIER_DELETE: { label: 'Supplier Delete', variant: 'destructive' },
 };
 
 

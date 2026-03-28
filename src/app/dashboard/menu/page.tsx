@@ -872,7 +872,7 @@ const MenuConfigTab = ({ activeBranchId }: { activeBranchId: string | null }) =>
                   if (!activeBranchId) return;
                   
                   // Get business ID from IndexedDB with fallbacks
-                  let businessId: number | null = null;
+                  let businessId: string | null = null;
                   
                   // Try to get from IndexedDB first
                   let business = await db.business.get('main-business');

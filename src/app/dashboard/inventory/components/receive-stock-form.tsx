@@ -1215,7 +1215,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                 </FormItem>
                                             )}
                                         />
-                                        <FormField control={control} name={`items.${index}.quantity`} rules={{ required: true, valueAsNumber: true, min: 1 }} render={({ field }) => (
+                                        <FormField control={control} name={`items.${index}.quantity`} rules={{ required: true, min: 1 }} render={({ field }) => (
                                             <FormItem>
                                                 <FormLabel className="text-xs">Quantity</FormLabel>
                                                 <FormControl>
@@ -1229,7 +1229,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                 </FormControl>
                                             </FormItem>
                                         )} />
-                                        <FormField control={control} name={`items.${index}.cost`} rules={{ required: true, valueAsNumber: true, min: 0 }} render={({ field }) => (
+                                        <FormField control={control} name={`items.${index}.cost`} rules={{ required: true, min: 0 }} render={({ field }) => (
                                             <FormItem>
                                                 <FormLabel className="text-xs">Cost/Unit</FormLabel>
                                                 <FormControl>

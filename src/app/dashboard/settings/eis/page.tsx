@@ -1201,7 +1201,9 @@ export default function EISSettingsPage() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={onRefreshTerminalStatus}
+                      onClick={() => {
+                        void onRefreshTerminalStatus();
+                      }}
                       disabled={isRefreshingTerminalStatus}
                     >
                       {isRefreshingTerminalStatus ? (

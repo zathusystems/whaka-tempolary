@@ -2,6 +2,8 @@ import { format } from 'date-fns';
 
 import type { Session } from '@/lib/db';
 
+export const SESSION_END_REPORT_TITLE = 'Session End Report';
+
 export type ZReportPaymentBreakdown = {
   cash: number;
   card: number;
@@ -325,7 +327,7 @@ export const buildZReportPrintHtml = ({
   const ordersWithSignature = toFiniteNumber(eisSummary.ordersWithSignature);
 
   const lines: string[] = [
-    'SESSION Z REPORT',
+    SESSION_END_REPORT_TITLE.toUpperCase(),
     `Session ID: ${session.id}`,
     `Generated: ${format(generatedAt, 'PPpp')}`,
     `Started: ${formatSessionDate(session.startedAt)}`,
@@ -368,7 +370,7 @@ export const buildZReportPrintHtml = ({
     `First Submission: ${formatSessionDate(eisSummary.firstSubmissionAt)}`,
     `Last Submission: ${formatSessionDate(eisSummary.lastSubmissionAt)}`,
     '--------------------------------',
-    'END OF Z REPORT',
+    `END OF ${SESSION_END_REPORT_TITLE.toUpperCase()}`,
   ];
 
   return `

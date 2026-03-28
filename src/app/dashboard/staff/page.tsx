@@ -561,6 +561,9 @@ export default function StaffPage() {
         branchId: normalizeBranchId(
           backendCurrentUserStaff?.branchId || user.branchId || storedActiveBranchId
         ),
+        isFuelAttendant: Boolean(
+          backendCurrentUserStaff?.isFuelAttendant || user.isFuelAttendant
+        ),
         password: '',
       }
     : null;

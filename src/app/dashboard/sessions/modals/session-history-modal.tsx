@@ -144,8 +144,8 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                   ? `?business_id=${encodeURIComponent(String(user.businessId))}`
                   : '';
                 const initialUrl = normalizedBranchId
-                  ? `/sessions/sessions/?branch_id=${encodeURIComponent(normalizedBranchId)}${businessQuery ? `&${businessQuery.slice(1)}` : ''}`
-                  : `/sessions/sessions/${businessQuery}`;
+                  ? `/sessions/sessions/closed_list/?branch_id=${encodeURIComponent(normalizedBranchId)}${businessQuery ? `&${businessQuery.slice(1)}` : ''}`
+                  : `/sessions/sessions/closed_list/${businessQuery}`;
 
                 console.log('[Sessions History] Fetching sessions from backend:', { activeBranchId, normalizedBranchId, initialUrl });
 
@@ -300,7 +300,7 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
 
     return (
         <Dialog open={isOpen} onOpenChange={onOpenChange}>
-            <DialogContent className="sm:max-w-4xl max-h-[90vh] flex flex-col">
+            <DialogContent className="sm:max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
                 <DialogHeader>
                     <DialogTitle>Session History</DialogTitle>
                     <DialogDescription>Review details from previously closed sessions for this branch.</DialogDescription>

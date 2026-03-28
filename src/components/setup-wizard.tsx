@@ -99,6 +99,7 @@ export function SetupWizard() {
     const normalized = String(value || "").trim().toUpperCase();
     return normalized === "MWK" ? "MWK" : "USD";
   };
+  const isDeliveryEnabledForPlan = (planId: string): boolean => planId === "enterprise";
   const toNumber = (value: unknown, fallback = 0): number => {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
@@ -271,7 +272,7 @@ export function SetupWizard() {
         
         keysToRemove.forEach(key => localStorage.removeItem(key));
 
-        await db.transaction('rw', db.business, db.subscriptions, db.inventory, db.expenses, db.stockTakes, db.purchaseHistory, async () => {
+        await db.transaction('rw', [db.business, db.subscriptions, db.inventory, db.expenses, db.stockTakes, db.purchaseHistory], async () => {
           await db.business.clear();
           await db.subscriptions.clear();
           await db.inventory.clear();
@@ -565,7 +566,7 @@ export function SetupWizard() {
               enable_invoicing: plan.id !== 'starter',
               enable_online_menu: plan.id !== 'starter',
               enable_online_ordering: plan.id !== 'starter',
-              enable_delivery: plan.id === 'enterprise',
+              enable_delivery: isDeliveryEnabledForPlan(plan.id),
               enable_kitchen: plan.id !== 'starter',
               enable_expense_management: plan.id !== 'starter',
               enable_supplier_management: plan.id !== 'starter',
@@ -1005,7 +1006,7 @@ export function SetupWizard() {
                           enable_invoicing: pendingPlan.id !== 'starter',
                           enable_online_menu: pendingPlan.id !== 'starter',
                           enable_online_ordering: pendingPlan.id !== 'starter',
-                          enable_delivery: pendingPlan.id === 'enterprise',
+                          enable_delivery: isDeliveryEnabledForPlan(pendingPlan.id),
                           enable_kitchen: pendingPlan.id !== 'starter',
                           enable_expense_management: pendingPlan.id !== 'starter',
                           enable_supplier_management: pendingPlan.id !== 'starter',

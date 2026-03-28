@@ -12,6 +12,7 @@ from inventory.models import InventoryItem, MRAProductMapping, PurchaseOrder, Pu
 from pos_sessions.correction_views import VoidTransactionViewSet
 from pos_sessions.models import Order, OrderItem, Session
 from pos_sessions.sync_views import decrement_inventory_for_order
+from staff.models import Staff, StaffRole
 
 User = get_user_model()
 
@@ -527,3 +528,119 @@ class SyncPushOrderTests(TestCase):
         self.assertEqual(Order.objects.filter(id=order_id).count(), 0)
         self.assertTrue(response.data['results']['errors'])
         self.assertIn('unsynced MRA mappings', response.data['results']['errors'][0]['error'])
+
+
+class SessionVisibilityTests(TestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            email='session-owner@example.com',
+            password='test12345',
+        )
+        self.superuser = User.objects.create_superuser(
+            email='super@example.com',
+            password='test12345',
+        )
+        self.business = Business.objects.create(
+            owner=self.owner,
+            name='Session Visibility Business',
+        )
+        self.branch = Branch.objects.create(
+            business=self.business,
+            name='Main Branch',
+            address='123 Main St',
+            city='Lilongwe',
+            country='Malawi',
+        )
+        self.closed_session = Session.objects.create(
+            business=self.business,
+            branch=self.branch,
+            user=self.owner,
+            status='closed',
+            opening_float=Decimal('100.00'),
+            expected_cash=Decimal('180.00'),
+            actual_cash=Decimal('180.00'),
+            closing_float=Decimal('180.00'),
+            difference=Decimal('0.00'),
+            total_sales=Decimal('80.00'),
+            total_cash_sales=Decimal('80.00'),
+            started_at=timezone.now() - timedelta(hours=4),
+            closed_at=timezone.now() - timedelta(hours=1),
+        )
+        self.client = APIClient()
+
+    def test_superuser_can_list_closed_sessions_without_business_assignment(self):
+        self.client.force_authenticate(user=self.superuser)
+
+        response = self.client.get(f'/api/sessions/sessions/?branch_id={self.branch.id}')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json() if hasattr(response, 'json') else response.data
+        session_rows = payload.get('results', payload) if isinstance(payload, dict) else payload
+        returned_ids = {str(row['id']) for row in session_rows}
+        self.assertIn(str(self.closed_session.id), returned_ids)
+
+    def test_non_admin_staff_sees_only_own_closed_sessions_in_history(self):
+        cashier_user = User.objects.create_user(
+            email='cashier@example.com',
+            password='test12345',
+        )
+        Staff.objects.create(
+            business=self.business,
+            branch=self.branch,
+            user=cashier_user,
+            name='Cashier User',
+            email='cashier@example.com',
+            role=StaffRole.CASHIER,
+            is_active=True,
+        )
+        cashier_closed_session = Session.objects.create(
+            business=self.business,
+            branch=self.branch,
+            user=cashier_user,
+            status='closed',
+            opening_float=Decimal('50.00'),
+            expected_cash=Decimal('90.00'),
+            actual_cash=Decimal('90.00'),
+            closing_float=Decimal('90.00'),
+            difference=Decimal('0.00'),
+            total_sales=Decimal('40.00'),
+            total_cash_sales=Decimal('40.00'),
+            started_at=timezone.now() - timedelta(hours=3),
+            closed_at=timezone.now() - timedelta(minutes=30),
+        )
+
+        self.client.force_authenticate(user=cashier_user)
+
+        response = self.client.get(f'/api/sessions/sessions/closed_list/?branch_id={self.branch.id}')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json() if hasattr(response, 'json') else response.data
+        session_rows = payload.get('results', payload) if isinstance(payload, dict) else payload
+        returned_ids = {str(row['id']) for row in session_rows}
+        self.assertIn(str(cashier_closed_session.id), returned_ids)
+        self.assertNotIn(str(self.closed_session.id), returned_ids)
+
+    def test_manager_can_see_business_closed_sessions_in_history(self):
+        manager_user = User.objects.create_user(
+            email='manager@example.com',
+            password='test12345',
+        )
+        Staff.objects.create(
+            business=self.business,
+            branch=self.branch,
+            user=manager_user,
+            name='Manager User',
+            email='manager@example.com',
+            role=StaffRole.MANAGER,
+            is_active=True,
+        )
+
+        self.client.force_authenticate(user=manager_user)
+
+        response = self.client.get(f'/api/sessions/sessions/closed_list/?branch_id={self.branch.id}')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json() if hasattr(response, 'json') else response.data
+        session_rows = payload.get('results', payload) if isinstance(payload, dict) else payload
+        returned_ids = {str(row['id']) for row in session_rows}
+        self.assertIn(str(self.closed_session.id), returned_ids)

@@ -716,7 +716,7 @@ export const RecordWasteForm = ({
                  <FormField
                     control={control}
                     name="batchId"
-                    rules={{ required: "Please select a batch.", valueAsNumber: true, min: { value: 1, message: "Please select a batch." } }}
+                    rules={{ required: "Please select a batch.", min: { value: 1, message: "Please select a batch." } }}
                     render={({ field }) => (
                         <FormItem>
                             <FormLabel>Select Batch to Discard</FormLabel>
@@ -829,7 +829,7 @@ export const RecordWasteForm = ({
                      <FormField
                         control={control}
                         name="quantity"
-                        rules={{ required: "Quantity is required.", valueAsNumber: true, min: { value: 1, message: "Quantity must be at least 1."} }}
+                        rules={{ required: "Quantity is required.", min: { value: 1, message: "Quantity must be at least 1."} }}
                         render={({ field }) => (
                             <FormItem>
                                 <FormLabel>Quantity Wasted</FormLabel>

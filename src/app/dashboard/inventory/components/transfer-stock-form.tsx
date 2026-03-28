@@ -137,7 +137,7 @@ export const TransferStockForm = ({
                         branchId: data.toBranchId, 
                         stockUnits: quantity,
                         _dirty: true,
-                        _operation: 'create'
+                        _operation: 'create' as const
                     };
                     await db.inventory.add(newItem);
                     destinationItemId = newItem.id;
@@ -229,7 +229,7 @@ export const TransferStockForm = ({
                 <FormField
                     control={control}
                     name="batchId"
-                    rules={{ required: "Please select a batch.", valueAsNumber: true, min: { value: 1, message: "Please select a batch." } }}
+                    rules={{ required: "Please select a batch.", min: { value: 1, message: "Please select a batch." } }}
                     render={({ field }) => (
                         <FormItem>
                             <FormLabel className="text-base font-semibold">Select Batch to Transfer</FormLabel>
@@ -340,7 +340,7 @@ export const TransferStockForm = ({
                     <FormField
                         control={control}
                         name="quantity"
-                        rules={{ required: true, valueAsNumber: true, min: 1 }}
+                        rules={{ required: true, min: 1 }}
                         render={({ field }) => (
                             <FormItem>
                             <FormLabel>Quantity</FormLabel>

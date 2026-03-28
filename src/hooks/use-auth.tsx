@@ -376,7 +376,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
         if (hasValidTokens && !restoredUser) {
           try {
-            const authFetch = require('@/lib/auth-fetch').authFetch;
+            const authFetch = require('@/lib/auth-fetch').authFetch as typeof import('@/lib/auth-fetch').authFetch;
             let staffProfile: any = null;
             let profile: any = null;
             let staffProfileError: unknown = null;

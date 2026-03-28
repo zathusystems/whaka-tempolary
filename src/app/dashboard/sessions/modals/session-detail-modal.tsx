@@ -1,5 +1,5 @@
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { format } from 'date-fns';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { AlertTriangle, Loader2, Package, Printer } from 'lucide-react';
@@ -34,7 +34,13 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { buildZReportPrintHtml, calculateZReportSummary, isSessionClosedForZReport } from '@/lib/z-report-print';
+import { syncSessionOrdersToLocalDb } from '@/lib/session-order-sync';
+import {
+  buildZReportPrintHtml,
+  calculateZReportSummary,
+  isSessionClosedForZReport,
+  SESSION_END_REPORT_TITLE,
+} from '@/lib/z-report-print';
 import { SaleDetailModal } from './index';
 
 const LOCAL_STORAGE_KEYS = {
@@ -342,6 +348,20 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
 
         try {
             setIsPrintingZReport(true);
+            let reportOrders = sessionOrders;
+            try {
+                const syncedOrders = await syncSessionOrdersToLocalDb({
+                    sessionId: session.id,
+                    branchId: String(session.branchId || ''),
+                });
+                if (syncedOrders.length > 0) {
+                    reportOrders = syncedOrders;
+                }
+            } catch (syncError) {
+                console.warn('[Session Detail] Could not refresh session orders before printing report:', syncError);
+            }
+
+            const reportSummary = calculateZReportSummary(reportOrders as any);
             const activeBranchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH) || 'main';
             const [{ printerService }, { silentPrintService }] = await Promise.all([
                 import('@/lib/services/printer-service'),
@@ -357,7 +377,7 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
                 toast({
                     variant: 'destructive',
                     title: 'No Printer Configured',
-                    description: 'Please configure a default printer before printing the Z report.',
+                    description: `Please configure a default printer before printing the ${SESSION_END_REPORT_TITLE.toLowerCase()}.`,
                 });
                 return;
             }
@@ -367,9 +387,9 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
 
             const htmlContent = buildZReportPrintHtml({
                 session,
-                paymentBreakdown,
-                financialSummary,
-                eisSummary,
+                paymentBreakdown: reportSummary.paymentBreakdown,
+                financialSummary: reportSummary.financialSummary,
+                eisSummary: reportSummary.eisSummary,
                 formatCurrency,
             });
 
@@ -386,33 +406,36 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
                 toast({
                     variant: 'destructive',
                     title: 'Print Failed',
-                    description: 'Could not print the Z report. Check the printer connection and try again.',
+                    description: `Could not print the ${SESSION_END_REPORT_TITLE.toLowerCase()}. Check the printer connection and try again.`,
                 });
                 return;
             }
 
             toast({
-                title: 'Z Report Printed',
+                title: `${SESSION_END_REPORT_TITLE} Printed`,
                 description: `Sent to ${defaultPrinter.name}`,
             });
         } catch (error) {
-            console.error('Error printing Z report:', error);
+            console.error('Error printing session end report:', error);
             toast({
                 variant: 'destructive',
                 title: 'Print Error',
-                description: error instanceof Error ? error.message : 'Unexpected error while printing Z report.',
+                description:
+                    error instanceof Error
+                        ? error.message
+                        : `Unexpected error while printing the ${SESSION_END_REPORT_TITLE.toLowerCase()}.`,
             });
         } finally {
             setIsPrintingZReport(false);
         }
-    }, [eisSummary, financialSummary, formatCurrency, isSessionClosed, paymentBreakdown, session]);
+    }, [formatCurrency, isSessionClosed, session, sessionOrders]);
 
     return (
         <Card>
             <CardHeader>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
-                        <CardTitle>Z Report</CardTitle>
+                        <CardTitle>{SESSION_END_REPORT_TITLE}</CardTitle>
                         <CardDescription>Complete session summary and cash reconciliation</CardDescription>
                     </div>
                     <Button
@@ -426,12 +449,12 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
                         ) : (
                             <Printer className="mr-2 h-4 w-4" />
                         )}
-                        {isPrintingZReport ? 'Printing...' : 'Print Z Report'}
+                        {isPrintingZReport ? 'Printing...' : `Print ${SESSION_END_REPORT_TITLE}`}
                     </Button>
                 </div>
                 {!isSessionClosed && (
                     <p className="text-xs text-muted-foreground">
-                        Close this session first to print the Z report.
+                        Close this session first to print the {SESSION_END_REPORT_TITLE.toLowerCase()}.
                     </p>
                 )}
             </CardHeader>
@@ -1111,10 +1134,23 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
 
 export default function SessionDetailDialog({ session, isOpen, onOpenChange }: { session: Session; isOpen: boolean; onOpenChange: (open: boolean) => void; }) {
     const { format: formatCurrency } = useCurrency();
+
+    useEffect(() => {
+        if (!isOpen) {
+            return;
+        }
+
+        void syncSessionOrdersToLocalDb({
+            sessionId: session.id,
+            branchId: String(session.branchId || ''),
+        }).catch((error) => {
+            console.warn('[Session Detail] Could not hydrate session orders for detail view:', error);
+        });
+    }, [isOpen, session.branchId, session.id]);
     
     return (
         <Dialog open={isOpen} onOpenChange={onOpenChange}>
-            <DialogContent className="sm:max-w-4xl max-h-[90vh] flex flex-col">
+            <DialogContent className="sm:max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
                 <DialogHeader>
                     <DialogTitle>Session Details</DialogTitle>
                     <DialogDescription>
@@ -1127,7 +1163,7 @@ export default function SessionDetailDialog({ session, isOpen, onOpenChange }: {
                 <Tabs defaultValue="sales" className="flex-1 overflow-hidden flex flex-col">
                     <TabsList className="grid h-auto w-full grid-cols-1 sm:grid-cols-3">
                         <TabsTrigger value="sales" className="text-xs sm:text-sm">Sales Report</TabsTrigger>
-                        <TabsTrigger value="z-report" className="text-xs sm:text-sm">Z Report</TabsTrigger>
+                        <TabsTrigger value="session-end-report" className="text-xs sm:text-sm">{SESSION_END_REPORT_TITLE}</TabsTrigger>
                         <TabsTrigger value="stock" className="text-xs sm:text-sm">Stock Report</TabsTrigger>
                     </TabsList>
                     
@@ -1135,7 +1171,7 @@ export default function SessionDetailDialog({ session, isOpen, onOpenChange }: {
                         <SessionSalesListModal sessionId={session.id} />
                     </TabsContent>
                     
-                    <TabsContent value="z-report" className="flex-1 overflow-y-auto">
+                    <TabsContent value="session-end-report" className="flex-1 overflow-y-auto">
                         <ZReportTabModal session={session} />
                     </TabsContent>
                     

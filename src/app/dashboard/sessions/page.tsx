@@ -51,8 +51,14 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { logAuditAction } from '@/lib/audit';
 import { authFetch } from '@/lib/auth-fetch';
+import { syncSessionOrdersToLocalDb } from '@/lib/session-order-sync';
 import { syncService } from '@/lib/services/sync-service';
-import { buildZReportPrintHtml, calculateZReportSummary, isSessionClosedForZReport } from '@/lib/z-report-print';
+import {
+  buildZReportPrintHtml,
+  calculateZReportSummary,
+  isSessionClosedForZReport,
+  SESSION_END_REPORT_TITLE,
+} from '@/lib/z-report-print';
 import {
   StartSessionForm,
   CloseSessionForm,
@@ -328,6 +334,8 @@ const SessionSalesList = ({ sessionId }: { sessionId: string }) => {
     Completed: 'default',
     Voided: 'destructive',
     Cancelled: 'destructive',
+    Refunded: 'destructive',
+    'Partially Refunded': 'destructive',
   };
 
   return (
@@ -452,6 +460,20 @@ const ZReportTab = ({ session }: { session: Session }) => {
 
         try {
             setIsPrintingZReport(true);
+            let reportOrders = sessionOrders;
+            try {
+                const syncedOrders = await syncSessionOrdersToLocalDb({
+                    sessionId: session.id,
+                    branchId: String(session.branchId || ''),
+                });
+                if (syncedOrders.length > 0) {
+                    reportOrders = syncedOrders;
+                }
+            } catch (syncError) {
+                console.warn('[Sessions Page] Could not refresh session orders before printing report:', syncError);
+            }
+
+            const reportSummary = calculateZReportSummary(reportOrders as any);
             const activeBranchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH) || 'main';
             const [{ printerService }, { silentPrintService }] = await Promise.all([
                 import('@/lib/services/printer-service'),
@@ -467,7 +489,7 @@ const ZReportTab = ({ session }: { session: Session }) => {
                 toast({
                     variant: 'destructive',
                     title: 'No Printer Configured',
-                    description: 'Please configure a default printer before printing the Z report.',
+                    description: `Please configure a default printer before printing the ${SESSION_END_REPORT_TITLE.toLowerCase()}.`,
                 });
                 return;
             }
@@ -477,9 +499,9 @@ const ZReportTab = ({ session }: { session: Session }) => {
 
             const htmlContent = buildZReportPrintHtml({
                 session,
-                paymentBreakdown,
-                financialSummary,
-                eisSummary,
+                paymentBreakdown: reportSummary.paymentBreakdown,
+                financialSummary: reportSummary.financialSummary,
+                eisSummary: reportSummary.eisSummary,
                 formatCurrency,
             });
 
@@ -496,33 +518,36 @@ const ZReportTab = ({ session }: { session: Session }) => {
                 toast({
                     variant: 'destructive',
                     title: 'Print Failed',
-                    description: 'Could not print the Z report. Check the printer connection and try again.',
+                    description: `Could not print the ${SESSION_END_REPORT_TITLE.toLowerCase()}. Check the printer connection and try again.`,
                 });
                 return;
             }
 
             toast({
-                title: 'Z Report Printed',
+                title: `${SESSION_END_REPORT_TITLE} Printed`,
                 description: `Sent to ${defaultPrinter.name}`,
             });
         } catch (error) {
-            console.error('Error printing Z report:', error);
+            console.error('Error printing session end report:', error);
             toast({
                 variant: 'destructive',
                 title: 'Print Error',
-                description: error instanceof Error ? error.message : 'Unexpected error while printing Z report.',
+                description:
+                    error instanceof Error
+                        ? error.message
+                        : `Unexpected error while printing the ${SESSION_END_REPORT_TITLE.toLowerCase()}.`,
             });
         } finally {
             setIsPrintingZReport(false);
         }
-    }, [eisSummary, financialSummary, formatCurrency, isSessionClosed, paymentBreakdown, session]);
+    }, [formatCurrency, isSessionClosed, session, sessionOrders]);
 
     return (
         <Card>
             <CardHeader>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
-                        <CardTitle>Z Report</CardTitle>
+                        <CardTitle>{SESSION_END_REPORT_TITLE}</CardTitle>
                         <CardDescription>Complete session summary and cash reconciliation</CardDescription>
                     </div>
                     <Button
@@ -536,12 +561,12 @@ const ZReportTab = ({ session }: { session: Session }) => {
                         ) : (
                             <Printer className="mr-2 h-4 w-4" />
                         )}
-                        {isPrintingZReport ? 'Printing...' : 'Print Z Report'}
+                        {isPrintingZReport ? 'Printing...' : `Print ${SESSION_END_REPORT_TITLE}`}
                     </Button>
                 </div>
                 {!isSessionClosed && (
                     <p className="text-xs text-muted-foreground">
-                        Close this session first to print the Z report.
+                        Close this session first to print the {SESSION_END_REPORT_TITLE.toLowerCase()}.
                     </p>
                 )}
             </CardHeader>
@@ -1471,64 +1496,11 @@ export default function SessionsPage() {
 
     const fetchOrdersForSession = async (session: Session, branchId: string) => {
         try {
-            const ordersResponse = await authFetch.fetch<any>(`/sessions/orders/?session_id=${session.id}`);
-            const backendOrders = Array.isArray(ordersResponse?.results)
-                ? ordersResponse.results
-                : Array.isArray(ordersResponse)
-                ? ordersResponse
-                : [];
-
-            for (const order of backendOrders) {
-                const mappedItems = Array.isArray(order.items)
-                    ? order.items.map((item: any) => ({
-                        id: String(item?.id ?? ''),
-                        inventoryItemId: getOrderItemInventoryId(item),
-                        name: String(item?.name ?? 'Unknown Item'),
-                        quantity: Number(item?.quantity ?? 0),
-                        notes: item?.notes ?? '',
-                        price: Number(item?.price ?? 0),
-                        mraProductCode: item?.mra_product_code ?? item?.mraProductCode,
-                        vatCategory: item?.vat_category ?? item?.vatCategory,
-                        taxRate: Number(item?.tax_rate ?? item?.taxRate ?? 0),
-                        tax_rate: Number(item?.tax_rate ?? item?.taxRate ?? 0),
-                        taxType: item?.tax_type ?? item?.taxType,
-                        tax_type: item?.tax_type ?? item?.taxType,
-                        taxCalculationMethod: item?.tax_calculation_method ?? item?.taxCalculationMethod,
-                        tax_calculation_method: item?.tax_calculation_method ?? item?.taxCalculationMethod,
-                        subtotal: Number(item?.subtotal ?? 0),
-                        taxAmount: Number(item?.tax_amount ?? item?.taxAmount ?? 0),
-                        tax_amount: Number(item?.tax_amount ?? item?.taxAmount ?? 0),
-                        total: Number(item?.total ?? 0),
-                    }))
-                    : [];
-
-                const localOrder = {
-                    id: order.id,
-                    sessionId: session.id,
-                    branchId: String(order.branch || branchId),
-                    orderNumber: order.order_number,
-                    status: order.status as 'New' | 'Preparing' | 'Ready' | 'Completed' | 'Voided' | 'Cancelled',
-                    paymentMethod: order.payment_method,
-                    subtotal: parseFloat(order.subtotal || 0),
-                    tax: parseFloat(order.vat_amount || 0),
-                    vatAmount: parseFloat(order.vat_amount || 0),
-                    total: parseFloat(order.total || 0),
-                    tip: parseFloat(order.tip || 0),
-                    cogs: parseFloat(order.cogs || 0),
-                    items: mappedItems,
-                    eisStatus: order.eis_status,
-                    fiscalInvoiceNumber: order.fiscal_invoice_number,
-                    createdAt: order.created_at,
-                };
-                const existingOrder = await db.orders.get(order.id);
-                if (existingOrder?._dirty) {
-                    console.log('[Sessions Page] Skipping overwrite for dirty order:', order.id);
-                    continue;
-                }
-                await db.orders.put(localOrder);
-            }
-
-            console.log('[Sessions Page] Loaded', backendOrders.length, 'orders for session:', session.id);
+            const syncedOrders = await syncSessionOrdersToLocalDb({
+                sessionId: session.id,
+                branchId,
+            });
+            console.log('[Sessions Page] Loaded', syncedOrders.length, 'orders for session:', session.id);
         } catch (ordersError) {
             console.warn('[Sessions Page] Could not fetch orders for session:', session.id, ordersError);
         }
@@ -1958,7 +1930,7 @@ export default function SessionsPage() {
                                             </Button>
                                         </DialogTrigger>
                                       ) : null}
-                                      <DialogContent className="max-h-[90vh] flex flex-col sm:max-w-md">
+                                      <DialogContent className="max-h-[90vh] flex flex-col overflow-hidden sm:max-w-md">
                                           <DialogHeader className="flex-shrink-0">
                                               <DialogTitle>{isOwnSession(activeSession) ? 'Close Current Session' : `Close ${activeSession.userName}'s Session`}</DialogTitle>
                                               <DialogDescription>Review sales and reconcile cash to end this session.</DialogDescription>
@@ -2012,7 +1984,7 @@ export default function SessionsPage() {
                     <Tabs defaultValue="sales" className="w-full">
                         <TabsList className="grid h-auto w-full grid-cols-1 sm:grid-cols-3">
                             <TabsTrigger value="sales" className="text-xs sm:text-sm">Sales Report</TabsTrigger>
-                            <TabsTrigger value="z-report" className="text-xs sm:text-sm">Z Report</TabsTrigger>
+                            <TabsTrigger value="session-end-report" className="text-xs sm:text-sm">{SESSION_END_REPORT_TITLE}</TabsTrigger>
                             <TabsTrigger value="stock" className="text-xs sm:text-sm">Stock Report</TabsTrigger>
                         </TabsList>
                         
@@ -2020,7 +1992,7 @@ export default function SessionsPage() {
                             <SessionSalesList sessionId={activeSession.id} />
                         </TabsContent>
                         
-                        <TabsContent value="z-report" className="mt-4">
+                        <TabsContent value="session-end-report" className="mt-4">
                             <ZReportTab session={activeSession} />
                         </TabsContent>
                         

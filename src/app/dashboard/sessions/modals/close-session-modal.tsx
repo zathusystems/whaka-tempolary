@@ -9,7 +9,12 @@ import { useCurrency } from '@/hooks/use-currency';
 import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
-import { buildZReportPrintHtml, calculateZReportSummary } from '@/lib/z-report-print';
+import { syncSessionOrdersToLocalDb } from '@/lib/session-order-sync';
+import {
+  buildZReportPrintHtml,
+  calculateZReportSummary,
+  SESSION_END_REPORT_TITLE,
+} from '@/lib/z-report-print';
 import {
   Card,
   CardContent,
@@ -81,7 +86,7 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
     if (!closedSession || !activeBranchId) {
       toast({
         variant: 'destructive',
-        title: 'Cannot print Z report',
+        title: `Cannot print ${SESSION_END_REPORT_TITLE.toLowerCase()}`,
         description: 'Session was closed but branch or session context is missing.',
       });
       return;
@@ -89,6 +94,20 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
 
     try {
       setIsPrintingZReport(true);
+      let reportOrders = sessionOrders;
+      try {
+        const syncedOrders = await syncSessionOrdersToLocalDb({
+          sessionId: closedSession.id,
+          branchId: activeBranchId,
+        });
+        if (syncedOrders.length > 0) {
+          reportOrders = syncedOrders;
+        }
+      } catch (syncError) {
+        console.warn('[Sessions] Could not refresh session orders before printing report:', syncError);
+      }
+
+      const reportSummary = calculateZReportSummary(reportOrders as any);
       const [{ printerService }, { silentPrintService }] = await Promise.all([
         import('@/lib/services/printer-service'),
         import('@/lib/services/silent-print-service'),
@@ -103,7 +122,7 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
         toast({
           variant: 'destructive',
           title: 'No Printer Configured',
-          description: 'Please configure a default printer before printing the Z report.',
+          description: `Please configure a default printer before printing the ${SESSION_END_REPORT_TITLE.toLowerCase()}.`,
         });
         return;
       }
@@ -113,9 +132,9 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
 
       const htmlContent = buildZReportPrintHtml({
         session: closedSession,
-        paymentBreakdown,
-        financialSummary,
-        eisSummary,
+        paymentBreakdown: reportSummary.paymentBreakdown,
+        financialSummary: reportSummary.financialSummary,
+        eisSummary: reportSummary.eisSummary,
         formatCurrency,
       });
 
@@ -132,26 +151,29 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
         toast({
           variant: 'destructive',
           title: 'Print Failed',
-          description: 'Could not print the Z report. Check the printer connection and try again.',
+          description: `Could not print the ${SESSION_END_REPORT_TITLE.toLowerCase()}. Check the printer connection and try again.`,
         });
         return;
       }
 
       toast({
-        title: 'Z Report Printed',
+        title: `${SESSION_END_REPORT_TITLE} Printed`,
         description: `Sent to ${defaultPrinter.name}`,
       });
     } catch (error) {
-      console.error('[Sessions] Error printing Z report after close:', error);
+      console.error('[Sessions] Error printing session end report after close:', error);
       toast({
         variant: 'destructive',
         title: 'Print Error',
-        description: error instanceof Error ? error.message : 'Unexpected error while printing Z report.',
+        description:
+          error instanceof Error
+            ? error.message
+            : `Unexpected error while printing the ${SESSION_END_REPORT_TITLE.toLowerCase()}.`,
       });
     } finally {
       setIsPrintingZReport(false);
     }
-  }, [activeBranchId, closedSession, eisSummary, financialSummary, formatCurrency, paymentBreakdown]);
+  }, [activeBranchId, closedSession, formatCurrency, sessionOrders]);
 
   const onSubmit = async (data: { actualCash: number }) => {
     if (!user || !activeBranchId) {
@@ -308,11 +330,11 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
             </Card>
             <Card>
               <CardHeader>
-                <CardTitle>Print Z Report</CardTitle>
+                <CardTitle>Print {SESSION_END_REPORT_TITLE}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-2 text-sm">
                 <p className="text-muted-foreground">
-                  Print the finalized Z report for this closed session now.
+                  Print the finalized {SESSION_END_REPORT_TITLE.toLowerCase()} for this closed session now.
                 </p>
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   <div className="flex justify-between">
@@ -344,7 +366,7 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
             disabled={isPrintingZReport}
           >
             {isPrintingZReport ? <Loader2 className="mr-2 animate-spin" /> : <Printer className="mr-2 h-4 w-4" />}
-            {isPrintingZReport ? 'Printing...' : 'Print Z Report'}
+            {isPrintingZReport ? 'Printing...' : `Print ${SESSION_END_REPORT_TITLE}`}
           </Button>
           <Button type="button" onClick={onDone}>
             Done

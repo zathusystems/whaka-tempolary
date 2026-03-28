@@ -245,7 +245,7 @@ export default function BusinessSettingsPage() {
                   blockSalesIfTaxMappingMissing: blockTaxMappingValue,
                 });
                 
-                const formData = {
+                const formData: BusinessSettingsFormValues = {
                     businessName: backendBusiness.name || '',
                     businessType: resolveBusinessTypeFormValue(backendBusiness.business_type, business?.type),
                     currency: backendBusiness.settings?.currency || 'USD',
@@ -258,7 +258,7 @@ export default function BusinessSettingsPage() {
                     tin: backendBusiness.tin || backendBusiness.tax_pin || backendBusiness.taxPin || '',
                     vatRegistrationNumber: backendBusiness.vat_registration_number || '',
                     vatRegistered: vatRegisteredValue,
-                    mraTaxpayerType: backendBusiness.mra_taxpayer_type || 'NON_VAT',
+                    mraTaxpayerType: backendBusiness.mra_taxpayer_type === 'VAT' ? 'VAT' : 'NON_VAT',
                     mraEnrolled: mraEnrolledValue,
                     enableEis: enableEisValue,
                     eisEnvironment: backendBusiness.eis_environment || 'TEST',
@@ -315,7 +315,7 @@ export default function BusinessSettingsPage() {
               
               if (settings) {
                 const { name, type, currency, email, phone, address, website, tin } = settings;
-                const formData = {
+                const formData: BusinessSettingsFormValues = {
                     businessName: name || '',
                     businessType: resolveBusinessTypeFormValue(type, business?.type),
                     currency: currency || 'USD',

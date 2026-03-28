@@ -78,6 +78,7 @@ type ZReportSessionSnapshot = Pick<
   Session,
   | 'id'
   | 'status'
+  | 'userName'
   | 'startedAt'
   | 'closedAt'
   | 'openingFloat'
@@ -329,6 +330,7 @@ export const buildZReportPrintHtml = ({
   const lines: string[] = [
     SESSION_END_REPORT_TITLE.toUpperCase(),
     `Session ID: ${session.id}`,
+    `Session By: ${toTrimmedString(session.userName) || 'Unknown'}`,
     `Generated: ${format(generatedAt, 'PPpp')}`,
     `Started: ${formatSessionDate(session.startedAt)}`,
     `Closed: ${formatSessionDate(session.closedAt)}`,
@@ -338,7 +340,7 @@ export const buildZReportPrintHtml = ({
     `Net Sales: ${formatCurrency(netSales)}`,
     `Tax: ${formatCurrency(totalTax)}`,
     `Gross Sales: ${formatCurrency(grossSales)}`,
-    `Tips: ${formatCurrency(totalTips)}`,
+    // `Tips: ${formatCurrency(totalTips)}`,
     `Total Payable: ${formatCurrency(totalPayable)}`,
     `Session Total Sales: ${formatCurrency(sessionTotalSales)}`,
     '--------------------------------',
@@ -354,21 +356,21 @@ export const buildZReportPrintHtml = ({
     `Expected in Drawer: ${formatCurrency(expectedDrawer)}`,
     `Actual Cash: ${formatCurrency(actualCash)}`,
     `Difference: ${formatCurrency(difference)}`,
-    '--------------------------------',
-    'EIS COMPLIANCE',
-    `Fiscal Assigned: ${Math.max(0, Math.floor(fiscalAssigned))}`,
-    `Fiscal Pending: ${Math.max(0, Math.floor(fiscalPending))}`,
-    `EIS Pending: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.pending)))}`,
-    `EIS Submitted: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.submitted)))}`,
-    `EIS Accepted: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.accepted)))}`,
-    `EIS Rejected: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.rejected)))}`,
-    `EIS Unknown: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.unknown)))}`,
-    `With QR Payload: ${Math.max(0, Math.floor(ordersWithQr))}`,
-    `With Signature: ${Math.max(0, Math.floor(ordersWithSignature))}`,
-    `First Fiscal #: ${eisSummary.firstFiscalInvoice || 'N/A'}`,
-    `Last Fiscal #: ${eisSummary.lastFiscalInvoice || 'N/A'}`,
-    `First Submission: ${formatSessionDate(eisSummary.firstSubmissionAt)}`,
-    `Last Submission: ${formatSessionDate(eisSummary.lastSubmissionAt)}`,
+    // '--------------------------------',
+    // 'EIS COMPLIANCE',
+    // `Fiscal Assigned: ${Math.max(0, Math.floor(fiscalAssigned))}`,
+    // `Fiscal Pending: ${Math.max(0, Math.floor(fiscalPending))}`,
+    // `EIS Pending: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.pending)))}`,
+    // `EIS Submitted: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.submitted)))}`,
+    // `EIS Accepted: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.accepted)))}`,
+    // `EIS Rejected: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.rejected)))}`,
+    // `EIS Unknown: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.unknown)))}`,
+    // `With QR Payload: ${Math.max(0, Math.floor(ordersWithQr))}`,
+    // `With Signature: ${Math.max(0, Math.floor(ordersWithSignature))}`,
+    // `First Fiscal #: ${eisSummary.firstFiscalInvoice || 'N/A'}`,
+    // `Last Fiscal #: ${eisSummary.lastFiscalInvoice || 'N/A'}`,
+    // `First Submission: ${formatSessionDate(eisSummary.firstSubmissionAt)}`,
+    // `Last Submission: ${formatSessionDate(eisSummary.lastSubmissionAt)}`,
     '--------------------------------',
     `END OF ${SESSION_END_REPORT_TITLE.toUpperCase()}`,
   ];

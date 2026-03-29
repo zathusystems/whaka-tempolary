@@ -9,6 +9,7 @@ export interface PurchaseInvoiceGroup {
   totalCost: number;
   totalVat: number;
   totalWithVat: number;
+  vatAmount?: number;
   items: PurchaseRecord[];
 }
 
@@ -91,6 +92,11 @@ const normalizeTaxRate = (value: unknown): number => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 };
 
+const toFiniteNumber = (value: unknown): number | undefined => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
 const resolveRecordVat = (record: PurchaseRecord): number => {
   const taxRate = normalizeTaxRate(record.taxRate);
   const method = resolveTaxMethod(record.taxCalculationMethod);
@@ -104,6 +110,29 @@ const resolveRecordVat = (record: PurchaseRecord): number => {
   }
 
   return base * (taxRate / 100);
+};
+
+const resolvePurchaseVat = (purchase: Pick<PurchaseInvoiceGroup, 'totalVat' | 'vatAmount'>): number => {
+  const computedVat = toFiniteNumber(purchase.totalVat) ?? 0;
+  if (computedVat > 0) {
+    return computedVat;
+  }
+
+  return toFiniteNumber(purchase.vatAmount) ?? 0;
+};
+
+const resolvePurchaseTotalWithVat = (
+  purchase: Pick<PurchaseInvoiceGroup, 'totalCost' | 'totalVat' | 'totalWithVat' | 'vatAmount'>
+): number => {
+  const computedVat = toFiniteNumber(purchase.totalVat) ?? 0;
+  const computedTotal = toFiniteNumber(purchase.totalWithVat) ?? 0;
+  const fallbackVat = toFiniteNumber(purchase.vatAmount) ?? 0;
+
+  if (computedVat > 0 || fallbackVat <= 0) {
+    return computedTotal;
+  }
+
+  return purchase.totalCost + fallbackVat;
 };
 
 const buildPurchaseInvoiceHtml = (
@@ -124,7 +153,9 @@ const buildPurchaseInvoiceHtml = (
         .filter(Boolean)
     )
   );
-  const subtotal = purchase.totalWithVat - purchase.totalVat;
+  const resolvedVat = resolvePurchaseVat(purchase);
+  const resolvedTotalWithVat = resolvePurchaseTotalWithVat(purchase);
+  const subtotal = Math.max(0, resolvedTotalWithVat - resolvedVat);
   const totalQuantity = purchase.items.reduce((sum, item) => sum + Number(item.quantityReceived || 0), 0);
 
   const itemsRows = purchase.items
@@ -375,7 +406,7 @@ const buildPurchaseInvoiceHtml = (
           </div>
           <div class="summary-row">
             <span>VAT</span>
-            <span>${formatCurrency(purchase.totalVat, currencyCode)}</span>
+            <span>${formatCurrency(resolvedVat, currencyCode)}</span>
           </div>
           <div class="summary-row">
             <span>Amount Due</span>
@@ -383,7 +414,7 @@ const buildPurchaseInvoiceHtml = (
           </div>
           <div class="summary-row total">
             <span>Total (Incl VAT)</span>
-            <span>${formatCurrency(purchase.totalWithVat, currencyCode)}</span>
+            <span>${formatCurrency(resolvedTotalWithVat, currencyCode)}</span>
           </div>
         </div>
 

@@ -146,7 +146,9 @@ export interface InventoryItem {
     image?: string; // Base64 encoded image or image URL
     is_mra_ready?: boolean;
     price_locked?: boolean;
+    priceLocked?: boolean;
     tax_locked?: boolean;
+    taxLocked?: boolean;
     
     // Bar & Liquor specific fields
     isSoldInPortions?: boolean; // For bar/liquor: true if sold in portions (shots, tots, etc)

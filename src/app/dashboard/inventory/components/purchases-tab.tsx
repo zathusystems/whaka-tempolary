@@ -2,9 +2,9 @@
 
 import React, { useState, useEffect } from 'react';
 import { format } from 'date-fns';
-import { Truck, Loader2, ChevronDown, Cloud, CloudOff, Download } from 'lucide-react';
+import { Truck, Loader2, ChevronDown, Cloud, CloudOff, Download, Trash2 } from 'lucide-react';
 
-import { db, type Business as BusinessRecord, type PurchaseRecord } from '@/lib/db';
+import { db, type Business as BusinessRecord, type InventoryItem, type PurchaseRecord } from '@/lib/db';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -23,6 +23,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 interface PurchasesTabProps {
     purchaseHistoryData: PurchaseRecord[];
@@ -46,6 +56,7 @@ interface PurchaseGroup {
     totalCost: number;
     totalVat: number;
     totalWithVat: number;
+    vatAmount?: number;
 }
 
 const parseDateCandidate = (...values: unknown[]): Date | null => {
@@ -103,6 +114,11 @@ const resolveTaxMethod = (value: unknown): 'inclusive' | 'exclusive' => {
     return value === 'inclusive' ? 'inclusive' : 'exclusive';
 };
 
+const toFiniteNumber = (value: unknown): number | undefined => {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+};
+
 const resolveRecordVat = (record: PurchaseRecord): number => {
     const taxRate = normalizeTaxRate(record.taxRate);
     const method = resolveTaxMethod(record.taxCalculationMethod);
@@ -123,6 +139,33 @@ const resolveRecordGross = (record: PurchaseRecord, vatAmount: number): number =
     return method === 'exclusive' ? base + (vatAmount || 0) : base;
 };
 
+const resolveGroupVat = (group: Pick<PurchaseGroup, 'totalVat' | 'vatAmount'>): number => {
+    const computedVat = toFiniteNumber(group.totalVat) ?? 0;
+    if (computedVat > 0) {
+        return computedVat;
+    }
+
+    return toFiniteNumber(group.vatAmount) ?? 0;
+};
+
+const resolveGroupTotalWithVat = (group: Pick<PurchaseGroup, 'totalCost' | 'totalVat' | 'totalWithVat' | 'vatAmount'>): number => {
+    const computedVat = toFiniteNumber(group.totalVat) ?? 0;
+    const computedTotal = toFiniteNumber(group.totalWithVat) ?? 0;
+    const fallbackVat = toFiniteNumber(group.vatAmount) ?? 0;
+
+    if (computedVat > 0 || fallbackVat <= 0) {
+        return computedTotal;
+    }
+
+    // Some synced purchase orders only preserve VAT on the header, not per-item tax fields.
+    // In that case `totalWithVat` matches the subtotal, so add the saved header VAT back in.
+    return group.totalCost + fallbackVat;
+};
+
+const resolveGroupSubtotal = (group: Pick<PurchaseGroup, 'totalCost' | 'totalVat' | 'totalWithVat' | 'vatAmount'>): number => {
+    return Math.max(0, resolveGroupTotalWithVat(group) - resolveGroupVat(group));
+};
+
 const resolveGroupStatus = (statuses: string[]): string => {
     if (statuses.includes('Unpaid')) return 'Unpaid';
     if (statuses.includes('Pending')) return 'Pending';
@@ -131,15 +174,28 @@ const resolveGroupStatus = (statuses: string[]): string => {
     return 'Paid';
 };
 
+const resolveInventoryStatus = (stockUnits: number, reorderLevel: number): InventoryItem['status'] => {
+    if (stockUnits > reorderLevel) return 'In Stock';
+    if (stockUnits > 0) return 'Low Stock';
+    return 'Out of Stock';
+};
+
+const isLocalOnlyPurchaseRecord = (record: PurchaseRecord): boolean => {
+    const recordId = String(record.id ?? '').trim();
+    return record._operation === 'create' || typeof record.id === 'number' || /^\d+$/.test(recordId);
+};
+
 export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onReceiveStock, branchId, currency = 'USD' }: PurchasesTabProps) {
     const { user, business } = useAuth();
     const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
     const [pendingChanges, setPendingChanges] = useState(0);
     const [selectedPurchase, setSelectedPurchase] = useState<PurchaseGroup | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
     const [businessCurrency, setBusinessCurrency] = useState(currency);
     const [businessProfile, setBusinessProfile] = useState<BusinessRecord | null>(null);
     const [isExportingInvoice, setIsExportingInvoice] = useState(false);
+    const [isDeletingPurchase, setIsDeletingPurchase] = useState(false);
     const normalizedSearchTerm = searchTerm.trim().toLowerCase();
 
     // Load business currency from IndexedDB
@@ -231,6 +287,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                     totalCost: 0,
                     totalVat: 0,
                     totalWithVat: 0,
+                    vatAmount: record.vatAmount,
                 };
             } else if (recordSortDate > groups[key].dateSortValue) {
                 groups[key].receivedDate = record.receivedDate;
@@ -250,6 +307,10 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                 groups[key].paymentStatus,
                 record.paymentStatus,
             ].filter(Boolean));
+
+            if (groups[key].vatAmount === undefined && record.vatAmount !== undefined) {
+                groups[key].vatAmount = record.vatAmount;
+            }
         });
         
         return Object.values(groups).sort((a, b) => 
@@ -339,6 +400,164 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
         }
     };
 
+    const handleDeletePurchase = async () => {
+        if (!selectedPurchase) {
+            return;
+        }
+        if (!user) {
+            toast({
+                variant: 'destructive',
+                title: 'User not found',
+            });
+            return;
+        }
+
+        setIsDeletingPurchase(true);
+        let syncFailed = false;
+
+        try {
+            const nowIso = new Date().toISOString();
+            let clampedRemovalCount = 0;
+            let deletedRecordCount = 0;
+            let deletedPurchaseOrderId = '';
+
+            await db.transaction('rw', db.inventory, db.purchaseHistory, db.purchaseOrders, async () => {
+                const currentRecords: PurchaseRecord[] = [];
+
+                for (const item of selectedPurchase.items) {
+                    if (item.id === undefined || item.id === null || String(item.id).trim() === '') {
+                        continue;
+                    }
+
+                    const currentRecord = await db.purchaseHistory.get(item.id as any);
+                    if (currentRecord) {
+                        currentRecords.push(currentRecord);
+                    }
+                }
+
+                if (currentRecords.length === 0) {
+                    throw new Error('This purchase could not be found locally anymore.');
+                }
+
+                const purchaseOrderCandidates = currentRecords
+                    .map((record) => String(record.purchaseOrderId || '').trim())
+                    .filter(Boolean);
+                const fallbackGroupId = String(selectedPurchase.groupId || '').trim();
+                const purchaseOrderId = purchaseOrderCandidates[0] || fallbackGroupId;
+                const currentOrder = purchaseOrderId ? await db.purchaseOrders.get(purchaseOrderId) : undefined;
+                const allRecordsLocalOnly = currentRecords.every(isLocalOnlyPurchaseRecord);
+                const shouldSyncInventoryDecrease = !currentOrder || currentOrder._operation === 'create';
+
+                if (!currentOrder && !allRecordsLocalOnly) {
+                    throw new Error('This purchase is missing its order header locally. Please sync first, then try again.');
+                }
+
+                for (const currentRecord of currentRecords) {
+                    const productId = String(currentRecord.productId || '').trim();
+                    const inventoryItem = productId ? await db.inventory.get(productId) : undefined;
+
+                    if (inventoryItem) {
+                        const currentStock = Number(inventoryItem.stockUnits || 0);
+                        const quantityRemaining = Math.max(0, Number(currentRecord.quantityRemaining || 0));
+                        const safeQuantityToRemove = Math.max(0, Math.min(currentStock, quantityRemaining));
+
+                        if (safeQuantityToRemove < quantityRemaining) {
+                            clampedRemovalCount += 1;
+                        }
+
+                        const nextStock = Math.max(0, currentStock - safeQuantityToRemove);
+                        const nextValue = Number.isFinite(nextStock * Number(inventoryItem.cost || 0))
+                            ? Number((nextStock * Number(inventoryItem.cost || 0)).toFixed(2))
+                            : inventoryItem.value;
+                        const inventoryUpdate: any = {
+                            stockUnits: nextStock,
+                            value: nextValue,
+                            status: resolveInventoryStatus(nextStock, Number(inventoryItem.reorderLevel || 0)),
+                        };
+
+                        if (shouldSyncInventoryDecrease) {
+                            inventoryUpdate.allowStockDecrease = true;
+                            inventoryUpdate._dirty = true;
+                            inventoryUpdate._operation = inventoryItem._operation === 'create' ? 'create' : 'update';
+                        }
+
+                        await db.inventory.update(inventoryItem.id, inventoryUpdate);
+                    }
+
+                    await db.purchaseHistory.delete(currentRecord.id as any);
+                    deletedRecordCount += 1;
+                }
+
+                if (currentOrder) {
+                    deletedPurchaseOrderId = currentOrder.id;
+                    const itemsSnapshot = currentRecords.map((record) => ({
+                        id: record.id ? String(record.id) : undefined,
+                        inventoryItemId: record.productId,
+                        quantityRemaining: Number(record.quantityRemaining || 0),
+                        quantityReceived: Number(record.quantityReceived || 0),
+                    }));
+
+                    if (currentOrder._operation === 'create') {
+                        await db.purchaseOrders.delete(currentOrder.id);
+                    } else {
+                        await db.purchaseOrders.update(currentOrder.id, {
+                            items: itemsSnapshot as any,
+                            _dirty: true,
+                            _operation: 'delete',
+                            updatedAt: nowIso,
+                        });
+                    }
+                }
+            });
+
+            await logAuditAction({
+                userId: user.uid,
+                userName: user.displayName || user.email || 'Unknown',
+                branchId,
+                actionType: 'STOCK_RECEIVE_DELETE',
+                entityType: 'PurchaseOrder',
+                entityId: deletedPurchaseOrderId || selectedPurchase.groupId,
+                details: {
+                    purchaseRef: selectedPurchase.groupId,
+                    supplierName: selectedPurchase.supplierName,
+                    deletedItems: deletedRecordCount,
+                    removedAvailableStockOnly: true,
+                },
+            });
+
+            if (typeof window !== 'undefined' && navigator.onLine) {
+                try {
+                    await syncService.performFullSync(branchId);
+                } catch (error) {
+                    syncFailed = true;
+                    console.error('[Purchases] Failed to sync purchase deletion immediately:', error);
+                }
+            }
+
+            setIsDeleteDialogOpen(false);
+            setIsModalOpen(false);
+            setSelectedPurchase(null);
+
+            toast({
+                title: 'Purchase deleted',
+                description: syncFailed
+                    ? 'The purchase was deleted locally. Sync will retry automatically.'
+                    : deletedRecordCount > 0 && clampedRemovalCount > 0
+                    ? 'Deleted successfully. Only currently available stock was removed for some items.'
+                    : 'The purchase and its remaining stock were removed safely.',
+            });
+        } catch (error) {
+            console.error('[Purchases] Failed to delete purchase safely:', error);
+            toast({
+                variant: 'destructive',
+                title: 'Delete failed',
+                description: error instanceof Error ? error.message : 'Could not delete this purchase safely.',
+            });
+        } finally {
+            setIsDeletingPurchase(false);
+        }
+    };
+
     const getCurrencySymbol = () => {
         return businessCurrency === 'MWK' ? 'MWK' : '$';
     };
@@ -347,6 +566,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
         const itemCount = purchase.items.length;
         const totalQuantity = purchase.items.reduce((sum, item) => sum + item.quantityReceived, 0);
         const currencySymbol = getCurrencySymbol();
+        const resolvedVat = resolveGroupVat(purchase);
+        const resolvedTotalWithVat = resolveGroupTotalWithVat(purchase);
         
         return (
             <Card key={purchase.groupId} className="mb-4 cursor-pointer hover:shadow-md transition-shadow" onClick={() => handleViewDetails(purchase)}>
@@ -357,9 +578,9 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                             <CardDescription>{purchase.displayDate}</CardDescription>
                         </div>
                         <div className="text-right">
-                            <p className="font-semibold text-lg">{currencySymbol} {purchase.totalWithVat.toFixed(2)}</p>
-                            {purchase.totalVat > 0 && (
-                                <p className="text-xs text-muted-foreground">VAT: {currencySymbol} {purchase.totalVat.toFixed(2)}</p>
+                            <p className="font-semibold text-lg">{currencySymbol} {resolvedTotalWithVat.toFixed(2)}</p>
+                            {resolvedVat > 0 && (
+                                <p className="text-xs text-muted-foreground">VAT: {currencySymbol} {resolvedVat.toFixed(2)}</p>
                             )}
                             <p className="text-xs text-muted-foreground">{itemCount} item{itemCount !== 1 ? 's' : ''}</p>
                         </div>
@@ -423,6 +644,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                                     const totalQuantity = purchase.items.reduce((sum, item) => sum + item.quantityReceived, 0);
                                     const currencySymbol = getCurrencySymbol();
                                     const isDirty = purchase.items.some(item => item._dirty);
+                                    const resolvedVat = resolveGroupVat(purchase);
+                                    const resolvedTotalWithVat = resolveGroupTotalWithVat(purchase);
                                     
                                     return (
                                         <TableRow key={purchase.groupId} className="cursor-pointer hover:bg-muted/50">
@@ -432,8 +655,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                                             <TableCell className="text-right">{totalQuantity}</TableCell>
                                             <TableCell><Badge variant={purchase.paymentStatus === 'Paid' ? 'secondary' : 'outline'} className="text-xs">{purchase.paymentStatus}</Badge></TableCell>
                                             <TableCell className="text-right font-semibold">{currencySymbol} {purchase.totalCost.toFixed(2)}</TableCell>
-                                            <TableCell className="text-right">{currencySymbol} {purchase.totalVat.toFixed(2)}</TableCell>
-                                            <TableCell className="text-right font-semibold">{currencySymbol} {purchase.totalWithVat.toFixed(2)}</TableCell>
+                                            <TableCell className="text-right">{currencySymbol} {resolvedVat.toFixed(2)}</TableCell>
+                                            <TableCell className="text-right font-semibold">{currencySymbol} {resolvedTotalWithVat.toFixed(2)}</TableCell>
                                             <TableCell className="text-center">
                                                 {isDirty ? (
                                                     <div className="flex items-center justify-center gap-1">
@@ -494,7 +717,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                             <Button
                                 variant="outline"
                                 onClick={handleDownloadInvoicePdf}
-                                disabled={!selectedPurchase || isExportingInvoice}
+                                disabled={!selectedPurchase || isExportingInvoice || isDeletingPurchase}
                             >
                                 {isExportingInvoice ? (
                                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -503,11 +726,30 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                                 )}
                                 Download Invoice PDF
                             </Button>
+                            <Button
+                                variant="destructive"
+                                onClick={() => setIsDeleteDialogOpen(true)}
+                                disabled={!selectedPurchase || isDeletingPurchase}
+                            >
+                                {isDeletingPurchase ? (
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                ) : (
+                                    <Trash2 className="mr-2 h-4 w-4" />
+                                )}
+                                Delete Purchase
+                            </Button>
                         </div>
                     </DialogHeader>
                     
                     {selectedPurchase && (
                         <div className="flex-1 overflow-y-auto -mx-6 px-6">
+                            {(() => {
+                                const resolvedSubtotal = resolveGroupSubtotal(selectedPurchase);
+                                const resolvedVat = resolveGroupVat(selectedPurchase);
+                                const resolvedTotalWithVat = resolveGroupTotalWithVat(selectedPurchase);
+
+                                return (
+                            <>
                             {/* Purchase Summary */}
                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6 p-4 bg-muted rounded-lg">
                                 <div>
@@ -529,16 +771,16 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                                 <div>
                                     <p className="text-xs text-muted-foreground">Subtotal (Excl VAT)</p>
                                     <p className="font-semibold text-lg">
-                                        {getCurrencySymbol()} {(selectedPurchase.totalWithVat - selectedPurchase.totalVat).toFixed(2)}
+                                        {getCurrencySymbol()} {resolvedSubtotal.toFixed(2)}
                                     </p>
                                 </div>
                                 <div>
                                     <p className="text-xs text-muted-foreground">VAT</p>
-                                    <p className="font-semibold text-lg">{getCurrencySymbol()} {selectedPurchase.totalVat.toFixed(2)}</p>
+                                    <p className="font-semibold text-lg">{getCurrencySymbol()} {resolvedVat.toFixed(2)}</p>
                                 </div>
                                 <div>
                                     <p className="text-xs text-muted-foreground">Total (Incl VAT)</p>
-                                    <p className="font-semibold text-lg">{getCurrencySymbol()} {selectedPurchase.totalWithVat.toFixed(2)}</p>
+                                    <p className="font-semibold text-lg">{getCurrencySymbol()} {resolvedTotalWithVat.toFixed(2)}</p>
                                 </div>
                                 <div>
                                     <p className="text-xs text-muted-foreground">Amount Due</p>
@@ -603,10 +845,37 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                                     </Table>
                                 </div>
                             </div>
+                            </>
+                                );
+                            })()}
                         </div>
                     )}
                 </DialogContent>
             </Dialog>
+
+            <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>Delete this purchase?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                            This will delete the purchase and remove only the stock that is still available from its batches.
+                            Already consumed stock is not restored. This action cannot be undone.
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel disabled={isDeletingPurchase}>Cancel</AlertDialogCancel>
+                        <AlertDialogAction
+                            onClick={(event) => {
+                                event.preventDefault();
+                                void handleDeletePurchase();
+                            }}
+                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                        >
+                            {isDeletingPurchase ? 'Deleting...' : 'Delete Purchase'}
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
         </>
     );
 }

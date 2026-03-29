@@ -44,6 +44,7 @@ type ReceiveStockFormValues = {
     productId: string;
     quantity: number;
     cost: number;
+    sellingPrice?: number;
     taxRate?: number;
     taxCalculationMethod?: 'inclusive' | 'exclusive';
     batchNumber?: string;
@@ -76,6 +77,18 @@ const normalizeTaxRate = (value: unknown): number => {
 
 const resolveTaxMethod = (value: unknown): 'inclusive' | 'exclusive' => {
     return value === 'inclusive' ? 'inclusive' : 'exclusive';
+};
+
+const toOptionalNumber = (value: unknown): number | undefined => {
+    if (value === undefined || value === null || value === '') {
+        return undefined;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const isPriceLocked = (item?: InventoryItem | null): boolean => {
+    return Boolean(item?.price_locked ?? item?.priceLocked);
 };
 
 const calculateItemVat = (
@@ -234,6 +247,8 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     const normalizedUserRole = String(user?.role || '').toLowerCase();
     const isAdminUser = normalizedUserRole === 'admin' || normalizedUserRole === 'owner' || normalizedUserRole === 'administrator';
     const manualSessionSelectionRef = React.useRef(false);
+    const shouldAutoOpenNewProductPickerRef = React.useRef(false);
+    const productSearchInputRefs = React.useRef<Record<string, HTMLInputElement | null>>({});
     
     // NEW: Get active session ID from Dexie (same pattern as waste form)
     const [sessionId, setSessionId] = React.useState<string | undefined>(undefined);
@@ -403,7 +418,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
             referenceNumber: '',
             vatAmount: undefined,
             paymentStatus: 'Paid',
-            items: [{ productId: '', quantity: 1, cost: 0, taxRate: 0, taxCalculationMethod: 'exclusive' }],
+            items: [{ productId: '', quantity: 1, cost: 0, sellingPrice: undefined, taxRate: 0, taxCalculationMethod: 'exclusive' }],
         }
     });
     const { control, handleSubmit, setValue, getValues } = form;
@@ -411,6 +426,28 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         control,
         name: "items",
     });
+
+    React.useEffect(() => {
+        if (!shouldAutoOpenNewProductPickerRef.current || fields.length === 0) {
+            return;
+        }
+
+        const newestFieldId = fields[fields.length - 1]?.id;
+        if (!newestFieldId) {
+            shouldAutoOpenNewProductPickerRef.current = false;
+            return;
+        }
+
+        shouldAutoOpenNewProductPickerRef.current = false;
+        setProductSearchTerms((current) => ({
+            ...current,
+            [newestFieldId]: '',
+        }));
+        setProductPickerOpen((current) => ({
+            ...current,
+            [newestFieldId]: true,
+        }));
+    }, [fields]);
 
     const supplierId = useWatch({ control, name: "supplierId" });
     const watchedItems = useWatch({ control, name: "items" }) || [];
@@ -436,7 +473,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     const handleFuelModeToggle = React.useCallback((checked: boolean) => {
         if (!canToggleFuelMode) return;
         setIsFuelMode(checked);
-        replace([{ productId: '', quantity: 1, cost: 0, taxRate: 0, taxCalculationMethod: 'exclusive' }]);
+        replace([{ productId: '', quantity: 1, cost: 0, sellingPrice: undefined, taxRate: 0, taxCalculationMethod: 'exclusive' }]);
     }, [replace, canToggleFuelMode]);
 
     const supplierFilteredProducts = supplierId 
@@ -582,6 +619,14 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                 shouldDirty: true,
                 shouldTouch: true,
             });
+            setValue(
+                `items.${rowIndex}.sellingPrice`,
+                toOptionalNumber(product.price) ?? 0,
+                {
+                    shouldDirty: true,
+                    shouldTouch: true,
+                }
+            );
             const taxDefaults = getDefaultTaxForProduct(product.id);
             setValue(`items.${rowIndex}.taxRate`, taxDefaults.taxRate, {
                 shouldDirty: true,
@@ -610,6 +655,19 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
             [rowFieldId]: false,
         }));
     }, [getDefaultTaxForProduct, getValues, setValue]);
+
+    const handleAddItem = React.useCallback(() => {
+        shouldAutoOpenNewProductPickerRef.current = true;
+        append({
+            productId: '',
+            quantity: 1,
+            cost: 0,
+            sellingPrice: undefined,
+            taxRate: 0,
+            taxCalculationMethod: 'exclusive',
+            batchNumber: ''
+        });
+    }, [append]);
 
     const liveTotals = React.useMemo(() => {
         const items = (watchedItems || []).filter(
@@ -780,6 +838,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
             // Generate UUID v4 like suppliers do
             const poId = uuidv4();
             const baseReceivedAt = Date.now();
+            const updatedInventoryItemIds = new Set<string>();
             
             console.log('[Purchases] Form submission - validItems:', validItems);
             console.log('[Purchases] Calculated totalCost:', totalCost);
@@ -803,17 +862,41 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                             ? itemTotalCost
                             : Math.max(0, itemTotalCost - itemVatAmount);
                     const netCostPerUnit = quantityReceived > 0 ? itemNetTotal / quantityReceived : costPerUnit;
-
                     const newStock = (product.stockUnits || 0) + quantityReceived;
+                    const normalizedNetCost = Number.isFinite(netCostPerUnit)
+                        ? Number(netCostPerUnit.toFixed(4))
+                        : Number(product.cost || 0);
+                    const nextValue = Number.isFinite(newStock * normalizedNetCost)
+                        ? Number((newStock * normalizedNetCost).toFixed(2))
+                        : product.value;
+                    const submittedSellingPrice = Number(item.sellingPrice);
+                    const hasSubmittedSellingPrice =
+                        item.sellingPrice !== undefined &&
+                        item.sellingPrice !== null &&
+                        Number.isFinite(submittedSellingPrice) &&
+                        submittedSellingPrice >= 0;
+                    const normalizedSellingPrice = hasSubmittedSellingPrice
+                        ? Number(submittedSellingPrice.toFixed(2))
+                        : undefined;
+                    const currentSellingPrice = toOptionalNumber(product.price);
+                    const productPriceLocked = isPriceLocked(product);
                     
-                    // Update main inventory item. Cost will be latest cost.
-                    await db.inventory.update(item.productId, {
+                    // Update main inventory item. Cost follows the latest received net cost.
+                    const inventoryUpdate: Partial<InventoryItem> = {
                         stockUnits: newStock,
-                        cost: Number(netCostPerUnit.toFixed(4)),
+                        cost: normalizedNetCost,
+                        value: nextValue,
                         status: newStock > (product.reorderLevel || 0) ? 'In Stock' : (newStock > 0 ? 'Low Stock' : 'Out of Stock'),
                         _dirty: true,
                         _operation: 'update'
-                    });
+                    };
+
+                    if (!productPriceLocked && normalizedSellingPrice !== undefined && normalizedSellingPrice !== currentSellingPrice) {
+                        inventoryUpdate.price = normalizedSellingPrice;
+                    }
+
+                    await db.inventory.update(item.productId, inventoryUpdate);
+                    updatedInventoryItemIds.add(item.productId);
 
                     const receivedDate = new Date(baseReceivedAt + index).toISOString();
 
@@ -898,8 +981,10 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                 console.log('[Purchases] Created purchase order header:', poId);
             });
 
-            // Mark items for sync
-            await syncService.markAsDirty('InventoryItem', data.items[0]?.productId || '', 'update');
+            // Mark updated inventory items for sync
+            for (const inventoryItemId of updatedInventoryItemIds) {
+                await syncService.markAsDirty('InventoryItem', inventoryItemId, 'update');
+            }
             // Mark PurchaseOrder for sync (header only, items come from PurchaseRecord)
             await syncService.markAsDirty('PurchaseOrder', poId, 'create');
 
@@ -1110,6 +1195,8 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                             const productSearchTerm = productSearchTerms[field.id] || '';
                             const searchableProducts = filterProductsBySearch(availableProducts, productSearchTerm);
                             const rowItem = watchedItems?.[index];
+                            const selectedProductId = String(rowItem?.productId || '').trim();
+                            const selectedProduct = inventoryItems.find((item) => item.id === selectedProductId);
                             const rowQuantity = Number(rowItem?.quantity || 0);
                             const rowCost = Number(rowItem?.cost || 0);
                             const rowRate = normalizeTaxRate(rowItem?.taxRate);
@@ -1120,7 +1207,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                             return (
                             <div key={field.id} className="p-4 border rounded-lg space-y-4">
                                 <div className="grid grid-cols-12 gap-2 items-start">
-                                    <div className="col-span-11 grid grid-cols-1 sm:grid-cols-5 gap-2">
+                                    <div className="col-span-11 grid grid-cols-1 sm:grid-cols-6 gap-2">
                                         <FormField
                                             control={control}
                                             name={`items.${index}.productId`}
@@ -1145,6 +1232,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                                     role="combobox"
                                                                     className={cn(
                                                                         'w-full justify-between',
+                                                                        productPickerOpen[field.id] && 'ring-2 ring-ring ring-offset-2',
                                                                         !selectField.value && 'text-muted-foreground'
                                                                     )}
                                                                     disabled={isSubmitting}
@@ -1158,9 +1246,19 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                                 </Button>
                                                             </FormControl>
                                                         </PopoverTrigger>
-                                                        <PopoverContent className="w-[320px] p-0" align="start">
+                                                        <PopoverContent
+                                                            className="w-[320px] p-0"
+                                                            align="start"
+                                                            onOpenAutoFocus={(event) => {
+                                                                event.preventDefault();
+                                                                productSearchInputRefs.current[field.id]?.focus();
+                                                            }}
+                                                        >
                                                             <div className="border-b p-2">
                                                                 <Input
+                                                                    ref={(node) => {
+                                                                        productSearchInputRefs.current[field.id] = node;
+                                                                    }}
                                                                     placeholder="Search products..."
                                                                     value={productSearchTerm}
                                                                     onChange={(e) =>
@@ -1244,6 +1342,35 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                 </FormControl>
                                             </FormItem>
                                         )} />
+                                        <FormField
+                                            control={control}
+                                            name={`items.${index}.sellingPrice`}
+                                            rules={{ min: 0 }}
+                                            render={({ field }) => (
+                                                <FormItem>
+                                                    <FormLabel className="text-xs">Selling Price</FormLabel>
+                                                    <FormControl>
+                                                        <Input
+                                                            type="number"
+                                                            step="0.01"
+                                                            placeholder="Selling price"
+                                                            value={field.value ?? ''}
+                                                            onChange={(e) =>
+                                                                field.onChange(
+                                                                    e.target.value === '' ? undefined : Number(e.target.value)
+                                                                )
+                                                            }
+                                                            disabled={isSubmitting || isPriceLocked(selectedProduct)}
+                                                        />
+                                                    </FormControl>
+                                                    {isPriceLocked(selectedProduct) && (
+                                                        <p className="text-[11px] text-muted-foreground">
+                                                            Selling price is locked for this product.
+                                                        </p>
+                                                    )}
+                                                </FormItem>
+                                            )}
+                                        />
                                         <FormField
                                             control={control}
                                             name={`items.${index}.taxRate`}
@@ -1344,16 +1471,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                         <Button
                             type="button"
                             variant="outline"
-                            onClick={() =>
-                                append({
-                                    productId: '',
-                                    quantity: 1,
-                                    cost: 0,
-                                    taxRate: 0,
-                                    taxCalculationMethod: 'exclusive',
-                                    batchNumber: ''
-                                })
-                            }
+                            onClick={handleAddItem}
                             disabled={isSubmitting}
                         >
                             <Plus className="mr-2 h-4 w-4" /> Add Item

@@ -149,22 +149,20 @@ class AuthenticatedFetch {
     requestUrl: string,
     options: { queued?: boolean; offline?: boolean } = {}
   ): Error {
-    const requestLabel = requestUrl;
-    const prefix = options.offline
-      ? 'Offline - request queued for retry.'
-      : options.queued
-        ? 'Network error - request queued for retry.'
-        : 'Could not reach the server.';
-    const hint =
-      typeof navigator !== 'undefined' && navigator.onLine === false
-        ? 'This device appears to be offline.'
-        : 'Check internet access, VPN/proxy/firewall, Windows date and time, or SSL certificate trust on this PC.';
+    const userMessage = options.queued
+      ? options.offline
+        ? 'Offline - request queued for retry'
+        : 'Network error - request queued for retry'
+      : options.offline
+        ? 'No internet connection.'
+        : 'Internet access problem. Please check your connection and try again.';
     const originalMessage = error instanceof Error ? error.message : String(error ?? '');
 
-    const wrapped = new Error(`${prefix} ${hint} Request URL: ${requestLabel}`);
+    const wrapped = new Error(userMessage);
     (wrapped as any).isNetworkError = true;
     (wrapped as any).requestUrl = requestUrl;
     (wrapped as any).originalMessage = originalMessage;
+    (wrapped as any).debugMessage = `Request URL: ${requestUrl}`;
 
     if (error instanceof Error && error.stack) {
       wrapped.stack = error.stack;
@@ -576,7 +574,7 @@ class AuthenticatedFetch {
       if (isOffline && method !== 'GET') {
         this.queueRequest(method, fullUrl, fetchOptions.body, meta);
         console.log(`Queued ${method} request to ${fullUrl} because the device is offline`);
-        throw this.createReachabilityError(error, fullUrl, { offline: true });
+        throw this.createReachabilityError(error, fullUrl, { queued: true, offline: true });
       }
 
       if (isNetworkError && method !== 'GET') {
@@ -586,7 +584,7 @@ class AuthenticatedFetch {
       }
 
       if (isNetworkError || isOffline) {
-        throw this.createReachabilityError(error, fullUrl, isOffline ? { offline: false } : {});
+        throw this.createReachabilityError(error, fullUrl, isOffline ? { offline: true } : {});
       }
 
       throw error;

@@ -59,6 +59,12 @@ interface Branch {
   address?: string;
 }
 
+const getErrorMessage = (error: unknown, fallback: string): string =>
+  error instanceof Error && error.message ? error.message : fallback;
+
+const getErrorTitle = (error: unknown, fallback: string): string =>
+  (error as any)?.isNetworkError ? 'Connection Problem' : fallback;
+
 export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [businesses, setBusinesses] = useState<Business[]>([]);
@@ -429,11 +435,11 @@ export default function LoginPage() {
       );
     } catch (error: any) {
       console.error('Login error:', error);
-      const errorMsg = error.message || 'Invalid credentials. Please try again.';
+      const errorMsg = getErrorMessage(error, 'Invalid credentials. Please try again.');
       setError(errorMsg);
       toast({
         variant: 'destructive',
-        title: 'Login Failed',
+        title: getErrorTitle(error, 'Login Failed'),
         description: errorMsg,
       });
     } finally {
@@ -779,11 +785,11 @@ export default function LoginPage() {
       return;
     } catch (error: any) {
       console.error('Business selection error:', error);
-      const errorMsg = error.message || 'Failed to process login. Please try again.';
+      const errorMsg = getErrorMessage(error, 'Failed to process login. Please try again.');
       setError(errorMsg);
       toast({
         variant: 'destructive',
-        title: 'Error',
+        title: getErrorTitle(error, 'Error'),
         description: errorMsg,
       });
     } finally {
@@ -839,11 +845,11 @@ export default function LoginPage() {
       );
     } catch (error: any) {
       console.error('Business selection error:', error);
-      const errorMsg = error.message || 'Failed to select business. Please try again.';
+      const errorMsg = getErrorMessage(error, 'Failed to select business. Please try again.');
       setError(errorMsg);
       toast({
         variant: 'destructive',
-        title: 'Error',
+        title: getErrorTitle(error, 'Error'),
         description: errorMsg,
       });
     } finally {
@@ -920,11 +926,11 @@ export default function LoginPage() {
       return;
     } catch (error: any) {
       console.error('Branch selection error:', error);
-      const errorMsg = error.message || 'Failed to select branch. Please try again.';
+      const errorMsg = getErrorMessage(error, 'Failed to select branch. Please try again.');
       setError(errorMsg);
       toast({
         variant: 'destructive',
-        title: 'Error',
+        title: getErrorTitle(error, 'Error'),
         description: errorMsg,
       });
     } finally {

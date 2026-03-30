@@ -121,6 +121,59 @@ class AuthenticatedFetch {
   }
 
   /**
+   * Detect fetch-level failures where the request never produced an HTTP response.
+   */
+  private isLikelyNetworkError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    const normalizedMessage = message.trim().toLowerCase();
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return true;
+    }
+
+    return (
+      normalizedMessage.includes('failed to fetch') ||
+      normalizedMessage.includes('networkerror') ||
+      normalizedMessage.includes('network request failed') ||
+      normalizedMessage.includes('load failed') ||
+      normalizedMessage.includes('fetch failed') ||
+      normalizedMessage.includes('timeout')
+    );
+  }
+
+  /**
+   * Provide a more actionable message for desktop users when the backend cannot be reached.
+   */
+  private createReachabilityError(
+    error: unknown,
+    requestUrl: string,
+    options: { queued?: boolean; offline?: boolean } = {}
+  ): Error {
+    const requestLabel = requestUrl;
+    const prefix = options.offline
+      ? 'Offline - request queued for retry.'
+      : options.queued
+        ? 'Network error - request queued for retry.'
+        : 'Could not reach the server.';
+    const hint =
+      typeof navigator !== 'undefined' && navigator.onLine === false
+        ? 'This device appears to be offline.'
+        : 'Check internet access, VPN/proxy/firewall, Windows date and time, or SSL certificate trust on this PC.';
+    const originalMessage = error instanceof Error ? error.message : String(error ?? '');
+
+    const wrapped = new Error(`${prefix} ${hint} Request URL: ${requestLabel}`);
+    (wrapped as any).isNetworkError = true;
+    (wrapped as any).requestUrl = requestUrl;
+    (wrapped as any).originalMessage = originalMessage;
+
+    if (error instanceof Error && error.stack) {
+      wrapped.stack = error.stack;
+    }
+
+    return wrapped;
+  }
+
+  /**
    * Parse queued body safely (body is often JSON stringified before being passed to fetch)
    */
   private parseQueueBody(body?: any): any {
@@ -515,28 +568,25 @@ class AuthenticatedFetch {
 
       return await response.json();
     } catch (error: any) {
-      // Check if it's a network error (backend unreachable)
-      const isNetworkError = 
-        error?.message?.includes('Failed to fetch') ||
-        error?.message?.includes('Network') ||
-        error?.message?.includes('timeout') ||
-        error?.name === 'TypeError' ||
-        !navigator.onLine;
+      const isOffline =
+        !this.isOnline ||
+        (typeof navigator !== 'undefined' && navigator.onLine === false);
+      const isNetworkError = this.isLikelyNetworkError(error);
 
-      // If it's a network error and method is not GET, queue the request for retry
+      if (isOffline && method !== 'GET') {
+        this.queueRequest(method, fullUrl, fetchOptions.body, meta);
+        console.log(`Queued ${method} request to ${fullUrl} because the device is offline`);
+        throw this.createReachabilityError(error, fullUrl, { offline: true });
+      }
+
       if (isNetworkError && method !== 'GET') {
         console.log(`[AuthFetch] Network error - queueing ${method} request to ${fullUrl} for retry`);
         this.queueRequest(method, fullUrl, fetchOptions.body, meta);
-        // Throw error so sync service knows it failed
-        throw new Error(`Network error - request queued for retry: ${error?.message}`);
+        throw this.createReachabilityError(error, fullUrl, { queued: true });
       }
 
-      // If online request fails and offline mode enabled, queue it
-      if (!this.isOnline && method !== 'GET') {
-        this.queueRequest(method, fullUrl, fetchOptions.body, meta);
-        console.log(`Queued ${method} request to ${fullUrl} due to error`);
-        // Throw error so caller knows it failed
-        throw new Error(`Offline - request queued for retry`);
+      if (isNetworkError || isOffline) {
+        throw this.createReachabilityError(error, fullUrl, isOffline ? { offline: false } : {});
       }
 
       throw error;
@@ -606,7 +656,9 @@ class AuthenticatedFetch {
       return data;
     } catch (error) {
       console.error('[DEBUG LOGIN] Login error:', error);
-      // Don't queue login requests - they should fail immediately
+      if (this.isLikelyNetworkError(error)) {
+        throw this.createReachabilityError(error, fullUrl);
+      }
       throw error;
     }
   }

@@ -33,6 +33,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/use-auth';
+import { getInventoryTemplateColumnsForBusinessType } from './import-template-config';
 
 type Branch = { id: string; name: string; address: string; };
 type ImportMode = 'csv' | 'branch';
@@ -436,59 +437,6 @@ const parseInventoryCsvRow = (
   };
 };
 
-const getTemplateColumnsForBusinessType = (businessType: BusinessType): string[] => {
-  const isRestaurantOrBar = businessType === 'Restaurant' || businessType === 'Bar & Liquor';
-
-  if (!isRestaurantOrBar) {
-    const columns = [
-      'name',
-      'category',
-      'barcode',
-      'currentStock',
-      'price',
-      'cost',
-      'taxRate',
-      'taxCalculationMethod',
-      'mraProductCode',
-      'mraProductName',
-      'mraTaxType',
-      'mraTaxRate',
-      'mraUnitMeasure',
-      'unitType',
-      'reorderLevel',
-      'supplier',
-    ];
-    return columns;
-  }
-
-  const columns = [
-    'name',
-    'category',
-    'barcode',
-    'isProduced',
-    'currentStock',
-    'price',
-    'cost',
-    'taxRate',
-    'taxCalculationMethod',
-    'mraProductCode',
-    'mraProductName',
-    'mraTaxType',
-    'mraTaxRate',
-    'mraUnitMeasure',
-    'unitType',
-    'reorderLevel',
-    'supplier',
-  ];
-
-  if (businessType === 'Bar & Liquor') {
-    columns.push('isSoldInPortions', 'portionName', 'portionsPerUnit');
-  }
-
-  columns.push('recipe');
-  return columns;
-};
-
 const getTemplateFieldOptionsForBusinessType = (
   businessType: BusinessType,
   columns: string[]
@@ -680,7 +628,7 @@ export const ImportModal = ({
   );
 
   const templateColumns = useMemo(
-    () => getTemplateColumnsForBusinessType(businessType),
+    () => getInventoryTemplateColumnsForBusinessType(businessType),
     [businessType]
   );
   const templateRows = useMemo(
@@ -1385,24 +1333,22 @@ export const ImportModal = ({
           const taxMethod = entry.taxMethod;
           const itemVatAmount = calculateItemVat(costPerUnit, quantityReceived, taxRate, taxMethod);
           const itemGross = calculateItemGross(costPerUnit, quantityReceived, itemVatAmount, taxMethod);
-          const itemNetTotal =
-            taxMethod === 'exclusive'
-              ? itemTotalCost
-              : Math.max(0, itemTotalCost - itemVatAmount);
-          const netCostPerUnit = quantityReceived > 0 ? itemNetTotal / quantityReceived : costPerUnit;
-          const normalizedNetCost = Number.isFinite(netCostPerUnit) ? netCostPerUnit : Number(costPerUnit || 0);
+          const normalizedCostPerUnit = Number.isFinite(costPerUnit)
+            ? Number(costPerUnit.toFixed(4))
+            : Number(costPerUnit || 0);
           const receivedDate = new Date(baseReceivedAt + receivedIndexOffset).toISOString();
           receivedIndexOffset += 1;
 
           const product = await db.inventory.get(entry.itemId);
           if (product) {
             const newStock = (product.stockUnits || 0) + quantityReceived;
-            const nextValue = Number.isFinite(newStock * normalizedNetCost)
-              ? Number((newStock * normalizedNetCost).toFixed(2))
+            const nextValue = Number.isFinite(newStock * normalizedCostPerUnit)
+              ? Number((newStock * normalizedCostPerUnit).toFixed(2))
               : product.value;
             await db.inventory.update(entry.itemId, {
               stockUnits: newStock,
-              cost: Number(normalizedNetCost.toFixed(4)),
+              // Product import keeps the entered cost intact, even when VAT metadata is inclusive.
+              cost: normalizedCostPerUnit,
               value: nextValue,
               status:
                 newStock > (product.reorderLevel || 0)

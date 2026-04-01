@@ -134,7 +134,7 @@ code, pre {
 
 @layer base {
   html {
-    font-size: 15px;  /* Slightly reduced from default 16px */
+    font-size: 14px;
   }
   
   body {

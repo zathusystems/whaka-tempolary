@@ -1333,17 +1333,17 @@ function AppSidebar({ user, onPosClick }: { user: User, onPosClick?: () => void 
 
   return (
     <>
-      <SidebarHeader className="p-4">
+      <SidebarHeader className="p-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3 group-data-[collapsible=icon]:hidden">
-            <HandyPosLogo className="size-8" />
-            <span className="text-lg font-semibold">Mwaka POS</span>
+            <HandyPosLogo className="size-7" />
+            <span className="text-base font-semibold tracking-tight">Mwaka POS</span>
           </div>
           <SidebarTrigger className="hidden lg:block" />
         </div>
       </SidebarHeader>
 
-      <SidebarContent className="flex-1 p-2">
+      <SidebarContent className="flex-1 px-2 py-1.5">
         <SidebarMenu>
           {filteredItems.map((item) => {
             const isActive = isNavItemActive(pathname, item.href);
@@ -1382,7 +1382,7 @@ function AppSidebar({ user, onPosClick }: { user: User, onPosClick?: () => void 
         </SidebarMenu>
       </SidebarContent>
 
-      <SidebarFooter className="p-2">
+      <SidebarFooter className="p-2 pt-1">
         <SidebarMenu>
           {filteredSettingsItems.map((item) => {
             const isActive = isNavItemActive(pathname, item.href);
@@ -1509,8 +1509,10 @@ export default function DashboardLayout({
         </Sidebar>
         <div className="flex-1 flex flex-col overflow-y-auto">
           <Header />
-          <main className="flex-1 bg-background/95 p-4 sm:p-6 w-full">
-            {children}
+          <main className="flex-1 w-full bg-background/95">
+            <div className="mx-auto flex h-full w-full max-w-[1540px] flex-col px-4 py-4 sm:px-6 lg:px-8 xl:py-6 2xl:px-10">
+              {children}
+            </div>
           </main>
         </div>
       </div>

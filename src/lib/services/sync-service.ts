@@ -1588,6 +1588,19 @@ class SyncService {
         return;
       }
 
+      if (localItem._operation === 'delete') {
+        await db.inventory.delete(localId);
+        await db.mraMappings.where('inventoryItemId').equals(localId).delete();
+
+        if (serverId && serverId !== localId) {
+          await db.inventory.delete(serverId);
+          await db.mraMappings.where('inventoryItemId').equals(serverId).delete();
+        }
+
+        console.log(`[Sync] Removed deleted inventory item ${localId} after backend acknowledgement`);
+        return;
+      }
+
       if (!serverId || serverId === localId) {
         await db.inventory.update(localId, {
           _dirty: false,

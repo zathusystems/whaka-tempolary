@@ -25,12 +25,13 @@ import {
 } from 'lucide-react';
 
 import { toast } from '@/hooks/use-toast';
-import { type InventoryItem, type RecipeIngredient } from '@/lib/db';
+import { db, type InventoryItem, type MRAMapping, type RecipeIngredient } from '@/lib/db';
 import { type BusinessType } from '@/lib/inventory/config';
 import { deleteProduct } from '@/lib/services/product-service';
 import { useAuth } from '@/hooks/use-auth';
 import { useCurrency } from '@/hooks/use-currency';
 import { ProductDetailsModal } from './product-details-modal';
+import { getInventoryTemplateColumnsForBusinessType } from './import-template-config';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -68,6 +69,11 @@ const toSafeNumber = (value: unknown): number => {
     return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const toOptionalCsvNumber = (value: unknown): number | '' => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : '';
+};
+
 const getVariablePriceLabel = (unitType?: string): string => {
     const unit = String(unitType || '').trim().toLowerCase();
     if (!unit) return 'Variable Price';
@@ -80,35 +86,50 @@ const getVariablePriceLabel = (unitType?: string): string => {
     return 'Variable Price';
 };
 
-const toExportCsvRow = (item: InventoryItem) => ({
-    id: item.id,
-    name: item.name || '',
-    itemType: item.itemType || 'sellable',
-    category: item.category || '',
-    stockUnits: Number(item.stockUnits || 0),
-    unitType: item.unitType || 'unit',
-    reorderLevel: Number(item.reorderLevel || 0),
-    cost: item.cost ?? '',
-    price: item.price ?? '',
-    value: item.value ?? '',
-    status: item.status || '',
-    supplier: item.supplier || '',
-    manufacturer: item.manufacturer || '',
-    brand: item.brand || '',
-    batch: item.batch || '',
-    packSize: item.packSize ?? '',
-    productCode: item.productCode || '',
-    barcode: item.barcode || '',
-    sku: item.sku || '',
-    expiry: item.expiry || '',
-    isVariablePrice: toCsvBoolean(item.isVariablePrice),
-    isProduced: toCsvBoolean(item.isProduced),
-    onMenu: toCsvBoolean(item.onMenu),
-    isSoldInPortions: toCsvBoolean(item.isSoldInPortions),
-    portionName: item.portionName || '',
-    portionsPerUnit: item.portionsPerUnit ?? '',
-    recipe: JSON.stringify(item.recipe || []),
-});
+const toTemplateExportCsvRow = (
+    item: InventoryItem,
+    columns: string[],
+    mapping?: MRAMapping
+) => {
+    const itemWithOptionalTax = item as InventoryItem & {
+        taxRate?: number;
+        taxCalculationMethod?: 'inclusive' | 'exclusive';
+        mraProductCode?: string;
+        mraProductName?: string;
+        mraTaxType?: string;
+        mraTaxRate?: number;
+        mraUnitMeasure?: string;
+    };
+
+    const sourceRow: Record<string, string | number> = {
+        name: item.name || '',
+        category: item.category || '',
+        barcode: item.barcode || '',
+        isProduced: toCsvBoolean(item.isProduced),
+        currentStock: Number(item.stockUnits || 0),
+        price: item.price ?? '',
+        cost: item.cost ?? '',
+        taxRate: toOptionalCsvNumber(itemWithOptionalTax.taxRate ?? mapping?.mraTaxRate),
+        taxCalculationMethod: itemWithOptionalTax.taxCalculationMethod ?? mapping?.taxCalculationMethod ?? '',
+        mraProductCode: itemWithOptionalTax.mraProductCode ?? mapping?.mraProductCode ?? '',
+        mraProductName: itemWithOptionalTax.mraProductName ?? mapping?.mraProductName ?? '',
+        mraTaxType: itemWithOptionalTax.mraTaxType ?? mapping?.mraTaxType ?? '',
+        mraTaxRate: toOptionalCsvNumber(itemWithOptionalTax.mraTaxRate ?? mapping?.mraTaxRate),
+        mraUnitMeasure: itemWithOptionalTax.mraUnitMeasure ?? mapping?.mraUnitMeasure ?? item.unitType ?? '',
+        unitType: item.unitType || 'unit',
+        reorderLevel: Number(item.reorderLevel || 0),
+        supplier: item.supplier || '',
+        isSoldInPortions: toCsvBoolean(item.isSoldInPortions),
+        portionName: item.portionName || '',
+        portionsPerUnit: item.portionsPerUnit ?? '',
+        recipe: item.recipe && item.recipe.length > 0 ? JSON.stringify(item.recipe) : '',
+    };
+
+    return columns.reduce<Record<string, string | number>>((row, column) => {
+        row[column] = sourceRow[column] ?? '';
+        return row;
+    }, {});
+};
 
 interface InventoryTabProps {
     inventoryData: InventoryItem[];
@@ -153,6 +174,10 @@ export function InventoryTab({
     const currencySymbol = getCurrencySymbol();
     const showItemTypeBadge =
       currentBusinessType === 'Restaurant' || currentBusinessType === 'Bar & Liquor';
+    const exportTemplateColumns = React.useMemo(
+        () => getInventoryTemplateColumnsForBusinessType(currentBusinessType),
+        [currentBusinessType]
+    );
     
     // Product details modal state
     const [selectedProduct, setSelectedProduct] = useState<InventoryItem | null>(null);
@@ -203,26 +228,59 @@ export function InventoryTab({
         onEditItem(item);
     };
 
-    const handleExport = () => {
+    const handleExport = async () => {
         if (!inventoryData || inventoryData.length === 0) {
             toast({ variant: 'destructive', title: 'No data to export' });
             return;
         }
 
-        const rows = inventoryData.map(toExportCsvRow);
-        const csv = Papa.unparse(rows);
-        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-        const link = document.createElement('a');
-        if (link.download !== undefined) {
-            const url = URL.createObjectURL(blob);
-            link.setAttribute('href', url);
-            link.setAttribute('download', 'inventory-export.csv');
-            link.style.visibility = 'hidden';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+        try {
+            const inventoryIds = inventoryData.map((item) => String(item.id)).filter(Boolean);
+            const mappings = inventoryIds.length > 0
+                ? await db.mraMappings
+                    .where('inventoryItemId')
+                    .anyOf(inventoryIds)
+                    .toArray()
+                : [];
+            const mappingByItemId = new Map<string, MRAMapping>();
+
+            mappings.forEach((mapping) => {
+                if (mapping._operation === 'delete') {
+                    return;
+                }
+
+                const itemId = String(mapping.inventoryItemId || '').trim();
+                if (!itemId || mappingByItemId.has(itemId)) {
+                    return;
+                }
+
+                mappingByItemId.set(itemId, mapping);
+            });
+
+            const rows = inventoryData.map((item) =>
+                toTemplateExportCsvRow(item, exportTemplateColumns, mappingByItemId.get(String(item.id)))
+            );
+            const csv = Papa.unparse(rows);
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            if (link.download !== undefined) {
+                const url = URL.createObjectURL(blob);
+                link.setAttribute('href', url);
+                link.setAttribute('download', 'inventory-export.csv');
+                link.style.visibility = 'hidden';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
+            toast({ title: 'Export Complete', description: `${inventoryData.length} items have been exported.` });
+        } catch (error) {
+            console.error('Failed to export inventory:', error);
+            toast({
+                variant: 'destructive',
+                title: 'Export Failed',
+                description: 'Could not export the inventory file. Please try again.',
+            });
         }
-        toast({ title: 'Export Complete', description: `${inventoryData.length} items have been exported.` });
     };
 
     const handleDeleteItem = async (itemId: string) => {

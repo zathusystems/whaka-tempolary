@@ -10,7 +10,6 @@ import {
   Package,
   History,
   Trash,
-  Trash2,
   Loader2,
 } from 'lucide-react';
 
@@ -514,12 +513,31 @@ export default function InventoryPage() {
           const sessionId = sessionIdRaw !== undefined && sessionIdRaw !== null && sessionIdRaw !== ''
             ? String(sessionIdRaw)
             : undefined;
+          const inventoryItemId = String(
+            waste.inventory_item ?? waste.inventoryItem ?? waste.item_id ?? waste.itemId ?? ''
+          ).trim();
+          let itemName =
+            waste.item_name ??
+            waste.itemName ??
+            waste.inventory_item_name ??
+            waste.inventoryItemName;
+
+          if ((!itemName || String(itemName).trim() === '') && inventoryItemId) {
+            try {
+              const inventoryItem = await db.inventory.get(inventoryItemId);
+              if (inventoryItem?.name) {
+                itemName = inventoryItem.name;
+              }
+            } catch {
+              // Ignore lookup errors and keep fallback below.
+            }
+          }
 
           await db.wasteLog.put({
             id: waste.id,
             branchId: branchId,
-            itemId: waste.inventory_item,
-            itemName: waste.item_name,
+            itemId: inventoryItemId,
+            itemName: String(itemName || 'Unknown Item'),
             quantity: parseFloat(waste.quantity || 0),
             unit: waste.unit,
             cost: parseFloat(waste.cost || 0),
@@ -630,7 +648,7 @@ export default function InventoryPage() {
   // Read tab parameter from URL
   useEffect(() => {
     const tabParam = searchParams.get('tab');
-    if (tabParam && ['inventory', 'purchases', 'transfers', 'waste'].includes(tabParam)) {
+    if (tabParam && ['inventory', 'purchases', 'transfers', 'waste', 'mra'].includes(tabParam)) {
       setActiveTab(tabParam);
     }
   }, [searchParams]);
@@ -735,9 +753,39 @@ export default function InventoryPage() {
         .then((data) => data.filter((record) => record._operation !== 'delete'));
   }, [activeBranchId], []);
 
+  const mraMappingsData = useLiveQuery(() => {
+      if (!activeBranchId) return [];
+
+      const branchCandidates = new Set(getBranchIdCandidates(activeBranchId));
+      const inventoryIds = new Set((inventoryData || []).map((item) => String(item.id)));
+
+      return db.mraMappings
+        .toArray()
+        .then((data) =>
+          data.filter((mapping) => {
+            if (mapping._operation === 'delete') {
+              return false;
+            }
+
+            const mappingBranchId = String(mapping.branchId || '').trim();
+            return branchCandidates.has(mappingBranchId) || inventoryIds.has(String(mapping.inventoryItemId || ''));
+          })
+        );
+  }, [activeBranchId, inventoryData], []);
+
   const isMobile = useIsMobile();
   
   const ingredients = inventoryData?.filter(item => item.itemType === 'ingredient') || [];
+  const groupedPurchaseCount = React.useMemo(() => {
+    const purchaseGroups = new Set(
+      (purchaseHistoryData || []).map((record) => record.purchaseOrderId || `${record.receivedDate}-${record.supplierId}`)
+    );
+    return purchaseGroups.size;
+  }, [purchaseHistoryData]);
+  const inventoryCountLabel = `(${inventoryData.length} item${inventoryData.length === 1 ? '' : 's'})`;
+  const purchaseCountLabel = `(${groupedPurchaseCount} item${groupedPurchaseCount === 1 ? '' : 's'})`;
+  const wasteCountLabel = `(${wasteLogData.length} item${wasteLogData.length === 1 ? '' : 's'})`;
+  const mraCountLabel = `(${mraMappingsData.length} item${mraMappingsData.length === 1 ? '' : 's'})`;
 
   useEffect(() => {
     if (!isDeleteAllInventoryOpen && !isDeletingAllInventory) {
@@ -1098,18 +1146,22 @@ export default function InventoryPage() {
                         <TabsTrigger value="inventory" className="whitespace-nowrap">
                             <Package className="mr-2 h-4 w-4" />
                             Current Stock
+                            <span className="ml-1 text-xs text-muted-foreground">{inventoryCountLabel}</span>
                         </TabsTrigger>
                         <TabsTrigger value="purchases" className="whitespace-nowrap">
                             <History className="mr-2 h-4 w-4" />
                             Purchase History
+                            <span className="ml-1 text-xs text-muted-foreground">{purchaseCountLabel}</span>
                         </TabsTrigger>
                         <TabsTrigger value="waste" className="whitespace-nowrap">
                             <Trash className="mr-2 h-4 w-4" />
                             Waste Log
+                            <span className="ml-1 text-xs text-muted-foreground">{wasteCountLabel}</span>
                         </TabsTrigger>
                         <TabsTrigger value="mra" className="whitespace-nowrap">
                             <Package className="mr-2 h-4 w-4" />
                             MRA Mappings
+                            <span className="ml-1 text-xs text-muted-foreground">{mraCountLabel}</span>
                         </TabsTrigger>
                     </TabsList>
                     </div>
@@ -1145,19 +1197,6 @@ export default function InventoryPage() {
                                 </DropdownMenuCheckboxItem>
                             </DropdownMenuContent>
                         </DropdownMenu>
-                        <Button
-                          variant="destructive"
-                          size="sm"
-                          onClick={() => setIsDeleteAllInventoryOpen(true)}
-                          disabled={isDeletingAllInventory}
-                        >
-                          {isDeletingAllInventory ? (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <Trash2 className="mr-2 h-4 w-4" />
-                          )}
-                          Clear All Data
-                        </Button>
                     </div>
                 </div>
             </CardHeader>
@@ -1236,14 +1275,14 @@ export default function InventoryPage() {
         </DialogContent>
     </Dialog>
      <Dialog open={isReceiveStockOpen} onOpenChange={setReceiveStockOpen}>
-        <DialogContent className="sm:max-w-3xl max-h-[90vh] flex flex-col">
+        <DialogContent className="sm:max-w-5xl max-h-[92vh] flex flex-col">
             <DialogHeader className="sticky top-0 bg-background z-10 pt-6">
             <DialogTitle>Receive Stock</DialogTitle>
             <DialogDescription>
                 Record new inventory received from a supplier.
             </DialogDescription>
         </DialogHeader>
-        <div className="flex-1 overflow-y-auto -mx-6 px-6">
+        <div className="-mx-6 px-6 pb-6">
             <ReceiveStockForm 
                 branchId={activeBranchId}
                 businessType={currentBusinessType} 

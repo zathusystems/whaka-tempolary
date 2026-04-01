@@ -58,6 +58,12 @@ export function VoidModal({
   const refundMethod = watch('refund_method');
   const refundAmount = parseFloat(watch('refund_amount') || '0');
 
+  React.useEffect(() => {
+    if (!isOpen) {
+      setIsLoading(false);
+    }
+  }, [isOpen]);
+
   const onSubmit = async (data: any) => {
     if (!order) return;
     if (!canVoid) {
@@ -90,43 +96,50 @@ export function VoidModal({
           description: `Order #${order.orderNumber} has been voided successfully.`,
         });
 
-        await logAuditAction({
-          userId: user?.uid || 'unknown',
-          userName: user?.displayName || user?.email || 'System',
-          branchId: order.branchId,
-          actionType: 'ORDER_VOID',
-          entityType: 'Order',
-          entityId: order.id,
-          details: {
-            orderNumber: order.orderNumber,
-            void_reason: data.void_reason,
-            refund_method: data.refund_method,
-            refund_amount: parseFloat(data.refund_amount),
-          },
-        });
-
-        // Refresh inventory from backend so stock updates appear immediately
-        try {
-          const branchId =
-            order.branchId ||
-            localStorage.getItem('handypos-active-branch') ||
-            'main';
-          const { syncService } = await import('@/lib/services/sync-service');
-          await syncService.fetchAllInventoryFromBackend(String(branchId));
-          console.log('[Void] Refreshed inventory after void');
-        } catch (syncError) {
-          console.warn('[Void] Failed to refresh inventory after void:', syncError);
-        }
-
         reset();
+        setIsLoading(false);
         onOpenChange(false);
-        
-        // Pass the updated order from the response to parent component
+
         if (response.order) {
           onVoidCreated?.(response.order);
         } else {
           onVoidCreated?.(order);
         }
+
+        try {
+          await logAuditAction({
+            userId: user?.uid || 'unknown',
+            userName: user?.displayName || user?.email || 'System',
+            branchId: order.branchId,
+            actionType: 'ORDER_VOID',
+            entityType: 'Order',
+            entityId: order.id,
+            details: {
+              orderNumber: order.orderNumber,
+              void_reason: data.void_reason,
+              refund_method: data.refund_method,
+              refund_amount: parseFloat(data.refund_amount),
+            },
+          });
+        } catch (auditError) {
+          console.warn('Failed to log void audit action:', auditError);
+        }
+
+        void (async () => {
+          try {
+            const branchId =
+              order.branchId ||
+              localStorage.getItem('handypos-active-branch') ||
+              'main';
+            const { syncService } = await import('@/lib/services/sync-service');
+            await syncService.fetchAllInventoryFromBackend(String(branchId));
+            console.log('[Void] Refreshed inventory after void');
+          } catch (syncError) {
+            console.warn('[Void] Failed to refresh inventory after void:', syncError);
+          }
+        })();
+
+        return;
       }
     } catch (error) {
       console.error('Error voiding sale:', error);

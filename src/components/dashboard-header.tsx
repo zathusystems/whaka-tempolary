@@ -208,13 +208,14 @@ export function DashboardHeader({
 
   return (
     <>
-      <header className="tauri-android-safe-top sticky top-0 z-10 flex h-16 w-full items-center justify-between gap-4 border-b bg-background/80 px-4 py-3 backdrop-blur-sm sm:px-6">
-        <div className="flex items-center gap-4 flex-1">
-          {children}
-        </div>
-        
-        {/* Sync Status Indicator */}
-        <div className="flex items-center gap-2">
+      <header className="tauri-android-safe-top sticky top-0 z-10 w-full border-b bg-background/80 backdrop-blur-sm">
+        <div className="mx-auto flex h-16 w-full max-w-[1540px] items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8 2xl:px-10">
+          <div className="flex min-w-0 flex-1 items-center gap-4">
+            {children}
+          </div>
+          
+          {/* Sync Status Indicator */}
+          <div className="flex shrink-0 items-center gap-2">
           {/* Online/Offline Status */}
           <div className={`flex items-center gap-1 px-2 py-1 rounded-md ${isOnline ? 'bg-green-500/10' : 'bg-destructive/10'}`}>
             {isOnline ? (
@@ -358,6 +359,7 @@ export function DashboardHeader({
             </DropdownMenu>
           )}
 
+          </div>
         </div>
       </header>
 

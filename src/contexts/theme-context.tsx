@@ -16,7 +16,7 @@ export interface ThemeSettings {
 
 const DEFAULT_SETTINGS: ThemeSettings = {
   theme: 'system',
-  fontSize: 'medium',
+  fontSize: 'small',
   fontFamily: 'inter',
   primaryColor: '263 88% 57%',
   accentColor: '236 100% 64%',
@@ -43,7 +43,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const stored = localStorage.getItem('theme-settings');
     if (stored) {
       try {
-        setSettings(JSON.parse(stored));
+        const parsed = JSON.parse(stored);
+        setSettings({
+          ...DEFAULT_SETTINGS,
+          ...parsed,
+        });
       } catch (e) {
         console.error('Failed to parse theme settings:', e);
       }

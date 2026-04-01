@@ -4,6 +4,7 @@
 import React, { useState, useEffect } from 'react';
 import { format } from 'date-fns';
 import { PlusCircle, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
+import { useLiveQuery } from 'dexie-react-hooks';
 
 import { db, type WasteRecord } from '@/lib/db';
 import { Button } from '@/components/ui/button';
@@ -26,20 +27,56 @@ export function WasteTab({ wasteLogData, isMobile, searchTerm, onRecordWaste, br
     const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
     const [pendingChanges, setPendingChanges] = useState(0);
     const normalizedSearchTerm = searchTerm.trim().toLowerCase();
+    const itemIds = React.useMemo(
+        () =>
+            Array.from(
+                new Set(
+                    (wasteLogData || [])
+                        .map((log) => String(log.itemId || '').trim())
+                        .filter((id) => id.length > 0)
+                )
+            ),
+        [wasteLogData]
+    );
+    const inventoryNamesById = useLiveQuery(async () => {
+        if (itemIds.length === 0) {
+            return new Map<string, string>();
+        }
+
+        const inventoryItems = await db.inventory.bulkGet(itemIds);
+        const names = new Map<string, string>();
+
+        for (const item of inventoryItems) {
+            if (!item?.id || !item?.name) continue;
+            names.set(String(item.id), item.name);
+        }
+
+        return names;
+    }, [itemIds], new Map<string, string>());
+
+    const getWasteItemName = React.useCallback((log: WasteRecord) => {
+        const localName = String(log.itemName || '').trim();
+        if (localName) {
+            return localName;
+        }
+
+        const fallbackName = inventoryNamesById.get(String(log.itemId || '').trim());
+        return fallbackName || 'Unknown Item';
+    }, [inventoryNamesById]);
 
     const filteredWasteLogData = React.useMemo(() => {
         if (!normalizedSearchTerm) return wasteLogData || [];
 
         return (wasteLogData || []).filter((log) =>
             [
-                log.itemName,
+                getWasteItemName(log),
                 log.reason,
                 log.recordedBy,
                 log.unit,
                 log.notes,
             ].some((value) => String(value || '').toLowerCase().includes(normalizedSearchTerm))
         );
-    }, [normalizedSearchTerm, wasteLogData]);
+    }, [getWasteItemName, normalizedSearchTerm, wasteLogData]);
 
     const {
         setCurrentPage,
@@ -126,7 +163,7 @@ export function WasteTab({ wasteLogData, isMobile, searchTerm, onRecordWaste, br
                         <div key={log.id} className="rounded-lg border bg-card p-4">
                             <div className="flex items-start justify-between gap-3">
                                 <div>
-                                    <p className="font-semibold leading-tight">{log.itemName}</p>
+                                    <p className="font-semibold leading-tight">{getWasteItemName(log)}</p>
                                     <p className="text-xs text-muted-foreground">{format(new Date(log.recordedAt), 'PP')}</p>
                                 </div>
                                 <p className="text-sm font-semibold text-destructive">-${log.cost.toFixed(2)}</p>
@@ -170,7 +207,7 @@ export function WasteTab({ wasteLogData, isMobile, searchTerm, onRecordWaste, br
                             {filteredWasteLogData.length > 0 ? paginatedWasteLogData.map(log => (
                                 <TableRow key={log.id}>
                                     <TableCell>{format(new Date(log.recordedAt), 'PP')}</TableCell>
-                                    <TableCell className="font-medium">{log.itemName}</TableCell>
+                                    <TableCell className="font-medium">{getWasteItemName(log)}</TableCell>
                                     <TableCell className="text-right">{log.quantity} {log.unit}</TableCell>
                                     <TableCell><Badge variant="outline">{log.reason}</Badge></TableCell>
                                     <TableCell className="text-right font-semibold text-destructive">-${log.cost.toFixed(2)}</TableCell>

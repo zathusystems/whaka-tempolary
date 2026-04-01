@@ -42,8 +42,8 @@ type ReceiveStockFormValues = {
   paymentStatus?: 'Paid' | 'Unpaid';
   items: {
     productId: string;
-    quantity: number;
-    cost: number;
+    quantity: number | '';
+    cost: number | '';
     sellingPrice?: number;
     taxRate?: number;
     taxCalculationMethod?: 'inclusive' | 'exclusive';
@@ -51,6 +51,27 @@ type ReceiveStockFormValues = {
     expiryDate?: Date;
   }[];
 };
+
+type ReceiveStockDraft = {
+    supplierId?: string;
+    referenceNumber?: string;
+    paymentStatus?: 'Paid' | 'Unpaid';
+    isFuelMode?: boolean;
+    items?: {
+        productId: string;
+        quantity: number | '';
+        cost: number | '';
+        sellingPrice?: number;
+        taxRate?: number;
+        taxCalculationMethod?: 'inclusive' | 'exclusive';
+        batchNumber?: string;
+        expiryDate?: string;
+    }[];
+};
+
+type ReceiveStockDraftItem = NonNullable<ReceiveStockDraft['items']>[number];
+
+const RECEIVE_STOCK_DRAFT_STORAGE_KEY_PREFIX = 'handypos-receive-stock-draft';
 
 const normalizeBranchId = (value?: string | number | null): string => {
     const normalized = String(value ?? '').trim();
@@ -87,8 +108,83 @@ const toOptionalNumber = (value: unknown): number | undefined => {
     return Number.isFinite(parsed) ? parsed : undefined;
 };
 
+const toNumberOrBlank = (value: unknown, fallback: number): number | '' => {
+    if (value === '') {
+        return '';
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const parseOptionalDate = (value: unknown): Date | undefined => {
+    if (!value) {
+        return undefined;
+    }
+    const parsed = value instanceof Date ? value : new Date(String(value));
+    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+};
+
+const createEmptyReceiveStockItem = (): ReceiveStockFormValues['items'][number] => ({
+    productId: '',
+    quantity: 1,
+    cost: 0,
+    sellingPrice: undefined,
+    taxRate: 0,
+    taxCalculationMethod: 'exclusive',
+    batchNumber: '',
+});
+
+const createDefaultReceiveStockValues = (): ReceiveStockFormValues => ({
+    supplierId: '',
+    referenceNumber: '',
+    vatAmount: undefined,
+    paymentStatus: 'Paid',
+    items: [createEmptyReceiveStockItem()],
+});
+
+const normalizeDraftItem = (item: ReceiveStockDraft['items'][number] | undefined): ReceiveStockFormValues['items'][number] => ({
+    productId: String(item?.productId || '').trim(),
+    quantity: toNumberOrBlank(item?.quantity, 1),
+    cost: toNumberOrBlank(item?.cost, 0),
+    sellingPrice: toOptionalNumber(item?.sellingPrice),
+    taxRate: normalizeTaxRate(item?.taxRate),
+    taxCalculationMethod: resolveTaxMethod(item?.taxCalculationMethod),
+    batchNumber: typeof item?.batchNumber === 'string' ? item.batchNumber : '',
+    expiryDate: parseOptionalDate(item?.expiryDate),
+});
+
+const serializeDraftItem = (item: ReceiveStockFormValues['items'][number] | undefined): ReceiveStockDraftItem => ({
+    productId: String(item?.productId || '').trim(),
+    quantity: item?.quantity === '' ? '' : toNumberOrBlank(item?.quantity, 1),
+    cost: item?.cost === '' ? '' : toNumberOrBlank(item?.cost, 0),
+    sellingPrice: toOptionalNumber(item?.sellingPrice),
+    taxRate: normalizeTaxRate(item?.taxRate),
+    taxCalculationMethod: resolveTaxMethod(item?.taxCalculationMethod),
+    batchNumber: typeof item?.batchNumber === 'string' ? item.batchNumber : '',
+    expiryDate: item?.expiryDate ? item.expiryDate.toISOString() : undefined,
+});
+
+const normalizeReceiveStockDraft = (draft: ReceiveStockDraft | null | undefined): ReceiveStockFormValues => ({
+    supplierId: typeof draft?.supplierId === 'string' ? draft.supplierId : '',
+    referenceNumber: typeof draft?.referenceNumber === 'string' ? draft.referenceNumber : '',
+    vatAmount: undefined,
+    paymentStatus: draft?.paymentStatus === 'Unpaid' ? 'Unpaid' : 'Paid',
+    items: Array.isArray(draft?.items) && draft.items.length > 0
+        ? draft.items.map((item) => normalizeDraftItem(item))
+        : [createEmptyReceiveStockItem()],
+});
+
+const getReceiveStockDraftStorageKey = (branchId: string, businessType: BusinessType): string => {
+    const normalizedBranchId = normalizeBranchId(branchId) || String(branchId || 'default').trim() || 'default';
+    return `${RECEIVE_STOCK_DRAFT_STORAGE_KEY_PREFIX}:${normalizedBranchId}:${businessType}`;
+};
+
 const isPriceLocked = (item?: InventoryItem | null): boolean => {
     return Boolean(item?.price_locked ?? item?.priceLocked);
+};
+
+const isTaxLocked = (item?: InventoryItem | null): boolean => {
+    return Boolean(item?.tax_locked ?? item?.taxLocked);
 };
 
 const calculateItemVat = (
@@ -249,6 +345,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     const manualSessionSelectionRef = React.useRef(false);
     const shouldAutoOpenNewProductPickerRef = React.useRef(false);
     const productSearchInputRefs = React.useRef<Record<string, HTMLInputElement | null>>({});
+    const hasHydratedDraftRef = React.useRef(false);
     
     // NEW: Get active session ID from Dexie (same pattern as waste form)
     const [sessionId, setSessionId] = React.useState<string | undefined>(undefined);
@@ -413,15 +510,9 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     }, [suppliers]);
     
     const form = useForm<ReceiveStockFormValues>({
-        defaultValues: {
-            supplierId: '',
-            referenceNumber: '',
-            vatAmount: undefined,
-            paymentStatus: 'Paid',
-            items: [{ productId: '', quantity: 1, cost: 0, sellingPrice: undefined, taxRate: 0, taxCalculationMethod: 'exclusive' }],
-        }
+        defaultValues: createDefaultReceiveStockValues(),
     });
-    const { control, handleSubmit, setValue, getValues } = form;
+    const { control, handleSubmit, setValue, getValues, reset } = form;
     const { fields, append, remove, replace } = useFieldArray({
         control,
         name: "items",
@@ -460,7 +551,19 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         [inventoryItems]
     );
     const canToggleFuelMode = hasFuelItems && hasNonFuelItems;
-    const [isFuelMode, setIsFuelMode] = React.useState<boolean>(hasFuelItems && !hasNonFuelItems);
+    const defaultFuelMode = hasFuelItems && !hasNonFuelItems;
+    const defaultFuelModeRef = React.useRef(defaultFuelMode);
+    const [isFuelMode, setIsFuelMode] = React.useState<boolean>(defaultFuelMode);
+    const draftStorageKey = React.useMemo(
+        () => getReceiveStockDraftStorageKey(branchId, businessType),
+        [branchId, businessType]
+    );
+    const referenceNumberValue = useWatch({ control, name: "referenceNumber" });
+    const paymentStatusValue = useWatch({ control, name: "paymentStatus" });
+
+    React.useEffect(() => {
+        defaultFuelModeRef.current = defaultFuelMode;
+    }, [defaultFuelMode]);
 
     React.useEffect(() => {
         if (isFuelMode && !hasFuelItems && hasNonFuelItems) {
@@ -470,10 +573,104 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         }
     }, [hasFuelItems, hasNonFuelItems, isFuelMode]);
 
+    const clearDraft = React.useCallback(() => {
+        if (typeof window === 'undefined') {
+            return;
+        }
+
+        localStorage.removeItem(draftStorageKey);
+    }, [draftStorageKey]);
+
+    const saveDraft = React.useCallback((showToast = false) => {
+        if (typeof window === 'undefined') {
+            return false;
+        }
+
+        try {
+            const values = getValues();
+            const draftItems = Array.isArray(values.items) && values.items.length > 0
+                ? values.items.map((item) => serializeDraftItem(item))
+                : [serializeDraftItem(createEmptyReceiveStockItem())];
+            const draftPayload: ReceiveStockDraft = {
+                supplierId: typeof values.supplierId === 'string' ? values.supplierId : '',
+                referenceNumber: typeof values.referenceNumber === 'string' ? values.referenceNumber : '',
+                paymentStatus: values.paymentStatus === 'Unpaid' ? 'Unpaid' : 'Paid',
+                isFuelMode,
+                items: draftItems,
+            };
+
+            localStorage.setItem(draftStorageKey, JSON.stringify(draftPayload));
+
+            if (showToast) {
+                toast({
+                    title: 'Draft saved',
+                    description: 'Receive stock draft saved locally.',
+                });
+            }
+
+            return true;
+        } catch (error) {
+            console.error('[ReceiveStockForm] Failed to save draft:', error);
+
+            if (showToast) {
+                toast({
+                    variant: 'destructive',
+                    title: 'Failed to save draft',
+                    description: 'Your receive stock draft could not be saved.',
+                });
+            }
+
+            return false;
+        }
+    }, [draftStorageKey, getValues, isFuelMode]);
+
+    React.useEffect(() => {
+        hasHydratedDraftRef.current = false;
+
+        try {
+            const rawDraft = typeof window !== 'undefined'
+                ? localStorage.getItem(draftStorageKey)
+                : null;
+
+            if (rawDraft) {
+                const parsedDraft = JSON.parse(rawDraft) as ReceiveStockDraft;
+                reset(normalizeReceiveStockDraft(parsedDraft));
+                if (typeof parsedDraft.isFuelMode === 'boolean') {
+                    setIsFuelMode(parsedDraft.isFuelMode);
+                } else {
+                    setIsFuelMode(defaultFuelModeRef.current);
+                }
+            } else {
+                reset(createDefaultReceiveStockValues());
+                setIsFuelMode(defaultFuelModeRef.current);
+            }
+        } catch (error) {
+            console.error('[ReceiveStockForm] Failed to restore draft:', error);
+            reset(createDefaultReceiveStockValues());
+            setIsFuelMode(defaultFuelModeRef.current);
+        } finally {
+            hasHydratedDraftRef.current = true;
+        }
+    }, [draftStorageKey, reset]);
+
+    React.useEffect(() => {
+        if (!hasHydratedDraftRef.current || isSubmitting || typeof window === 'undefined') {
+            return;
+        }
+
+        const timeoutId = window.setTimeout(() => {
+            saveDraft(false);
+        }, 400);
+
+        return () => {
+            window.clearTimeout(timeoutId);
+        };
+    }, [supplierId, referenceNumberValue, paymentStatusValue, watchedItems, isFuelMode, isSubmitting, saveDraft]);
+
     const handleFuelModeToggle = React.useCallback((checked: boolean) => {
         if (!canToggleFuelMode) return;
         setIsFuelMode(checked);
-        replace([{ productId: '', quantity: 1, cost: 0, sellingPrice: undefined, taxRate: 0, taxCalculationMethod: 'exclusive' }]);
+        replace([createEmptyReceiveStockItem()]);
     }, [replace, canToggleFuelMode]);
 
     const supplierFilteredProducts = supplierId 
@@ -548,17 +745,20 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
             const lastPurchaseMethod = lastPurchase?.taxCalculationMethod
                 ? resolveTaxMethod(lastPurchase.taxCalculationMethod)
                 : undefined;
-            const lastPurchaseRate = normalizeTaxRate(lastPurchase?.taxRate);
+            const hasLastPurchaseRate = lastPurchase?.taxRate !== undefined && lastPurchase?.taxRate !== null;
+            const lastPurchaseRate = hasLastPurchaseRate
+                ? normalizeTaxRate(lastPurchase?.taxRate)
+                : undefined;
 
             if (!mapping) {
                 return {
-                    taxRate: lastPurchaseRate || 0,
+                    taxRate: lastPurchaseRate ?? 0,
                     taxCalculationMethod: lastPurchaseMethod ?? 'exclusive'
                 };
             }
 
             return {
-                taxRate: lastPurchaseRate || normalizeTaxRate(mapping.mraTaxRate),
+                taxRate: lastPurchaseRate ?? normalizeTaxRate(mapping.mraTaxRate),
                 taxCalculationMethod: lastPurchaseMethod ?? resolveTaxMethod(mapping.taxCalculationMethod)
             };
         },
@@ -658,15 +858,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
 
     const handleAddItem = React.useCallback(() => {
         shouldAutoOpenNewProductPickerRef.current = true;
-        append({
-            productId: '',
-            quantity: 1,
-            cost: 0,
-            sellingPrice: undefined,
-            taxRate: 0,
-            taxCalculationMethod: 'exclusive',
-            batchNumber: ''
-        });
+        append(createEmptyReceiveStockItem());
     }, [append]);
 
     const liveTotals = React.useMemo(() => {
@@ -857,17 +1049,12 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                     const taxMethod = resolveTaxMethod(item.taxCalculationMethod ?? taxDefaults.taxCalculationMethod);
                     const itemVatAmount = calculateItemVat(costPerUnit, quantityReceived, taxRate, taxMethod);
                     const itemGross = calculateItemGross(costPerUnit, quantityReceived, itemVatAmount, taxMethod);
-                    const itemNetTotal =
-                        taxMethod === 'exclusive'
-                            ? itemTotalCost
-                            : Math.max(0, itemTotalCost - itemVatAmount);
-                    const netCostPerUnit = quantityReceived > 0 ? itemNetTotal / quantityReceived : costPerUnit;
                     const newStock = (product.stockUnits || 0) + quantityReceived;
-                    const normalizedNetCost = Number.isFinite(netCostPerUnit)
-                        ? Number(netCostPerUnit.toFixed(4))
+                    const normalizedCostPerUnit = Number.isFinite(costPerUnit)
+                        ? Number(costPerUnit.toFixed(4))
                         : Number(product.cost || 0);
-                    const nextValue = Number.isFinite(newStock * normalizedNetCost)
-                        ? Number((newStock * normalizedNetCost).toFixed(2))
+                    const nextValue = Number.isFinite(newStock * normalizedCostPerUnit)
+                        ? Number((newStock * normalizedCostPerUnit).toFixed(2))
                         : product.value;
                     const submittedSellingPrice = Number(item.sellingPrice);
                     const hasSubmittedSellingPrice =
@@ -881,10 +1068,10 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                     const currentSellingPrice = toOptionalNumber(product.price);
                     const productPriceLocked = isPriceLocked(product);
                     
-                    // Update main inventory item. Cost follows the latest received net cost.
+                    // Update main inventory item. Purchase cost stays as entered, even when VAT is inclusive.
                     const inventoryUpdate: Partial<InventoryItem> = {
                         stockUnits: newStock,
-                        cost: normalizedNetCost,
+                        cost: normalizedCostPerUnit,
                         value: nextValue,
                         status: newStock > (product.reorderLevel || 0) ? 'In Stock' : (newStock > 0 ? 'Low Stock' : 'Out of Stock'),
                         _dirty: true,
@@ -1016,6 +1203,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                 await syncService.performFullSync(activeBranchId);
             }
             
+            clearDraft();
             toast({ title: 'Stock Received Successfully' });
             onFormSubmit();
         } catch (error) {
@@ -1320,8 +1508,12 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                     <Input
                                                         type="number"
                                                         placeholder="Quantity"
-                                                        value={field.value ?? 1}
-                                                        onChange={(e) => field.onChange(e.target.value === '' ? 0 : Number(e.target.value))}
+                                                        value={field.value ?? ''}
+                                                        onChange={(e) =>
+                                                            field.onChange(
+                                                                e.target.value === '' ? '' : Number(e.target.value)
+                                                            )
+                                                        }
                                                         disabled={isSubmitting}
                                                     />
                                                 </FormControl>
@@ -1335,8 +1527,12 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                         type="number"
                                                         step="0.01"
                                                         placeholder="Cost"
-                                                        value={field.value ?? 0}
-                                                        onChange={(e) => field.onChange(e.target.value === '' ? 0 : Number(e.target.value))}
+                                                        value={field.value ?? ''}
+                                                        onChange={(e) =>
+                                                            field.onChange(
+                                                                e.target.value === '' ? '' : Number(e.target.value)
+                                                            )
+                                                        }
                                                         disabled={isSubmitting}
                                                     />
                                                 </FormControl>
@@ -1385,9 +1581,14 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                             placeholder="VAT %"
                                                             value={field.value ?? 0}
                                                             onChange={(e) => field.onChange(e.target.value === '' ? 0 : Number(e.target.value))}
-                                                            disabled
+                                                            disabled={isSubmitting || isTaxLocked(selectedProduct)}
                                                         />
                                                     </FormControl>
+                                                    {isTaxLocked(selectedProduct) && (
+                                                        <p className="text-[11px] text-muted-foreground">
+                                                            Tax rate is locked for this product.
+                                                        </p>
+                                                    )}
                                                 </FormItem>
                                             )}
                                         />
@@ -1399,7 +1600,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                     <FormLabel className="text-xs">Tax Method</FormLabel>
                                                     <Select onValueChange={field.onChange} value={field.value || 'exclusive'}>
                                                         <FormControl>
-                                                            <SelectTrigger disabled={isSubmitting}>
+                                                            <SelectTrigger disabled={isSubmitting || isTaxLocked(selectedProduct)}>
                                                                 <SelectValue placeholder="Method" />
                                                             </SelectTrigger>
                                                         </FormControl>
@@ -1507,6 +1708,9 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                 </div>
 
                 <DialogFooter>
+                    <Button type="button" variant="outline" onClick={() => saveDraft(true)} disabled={isSubmitting}>
+                        Save Draft
+                    </Button>
                     <Button type="submit" disabled={isSubmitDisabled}>
                         {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                         {isSubmitting ? 'Submitting...' : 'Receive Stock'}

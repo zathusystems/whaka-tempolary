@@ -875,41 +875,10 @@ const StockReportTab = ({ session }: { session: Session }) => {
         [session.id, session.startedAt, session.closedAt, session.branchId]
     ) || [];
 
-    // Calculate payment method breakdown from orders
-    const paymentBreakdown = useMemo(() => {
-        const breakdown = {
-            cash: 0,
-            card: 0,
-            mobileMoney: 0,
-            onAccount: 0,
-            other: 0,
-        };
-
-        sessionOrders.forEach(order => {
-            const saleAmount = order.total - (order.tip || 0);
-            
-            switch(order.paymentMethod) {
-                case 'Cash':
-                    breakdown.cash += saleAmount;
-                    break;
-                case 'Card':
-                    breakdown.card += saleAmount;
-                    break;
-                case 'Mobile Money':
-                    breakdown.mobileMoney += saleAmount;
-                    break;
-                case 'On Account':
-                    breakdown.onAccount += saleAmount;
-                    break;
-                case 'Other':
-                    breakdown.other += saleAmount;
-                    break;
-            }
-            
-        });
-
-        return breakdown;
-    }, [sessionOrders]);
+    const paymentBreakdown = useMemo(
+        () => calculateZReportSummary(sessionOrders as any).paymentBreakdown,
+        [sessionOrders]
+    );
 
     const productIdentity = useMemo(() => {
         const nameToId = new Map<string, string>();

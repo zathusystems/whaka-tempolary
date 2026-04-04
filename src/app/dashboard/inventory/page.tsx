@@ -13,7 +13,7 @@ import {
   Loader2,
 } from 'lucide-react';
 
-import { db, type InventoryItem, type Supplier } from '@/lib/db';
+import { db, type InventoryItem, type PurchaseRecord, type Supplier } from '@/lib/db';
 import { type BusinessType } from '@/lib/inventory/config';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useAuth } from '@/hooks/use-auth';
@@ -133,6 +133,43 @@ const getBranchScopedRows = async (table: any, branchId: string): Promise<any[]>
   return table.where('branchId').anyOf(branchCandidates).toArray();
 };
 
+const toSafeNumber = (value: unknown, fallback = 0): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizeTaxRate = (value: unknown): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
+const resolveTaxMethod = (value: unknown): 'inclusive' | 'exclusive' => (
+  String(value || '').trim().toLowerCase() === 'inclusive' ? 'inclusive' : 'exclusive'
+);
+
+const roundTo = (value: number, decimals: number): number => {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Number(value.toFixed(decimals));
+};
+
+const getTimestamp = (value: unknown): number => {
+  const timestamp = new Date(String(value || '')).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const costLooksVatStripped = (currentCost: number, grossCost: number, taxRate: number): boolean => {
+  if (currentCost <= 0 || grossCost <= 0 || taxRate <= 0) {
+    return false;
+  }
+
+  const expectedNet = roundTo(grossCost / (1 + taxRate / 100), 4);
+  const tolerance = Math.max(0.02, Math.abs(expectedNet) * 0.0025);
+  return Math.abs(currentCost - expectedNet) <= tolerance;
+};
+
 export default function InventoryPage() {
   const { business, user, loading: authLoading } = useAuth();
   const searchParams = useSearchParams();
@@ -158,6 +195,10 @@ export default function InventoryPage() {
   const [isDeletingAllInventory, setIsDeletingAllInventory] = useState(false);
   const [deleteProgress, setDeleteProgress] = useState(0);
   const [deleteStage, setDeleteStage] = useState('');
+  const [isRestoreInclusiveCostsOpen, setIsRestoreInclusiveCostsOpen] = useState(false);
+  const [isRestoringInclusiveCosts, setIsRestoringInclusiveCosts] = useState(false);
+  const [restoreInclusiveCostsProgress, setRestoreInclusiveCostsProgress] = useState(0);
+  const [restoreInclusiveCostsStage, setRestoreInclusiveCostsStage] = useState('');
   const [mraRefreshKey, setMraRefreshKey] = useState(0);
   
   useEffect(() => {
@@ -794,6 +835,185 @@ export default function InventoryPage() {
     }
   }, [isDeleteAllInventoryOpen, isDeletingAllInventory]);
 
+  useEffect(() => {
+    if (!isRestoreInclusiveCostsOpen && !isRestoringInclusiveCosts) {
+      setRestoreInclusiveCostsProgress(0);
+      setRestoreInclusiveCostsStage('');
+    }
+  }, [isRestoreInclusiveCostsOpen, isRestoringInclusiveCosts]);
+
+  const handleRestoreInclusiveCosts = async () => {
+    if (!activeBranchId) {
+      return;
+    }
+
+    setIsRestoringInclusiveCosts(true);
+    setRestoreInclusiveCostsProgress(5);
+    setRestoreInclusiveCostsStage('Collecting purchase history');
+
+    try {
+      const [inventoryItems, purchaseHistoryRecords] = await Promise.all([
+        getInventoryItemsForBranch(activeBranchId),
+        getBranchScopedRows(db.purchaseHistory, activeBranchId),
+      ]);
+
+      const activeInventoryItems = inventoryItems.filter((item) => item._operation !== 'delete');
+      const activePurchaseHistory = (purchaseHistoryRecords as PurchaseRecord[]).filter(
+        (record) => record._operation !== 'delete'
+      );
+
+      const latestInclusivePurchaseByProduct = new Map<string, PurchaseRecord>();
+      for (const record of activePurchaseHistory) {
+        const productId = String(record.productId || '').trim();
+        const taxRate = normalizeTaxRate(record.taxRate);
+        const taxMethod = resolveTaxMethod(record.taxCalculationMethod);
+        const grossCost = roundTo(toSafeNumber(record.costPerUnit), 4);
+
+        if (!productId || taxMethod !== 'inclusive' || taxRate <= 0 || grossCost <= 0) {
+          continue;
+        }
+
+        const existingRecord = latestInclusivePurchaseByProduct.get(productId);
+        if (!existingRecord || getTimestamp(record.receivedDate) > getTimestamp(existingRecord.receivedDate)) {
+          latestInclusivePurchaseByProduct.set(productId, record);
+        }
+      }
+
+      setRestoreInclusiveCostsProgress(20);
+      setRestoreInclusiveCostsStage('Matching products to inclusive purchases');
+
+      const updates: Array<{
+        itemId: string;
+        itemName: string;
+        previousCost: number;
+        restoredCost: number;
+        nextValue: number;
+        taxRate: number;
+        receivedDate: string;
+        operation?: InventoryItem['_operation'];
+      }> = [];
+      let skippedWithoutSource = 0;
+      let skippedAlreadyCorrect = 0;
+      let skippedWithoutCost = 0;
+
+      for (const item of activeInventoryItems) {
+        const itemId = String(item.id || '').trim();
+        const currentCost = roundTo(toSafeNumber(item.cost), 4);
+
+        if (!itemId) {
+          continue;
+        }
+
+        if (currentCost <= 0) {
+          skippedWithoutCost += 1;
+          continue;
+        }
+
+        const sourcePurchase = latestInclusivePurchaseByProduct.get(itemId);
+        if (!sourcePurchase) {
+          skippedWithoutSource += 1;
+          continue;
+        }
+
+        const restoredCost = roundTo(toSafeNumber(sourcePurchase.costPerUnit), 4);
+        const taxRate = normalizeTaxRate(sourcePurchase.taxRate);
+
+        if (!costLooksVatStripped(currentCost, restoredCost, taxRate)) {
+          skippedAlreadyCorrect += 1;
+          continue;
+        }
+
+        const stockUnits = toSafeNumber(item.stockUnits ?? item.stock_units);
+        updates.push({
+          itemId,
+          itemName: item.name,
+          previousCost: currentCost,
+          restoredCost,
+          nextValue: roundTo(stockUnits * restoredCost, 2),
+          taxRate,
+          receivedDate: sourcePurchase.receivedDate,
+          operation: item._operation,
+        });
+      }
+
+      if (updates.length === 0) {
+        toast({
+          title: 'No cost reversals needed',
+          description:
+            latestInclusivePurchaseByProduct.size === 0
+              ? 'No inclusive purchase records were found for this branch.'
+              : 'No products still matched the older VAT-stripped cost pattern.',
+        });
+        setRestoreInclusiveCostsProgress(0);
+        setRestoreInclusiveCostsStage('');
+        setIsRestoreInclusiveCostsOpen(false);
+        return;
+      }
+
+      setRestoreInclusiveCostsProgress(30);
+      setRestoreInclusiveCostsStage(`Restoring ${updates.length} product costs`);
+
+      await db.transaction('rw', [db.inventory, db.auditLog], async () => {
+        for (const [index, update] of updates.entries()) {
+          await db.inventory.update(update.itemId, {
+            cost: update.restoredCost,
+            value: update.nextValue,
+            _dirty: true,
+            _operation: update.operation === 'create' ? 'create' : 'update',
+          });
+
+          const completed = index + 1;
+          const progress = 30 + Math.round((completed / updates.length) * 65);
+          setRestoreInclusiveCostsProgress(Math.min(95, progress));
+          setRestoreInclusiveCostsStage(`Restoring ${completed} of ${updates.length}`);
+        }
+
+        await logAuditAction({
+          userId: user?.uid || user?.email || 'system',
+          userName: user?.displayName || user?.email || 'System',
+          branchId: activeBranchId,
+          actionType: 'ITEM_UPDATE',
+          entityType: 'InventoryItem',
+          entityId: `branch:${activeBranchId}`,
+          details: {
+            operation: 'restore_inclusive_costs',
+            updatedItems: updates.length,
+            skippedWithoutSource,
+            skippedAlreadyCorrect,
+            skippedWithoutCost,
+            sampleItems: updates.slice(0, 25).map((update) => ({
+              itemId: update.itemId,
+              itemName: update.itemName,
+              previousCost: update.previousCost,
+              restoredCost: update.restoredCost,
+              taxRate: update.taxRate,
+              sourceReceivedDate: update.receivedDate,
+            })),
+          },
+        });
+      });
+
+      setRestoreInclusiveCostsProgress(100);
+      setRestoreInclusiveCostsStage('Inclusive costs restored');
+      setIsRestoreInclusiveCostsOpen(false);
+
+      toast({
+        title: 'Inclusive costs restored',
+        description: `Updated ${updates.length} product cost${updates.length === 1 ? '' : 's'} and queued them for sync.`,
+      });
+    } catch (error) {
+      console.error('[InventoryPage] Failed to restore inclusive costs:', error);
+      setRestoreInclusiveCostsStage('Restore failed');
+      toast({
+        variant: 'destructive',
+        title: 'Restore failed',
+        description: 'Could not restore the full inclusive costs for this branch.',
+      });
+    } finally {
+      setIsRestoringInclusiveCosts(false);
+    }
+  };
+
   const handleDeleteAllInventoryData = async () => {
     if (!activeBranchId) {
       return;
@@ -1209,6 +1429,8 @@ export default function InventoryPage() {
                     onAddItem={() => setAddFormOpen(true)}
                     onEditItem={handleEditItem}
                     onImport={() => setImportModalOpen(true)}
+                    onRestoreInclusiveCosts={() => setIsRestoreInclusiveCostsOpen(true)}
+                    isRestoringInclusiveCosts={isRestoringInclusiveCosts}
                     onTransfer={() => setTransferStockOpen(true)}
                 />
             </TabsContent>
@@ -1329,6 +1551,44 @@ export default function InventoryPage() {
       branches={branches}
       businessType={currentBusinessType}
     />
+    <AlertDialog open={isRestoreInclusiveCostsOpen} onOpenChange={setIsRestoreInclusiveCostsOpen}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Restore full inclusive product costs?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This temporary repair checks the current branch only. It looks for products whose latest inclusive purchase still suggests VAT was stripped from the saved cost, then restores the full purchase cost and recalculates stock value.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {(isRestoringInclusiveCosts || restoreInclusiveCostsProgress > 0) && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span>{restoreInclusiveCostsStage || 'Restoring...'}</span>
+              <span>{Math.round(restoreInclusiveCostsProgress)}%</span>
+            </div>
+            <Progress value={restoreInclusiveCostsProgress} />
+          </div>
+        )}
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isRestoringInclusiveCosts}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(event) => {
+              event.preventDefault();
+              void handleRestoreInclusiveCosts();
+            }}
+            disabled={isRestoringInclusiveCosts}
+          >
+            {isRestoringInclusiveCosts ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Restoring...
+              </>
+            ) : (
+              'Run restore'
+            )}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
     <AlertDialog open={isDeleteAllInventoryOpen} onOpenChange={setIsDeleteAllInventoryOpen}>
       <AlertDialogContent>
         <AlertDialogHeader>

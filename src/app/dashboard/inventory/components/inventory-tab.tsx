@@ -8,6 +8,7 @@ import {
   PlusCircle,
   Upload,
   Download,
+  RefreshCcw,
   Edit,
   History,
   Trash2,
@@ -139,6 +140,8 @@ interface InventoryTabProps {
     onAddItem: () => void;
     onEditItem: (item: InventoryItem) => void;
     onImport: () => void;
+    onRestoreInclusiveCosts: () => void;
+    isRestoringInclusiveCosts?: boolean;
     onTransfer: () => void;
 }
 
@@ -150,6 +153,8 @@ export function InventoryTab({
     onAddItem,
     onEditItem,
     onImport,
+    onRestoreInclusiveCosts,
+    isRestoringInclusiveCosts = false,
     onTransfer
 }: InventoryTabProps) {
     const { user } = useAuth();
@@ -559,6 +564,14 @@ export function InventoryTab({
             <div className="flex w-full flex-col items-stretch gap-2 mb-6 sm:flex-row">
                 <Button onClick={onAddItem}>
                     <PlusCircle className="mr-2 h-4 w-4" /> Add Item
+                </Button>
+                <Button
+                    variant="outline"
+                    onClick={onRestoreInclusiveCosts}
+                    disabled={isRestoringInclusiveCosts}
+                >
+                    <RefreshCcw className={`mr-2 h-4 w-4${isRestoringInclusiveCosts ? ' animate-spin' : ''}`} />
+                    {isRestoringInclusiveCosts ? 'Restoring...' : 'Restore Inclusive Cost'}
                 </Button>
                 {/* <Button variant="outline" onClick={onTransfer}>
                     <Repeat className="mr-2 h-4 w-4" /> Transfer Stock

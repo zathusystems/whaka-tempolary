@@ -1515,6 +1515,8 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   }, [isOpen, allInventory, barcodeBuffer, barcodeTimeout, handleAddToCart, toast]);
 
   const handleCreateOrder = async (paymentMethod: PaymentMethod, tip: number, buyerDetails?: BuyerDetails): Promise<Order | null> => {
+    void tip;
+    const appliedTip = 0;
     if (!cart.length) {
       toast({ variant: 'destructive', title: 'Cart is empty' });
       return null;
@@ -1705,7 +1707,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       tax += itemTax;
     }
     
-    const total = subtotal + tax + tip;
+    const total = subtotal + tax + appliedTip;
     let orderCogs = 0;
     let finalOrder: Order | null = null;
 
@@ -2016,7 +2018,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
           ...buyerFields,
           subtotal: Number(subtotal),
           tax: Number(tax),
-          tip: Number(tip),
+          tip: Number(appliedTip),
           total: Number(total),
           cogs: Number(orderCogs),
           eis_status: eisEnabled ? 'PENDING' : undefined,
@@ -2036,10 +2038,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
 
         const sessionUpdate: Partial<Session> = {
             totalSales: (sessionForOrder.totalSales || 0) + subtotal,
-            totalTips: (sessionForOrder.totalTips || 0) + tip,
+            totalTips: sessionForOrder.totalTips || 0,
         };
 
-        const saleAmount = total - tip;
+        const saleAmount = total;
         switch(paymentMethod) {
             case 'Cash':
                 sessionUpdate.totalCashSales = (sessionForOrder.totalCashSales || 0) + saleAmount;

@@ -226,7 +226,6 @@ export const Receipt = ({
   const fiscalDayNumber = format(orderDate, 'yyyyMMdd');
 
   const normalizedOrderSubtotal = toFiniteNumber(order.subtotal ?? (order as any).subtotal, 0);
-  const normalizedOrderTip = toFiniteNumber(order.tip ?? (order as any).tip, 0);
   const normalizedOrderTotal = toFiniteNumber(order.total ?? (order as any).total, normalizedOrderSubtotal);
   const normalizedOrderNet = toFiniteNumber(
     (order as any).netAmount ?? (order as any).net_amount,
@@ -238,7 +237,7 @@ export const Receipt = ({
     (order as any).vat_amount,
     0
   );
-  const normalizedFinalPayable = normalizedOrderTotal + normalizedOrderTip;
+  const normalizedFinalPayable = normalizedOrderTotal;
   const explicitChangeAmount = toOptionalFiniteNumber(
     (order as any).change ??
     (order as any).changeAmount ??
@@ -572,12 +571,6 @@ export const Receipt = ({
           <span>VAT Amount:</span>
           <span>{formatSafeCurrency(receiptVatTotal)}</span>
         </div>
-        {normalizedOrderTip > 0 && (
-          <div className="flex justify-between items-start gap-2">
-            <span>Tip:</span>
-            <span>{formatSafeCurrency(normalizedOrderTip)}</span>
-          </div>
-        )}
         <div className="pt-1 mt-1">
           {renderDotRuleLine()}
           <div className={`flex justify-between items-start gap-2 font-bold ${payableTextClass} py-1`}>

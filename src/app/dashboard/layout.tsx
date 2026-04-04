@@ -39,8 +39,6 @@ import {
   FileSignature,
   ShieldCheck,
   Lock,
-  PanelLeft,
-  PanelRightOpen,
   UserCheck,
   Share2,
   Group,
@@ -693,7 +691,6 @@ function Header() {
   const router = useRouter();
   const [isProfileModalOpen, setProfileModalOpen] = useState(false);
   const subscription = useLiveQuery(() => db.subscriptions.get('sub_main-business'));
-  const { toggleSidebar } = useSidebar();
 
   // Debug: log user object
   useEffect(() => {
@@ -876,7 +873,7 @@ function Header() {
       return (
           <DashboardHeader>
               <div className="flex items-center gap-4">
-                  <SidebarTrigger />
+                  <SidebarTrigger className="h-9 w-9 shrink-0" />
                   <div className="hidden lg:flex items-center gap-2">
                   <h1 className="text-xl font-semibold">Mwaka POS</h1>
                   <div className="w-48 h-9 bg-muted rounded-md animate-pulse" />
@@ -893,15 +890,7 @@ function Header() {
     <>
       <DashboardHeader branchId={activeBranchId}>
         <div className="flex items-center gap-4">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="lg:hidden"
-            onClick={toggleSidebar}
-          >
-            <PanelLeft />
-            <span className="sr-only">Toggle Sidebar</span>
-          </Button>
+          <SidebarTrigger className="h-9 w-9 shrink-0" />
           <div className="hidden lg:flex items-center gap-2">
             <h1 className="text-xl font-semibold">{businessName}</h1>
             {user.role === 'Admin' ? (
@@ -1337,9 +1326,8 @@ function AppSidebar({ user, onPosClick }: { user: User, onPosClick?: () => void 
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3 group-data-[collapsible=icon]:hidden">
             <HandyPosLogo className="size-7" />
-            <span className="text-base font-semibold tracking-tight">Mwaka POS</span>
+            <span className="text-lg font-semibold tracking-tight">Mwaka POS</span>
           </div>
-          <SidebarTrigger className="hidden lg:block" />
         </div>
       </SidebarHeader>
 
@@ -1386,6 +1374,9 @@ function AppSidebar({ user, onPosClick }: { user: User, onPosClick?: () => void 
         <SidebarMenu>
           {filteredSettingsItems.map((item) => {
             const isActive = isNavItemActive(pathname, item.href);
+            const handleClick = () => {
+              setOpenMobile(false);
+            };
 
             return (
               <SidebarMenuItem key={item.href}>
@@ -1394,6 +1385,7 @@ function AppSidebar({ user, onPosClick }: { user: User, onPosClick?: () => void 
                   isActive={isActive}
                   tooltip={item.label}
                   aria-current={isActive ? "page" : undefined}
+                  onClick={handleClick}
                 >
                   <Link href={item.href} className="flex items-center gap-3">
                     <item.icon />
@@ -1523,7 +1515,7 @@ export default function DashboardLayout({
           onOpenChange={setIsPosModalOpen}
         />
       )}
-      {/* <ThemeCustomizer /> */}
+      <ThemeCustomizer />
     </SidebarProvider>
   );
 }

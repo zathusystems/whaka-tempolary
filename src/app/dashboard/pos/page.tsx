@@ -806,6 +806,8 @@ export default function PosPage() {
   };
 
   const handleCreateOrder = async (paymentMethod: PaymentMethod, tip: number, buyerDetails?: BuyerDetails): Promise<Order | null> => {
+    void tip;
+    const appliedTip = 0;
     if (!cart.length) {
       toast({ variant: 'destructive', title: 'Cart is empty' });
       return null;
@@ -1173,7 +1175,7 @@ export default function PosPage() {
           ...buyerFields,
           subtotal,
           tax,
-          tip,
+          tip: appliedTip,
           total,
           cogs: orderCogs,
           eis_status: eisEnabled ? 'PENDING' : undefined,
@@ -1195,7 +1197,7 @@ export default function PosPage() {
         // 3. Update the session with sync flags
         const sessionUpdate: Partial<Session> = {
             totalSales: (sessionForOrder.totalSales || 0) + subtotal,
-            totalTips: (sessionForOrder.totalTips || 0) + tip,
+            totalTips: sessionForOrder.totalTips || 0,
             _dirty: true,
             _operation: 'update'
         };

@@ -539,8 +539,6 @@ const PaymentDialog = ({
     defaultTaxRate?: TaxRate | null;
 }) => {
     const { toast } = useToast();
-    const [tip, setTip] = useState(0);
-    const [customTip, setCustomTip] = useState<number | string>('');
     const [step, setStep] = useState<'payment' | 'confirmation'>('payment');
     const [completedOrder, setCompletedOrder] = useState<Order | null>(null);
     const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod | null>(null);
@@ -584,8 +582,6 @@ const PaymentDialog = ({
         setCompletedOrder(null);
         setSelectedPaymentMethod(null);
         setCashPaid('');
-        setTip(0);
-        setCustomTip('');
         setBuyerName('');
         setBuyerPhone('');
         setBuyerTin('');
@@ -1118,7 +1114,7 @@ const PaymentDialog = ({
         };
     }, [cart, subtotal, tax, taxLabel, eisEnabled, shouldEnforceTaxMapping, defaultTaxRateDecimal]);
 
-    const total = calculatedGrossAmount + tip;
+    const total = calculatedGrossAmount;
     const hasBlockingUnmapped = shouldEnforceTaxMapping && unmappedProducts.length > 0;
     const businessSettings = useLiveQuery(async () => getOfflineBusinessProfile(), []);
     const change = typeof cashPaid === 'number' && cashPaid > 0 ? cashPaid - total : 0;
@@ -1186,22 +1182,6 @@ const PaymentDialog = ({
             .join(' · ');
     }, [receiptStyleTaxBreakdown]);
 
-    const handleSetTip = (percentage: number) => {
-        setTip(calculatedNetAmount * percentage);
-        setCustomTip('');
-    }
-    
-    const handleCustomTipChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const value = e.target.value;
-        setCustomTip(value);
-        const parsedValue = parseFloat(value);
-        if (!isNaN(parsedValue) && parsedValue >= 0) {
-            setTip(parsedValue);
-        } else if (value === '') {
-            setTip(0);
-        }
-    }
-    
     const handlePayment = async (method: PaymentMethod) => {
         if (isProcessingPayment) {
             return;
@@ -1214,7 +1194,7 @@ const PaymentDialog = ({
                 phone: buyerPhone,
                 tin: buyerTin,
             });
-            const order = await onCheckout(method, tip, buyerDetails);
+            const order = await onCheckout(method, 0, buyerDetails);
             if (order) {
                 const normalizedCashPaid =
                     typeof cashPaid === 'number'
@@ -1656,7 +1636,6 @@ const PaymentDialog = ({
             paymentMethod: (completedOrder as any).paymentMethod ?? (completedOrder as any).payment_method,
             subtotal: (completedOrder as any).subtotal ?? (completedOrder as any).net_amount ?? 0,
             total: (completedOrder as any).total ?? (completedOrder as any).gross_amount ?? 0,
-            tip: (completedOrder as any).tip ?? 0,
             fiscalInvoiceNumber: (completedOrder as any).fiscalInvoiceNumber ?? (completedOrder as any).fiscal_invoice_number,
             eisStatus: (completedOrder as any).eisStatus ?? (completedOrder as any).eis_status,
             eisUuid: (completedOrder as any).eisUuid ?? (completedOrder as any).eis_uuid,

@@ -154,6 +154,26 @@ const resolveCartInventoryItemId = (cartItem: { id?: string; inventoryItemId?: s
   return rawLineId.split('::cart::')[0] || rawLineId;
 };
 
+const buildCartLineId = (
+  inventoryItemId: string,
+  options?: {
+    isVariablePrice?: boolean;
+    notes?: string;
+  }
+): string => {
+  const normalizedInventoryItemId = String(inventoryItemId || '').trim();
+  if (!normalizedInventoryItemId) {
+    return '';
+  }
+
+  const hasNotes = Boolean(String(options?.notes || '').trim());
+  if (!options?.isVariablePrice && !hasNotes) {
+    return normalizedInventoryItemId;
+  }
+
+  return `${normalizedInventoryItemId}::cart::${uuidv4()}`;
+};
+
 const mappingStatusRank = (mapping: any): number => {
   if (!mapping) {
     return -1;
@@ -391,17 +411,36 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       await db.cart.where('branchId').equals(branchId).delete();
       
       if (cartItems.length > 0) {
-        await db.cart.bulkAdd(cartItems.map((item) => {
-          const inventoryItemId = resolveCartInventoryItemId(item) || String(item.id || '').trim();
-          return {
-            ...item,
-            id: String(item.id || '').trim(),
-            branchId,
-            inventoryItemId,
-            savedAt: new Date().toISOString()
-          };
-        }));
-        console.log('[Cart] Saved to IndexedDB for branch', branchId, ':', cartItems.length, 'items');
+        const normalizedCartItems = cartItems
+          .map((item) => {
+            const inventoryItemId = resolveCartInventoryItemId(item) || String(item.id || '').trim();
+            const lineId =
+              String(item.id || '').trim() ||
+              buildCartLineId(inventoryItemId, {
+                isVariablePrice: item.isVariablePrice,
+                notes: item.notes,
+              });
+
+            if (!inventoryItemId || !lineId) {
+              return null;
+            }
+
+            return {
+              ...item,
+              id: lineId,
+              branchId,
+              inventoryItemId,
+              savedAt: new Date().toISOString(),
+            };
+          })
+          .filter(Boolean) as CartItem[];
+
+        if (normalizedCartItems.length > 0) {
+          // Use put semantics so stale packaged-app IndexedDB rows cannot block cart saves.
+          await db.cart.bulkPut(normalizedCartItems as any);
+        }
+
+        console.log('[Cart] Saved to IndexedDB for branch', branchId, ':', normalizedCartItems.length, 'items');
       } else {
         console.log('[Cart] Cleared cart for branch', branchId);
       }
@@ -1127,6 +1166,17 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   
   const handleAddToCart = useCallback(async (item: InventoryItem, quantity: number = 1, price?: number, notes?: string) => {
     console.log('[POS Modal] handleAddToCart called:', item.name, 'quantity:', quantity, 'eisEnabled:', eisEnabled);
+    const normalizedItemId = String(item.id || '').trim();
+    const normalizedNotes = notes?.trim() || undefined;
+
+    if (!normalizedItemId) {
+      toast({
+        variant: 'destructive',
+        title: 'Invalid product',
+        description: 'This product is missing an ID and cannot be added to the cart.',
+      });
+      return;
+    }
 
     if (blockSalesIfTaxMappingMissing) {
       // ALWAYS check if product has APPROVED AND SYNCED MRA mapping (regardless of EIS status)
@@ -1140,7 +1190,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
 
         // Fast path: local cache first so add-to-cart stays responsive.
         try {
-          const itemId = String(item.id);
+          const itemId = normalizedItemId;
           const directLocalMappings = await db.mraMappings
             .where('inventoryItemId')
             .equals(itemId)
@@ -1184,7 +1234,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               throw new Error('Missing branch id for MRA mapping validation');
             }
             const response = await authFetch.fetch<any>(
-              `/inventory/mra-mappings/?inventory_item=${encodeURIComponent(String(item.id))}&branch_id=${encodeURIComponent(backendBranchId)}`
+              `/inventory/mra-mappings/?inventory_item=${encodeURIComponent(normalizedItemId)}&branch_id=${encodeURIComponent(backendBranchId)}`
             );
             
             let mappings: any[] = [];
@@ -1217,7 +1267,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                     ? 'exclusive'
                     : 'inclusive';
                   const nowIso = new Date().toISOString();
-                  const mappingItemId = resolveMappingInventoryItemId(readyMapping) || String(item.id);
+                  const mappingItemId = resolveMappingInventoryItemId(readyMapping) || normalizedItemId;
 
                   await db.mraMappings.put({
                     id: String(readyMapping.id || `${mappingItemId}-mapping`),
@@ -1303,7 +1353,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       if (!item.isProduced) {
         // For non-produced items, enforce stock limit
         const currentCartQuantity = prevCart.reduce((acc, cartItem) => 
-          resolveCartInventoryItemId(cartItem) === String(item.id) ? acc + cartItem.quantity : acc, 0
+          resolveCartInventoryItemId(cartItem) === normalizedItemId ? acc + toPositiveNumber(cartItem.quantity, 0) : acc, 0
         );
         const remainingStock = (item.stockUnits || 0) - currentCartQuantity;
         
@@ -1326,51 +1376,66 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         }
       }
 
-      const existingItemIndex = prevCart.findIndex(
-        (cartItem) => resolveCartInventoryItemId(cartItem) === String(item.id)
-      );
+      const shouldMergeIntoExistingLine = !item.isVariablePrice && !normalizedNotes;
+      const existingItemIndex = shouldMergeIntoExistingLine
+        ? prevCart.findIndex((cartItem) => {
+            const inventoryItemId = resolveCartInventoryItemId(cartItem);
+            return inventoryItemId === normalizedItemId && !cartItem.notes && !cartItem.isVariablePrice;
+          })
+        : -1;
       const itemPrice = price !== undefined ? price : (item.price || 0);
 
       if (existingItemIndex > -1) {
         // Item already in cart, increment quantity
         const newCart = [...prevCart];
         const oldQuantity = newCart[existingItemIndex].quantity;
-        const oldPrice = newCart[existingItemIndex].price;
         newCart[existingItemIndex].quantity += quantity;
-        if (item.isVariablePrice) {
-          // Variable-price items store line total in `price`, so accumulate both.
-          newCart[existingItemIndex].price += itemPrice;
-        }
         console.log('[POS Modal] Incremented item:', item.name, 'old quantity:', oldQuantity, 'new quantity:', newCart[existingItemIndex].quantity);
-        if (item.isVariablePrice) {
-          console.log('[POS Modal] Incremented variable item total:', item.name, 'old total:', oldPrice, 'new total:', newCart[existingItemIndex].price);
-        }
         return newCart;
       } else {
         // New item, add to cart
         console.log('[POS Modal] Added new item:', item.name, 'quantity:', quantity);
+        const cartLineId = buildCartLineId(normalizedItemId, {
+          isVariablePrice: item.isVariablePrice,
+          notes: normalizedNotes,
+        });
+
+        if (!cartLineId) {
+          toast({
+            variant: 'destructive',
+            title: 'Invalid product',
+            description: 'This product could not be assigned a cart line ID.',
+          });
+          return prevCart;
+        }
+
         return [
           ...prevCart,
           {
             ...item,
-            id: item.id,
-            inventoryItemId: String(item.id),
+            id: cartLineId,
+            inventoryItemId: normalizedItemId,
             quantity: quantity,
             price: itemPrice,
-            notes,
+            notes: normalizedNotes,
           }
         ];
       }
     });
-  }, [toast, eisEnabled, blockSalesIfTaxMappingMissing]);
+  }, [toast, eisEnabled, blockSalesIfTaxMappingMissing, branchId, toPositiveNumber]);
   
   const handleUpdateQuantity = (itemId: string, newQuantity: number) => {
+    const normalizedItemId = String(itemId || '').trim();
     if (newQuantity <= 0) {
-      setCart((prevCart) => prevCart.filter((cartItem) => cartItem.id !== itemId));
+      setCart((prevCart) =>
+        prevCart.filter((cartItem) => String(cartItem.id || '').trim() !== normalizedItemId)
+      );
     } else {
       setCart((prevCart) =>
         prevCart.map((cartItem) =>
-          cartItem.id === itemId ? { ...cartItem, quantity: newQuantity } : cartItem
+          String(cartItem.id || '').trim() === normalizedItemId
+            ? { ...cartItem, quantity: newQuantity }
+            : cartItem
         )
       );
     }

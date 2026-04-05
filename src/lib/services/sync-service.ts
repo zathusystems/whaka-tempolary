@@ -1267,7 +1267,7 @@ class SyncService {
    * Note: Large base64 images are kept for sync but may need compression in production
    */
   private sanitizeForSync(data: any): any {
-    const { _dirty, _operation, _synced_at, initialStockViaPurchase, ...clean } = data;
+    const { _dirty, _operation, _synced_at, initialStockViaPurchase, _purchaseSyncPending, ...clean } = data;
     if (_operation === 'create' && initialStockViaPurchase) {
       clean.stockUnits = 0;
       clean.value = 0;
@@ -1739,6 +1739,12 @@ class SyncService {
       // Try purchase orders
       const po = await db.purchaseOrders.get(id);
       if (po) {
+        const affectedInventoryIds = Array.isArray(po.items)
+          ? po.items
+              .map((item: any) => String(item?.inventoryItemId ?? item?.inventory_item_id ?? '').trim())
+              .filter((itemId) => itemId.length > 0)
+          : [];
+
         if (po._operation === 'delete') {
           await db.purchaseOrders.delete(id);
           console.log(`[Sync] Removed deleted purchase order ${id}`);
@@ -1746,6 +1752,8 @@ class SyncService {
           await db.purchaseOrders.update(id, { _dirty: false, _operation: undefined });
           console.log(`[Sync] Marked purchase order ${id} as synced`);
         }
+
+        await this.reconcilePurchaseSyncPendingFlags({ inventoryItemIds: affectedInventoryIds });
         return;
       }
     } catch (error) {
@@ -1758,6 +1766,7 @@ class SyncService {
       const allPurchases = await db.purchaseHistory.toArray();
       const purchase = allPurchases.find(p => String(p.id) === String(id));
       if (purchase) {
+        const productId = String(purchase.productId || '').trim();
         if (purchase._operation === 'delete') {
           await db.purchaseHistory.delete(purchase.id);
           console.log(`[Sync] Removed deleted purchase history record ${id} (numeric id: ${purchase.id})`);
@@ -1766,6 +1775,10 @@ class SyncService {
           await db.purchaseHistory.update(purchase.id, { _dirty: false, _operation: undefined });
           console.log(`[Sync] Marked purchase history record ${id} as synced (numeric id: ${purchase.id})`);
         }
+
+        await this.reconcilePurchaseSyncPendingFlags({
+          inventoryItemIds: productId ? [productId] : [],
+        });
         return;
       }
     } catch (error) {
@@ -1814,6 +1827,104 @@ class SyncService {
     }
 
     console.warn(`[Sync] Could not find record with id ${id} to mark as synced`);
+  }
+
+  private async reconcilePurchaseSyncPendingFlags(
+    options: {
+      branchId?: string;
+      inventoryItemIds?: string[];
+    } = {}
+  ): Promise<void> {
+    const requestedInventoryIds = Array.isArray(options.inventoryItemIds)
+      ? Array.from(
+          new Set(
+            options.inventoryItemIds
+              .map((itemId) => String(itemId || '').trim())
+              .filter((itemId) => itemId.length > 0)
+          )
+        )
+      : [];
+
+    const branchCandidates = options.branchId
+      ? new Set(this.getBranchIdCandidates(options.branchId))
+      : null;
+
+    let candidateItems = requestedInventoryIds.length > 0
+      ? (await db.inventory.bulkGet(requestedInventoryIds)).filter(Boolean)
+      : await db.inventory.toArray();
+
+    candidateItems = candidateItems.filter((item: any) => {
+      if (!item?._purchaseSyncPending) {
+        return false;
+      }
+
+      if (!branchCandidates) {
+        return true;
+      }
+
+      return branchCandidates.has(String(item.branchId || '').trim());
+    });
+
+    if (candidateItems.length === 0) {
+      return;
+    }
+
+    const candidateInventoryIds = new Set(
+      candidateItems
+        .map((item: any) => String(item?.id || '').trim())
+        .filter((itemId) => itemId.length > 0)
+    );
+
+    const pendingInventoryIds = new Set<string>();
+    const purchaseRecords = await db.purchaseHistory.toArray();
+    for (const record of purchaseRecords) {
+      if (!record?._dirty) {
+        continue;
+      }
+
+      const productId = String(record.productId || '').trim();
+      if (!productId || !candidateInventoryIds.has(productId)) {
+        continue;
+      }
+
+      if (branchCandidates && !branchCandidates.has(String(record.branchId || '').trim())) {
+        continue;
+      }
+
+      pendingInventoryIds.add(productId);
+    }
+
+    const purchaseOrders = await db.purchaseOrders.toArray();
+    for (const purchaseOrder of purchaseOrders) {
+      if (!purchaseOrder?._dirty || purchaseOrder._operation !== 'delete') {
+        continue;
+      }
+
+      if (branchCandidates && !branchCandidates.has(String(purchaseOrder.branchId || '').trim())) {
+        continue;
+      }
+
+      const items = Array.isArray(purchaseOrder.items) ? purchaseOrder.items : [];
+      for (const item of items) {
+        const inventoryItemId = String(
+          item?.inventoryItemId ?? (item as any)?.inventory_item_id ?? ''
+        ).trim();
+        if (inventoryItemId && candidateInventoryIds.has(inventoryItemId)) {
+          pendingInventoryIds.add(inventoryItemId);
+        }
+      }
+    }
+
+    for (const item of candidateItems) {
+      const inventoryItemId = String((item as any)?.id || '').trim();
+      if (!inventoryItemId || pendingInventoryIds.has(inventoryItemId)) {
+        continue;
+      }
+
+      await db.inventory.update(inventoryItemId, {
+        _purchaseSyncPending: false,
+      });
+    }
   }
 
   /**
@@ -1934,7 +2045,7 @@ class SyncService {
             if (existingItem) {
               // Never overwrite local unsynced stock edits with server values.
               // This prevents "deduct then revert" when local push is delayed/fails.
-              if (existingItem._dirty) {
+              if (existingItem._dirty || existingItem._purchaseSyncPending) {
                 console.log(`[Sync] Skipping server overwrite for dirty inventory item ${convertedItem.id}`);
                 continue;
               }
@@ -2577,6 +2688,8 @@ class SyncService {
       } else {
         console.log('[Sync] No MRA mappings to apply');
       }
+
+      await this.reconcilePurchaseSyncPendingFlags({ branchId });
     } catch (error) {
       console.error('[Sync] Error applying changes:', error);
     }
@@ -2668,8 +2781,8 @@ class SyncService {
           // Convert snake_case from backend to camelCase for frontend
           const convertedItem = this.snakeToCamel(item);
           const existingItem = await db.inventory.get(backendItemId);
-          if (existingItem?._dirty) {
-            console.log(`[Sync] Skipping fetch overwrite for dirty inventory item ${backendItemId}`);
+          if (existingItem?._dirty || existingItem?._purchaseSyncPending) {
+            console.log(`[Sync] Skipping fetch overwrite for pending inventory item ${backendItemId}`);
             options.onProgress?.({
               stage: 'applying',
               percent: 60 + Math.round(((index + 1) / Math.max(items.length, 1)) * 35),
@@ -2715,7 +2828,7 @@ class SyncService {
 
         for (const localItem of localItems) {
           const localItemId = String(localItem.id ?? '').trim();
-          if (!localItemId || backendIds.has(localItemId) || localItem._dirty) {
+          if (!localItemId || backendIds.has(localItemId) || localItem._dirty || localItem._purchaseSyncPending) {
             continue;
           }
 

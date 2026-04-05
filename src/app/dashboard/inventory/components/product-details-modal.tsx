@@ -14,6 +14,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useCurrency } from '@/hooks/use-currency';
 import { authFetch } from '@/lib/auth-fetch';
 import { type BusinessType } from '@/lib/inventory/config';
+import { formatInventoryQuantity, shouldPreferWholeStockCounts } from '@/lib/quantity-format';
 
 interface ProductDetailsModalProps {
   product: InventoryItem | null;
@@ -53,6 +54,13 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
   const currencySymbol = getCurrencySymbol();
 
   const isSellable = product.itemType === 'sellable';
+  const preferWholeStockCounts = shouldPreferWholeStockCounts(currentBusinessType);
+  const formattedStockUnits = formatInventoryQuantity(product.stockUnits, {
+    preferWholeNumbers: preferWholeStockCounts,
+  });
+  const formattedReorderLevel = formatInventoryQuantity(product.reorderLevel, {
+    preferWholeNumbers: preferWholeStockCounts,
+  });
   const statusColor = {
     'In Stock': 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400',
     'Low Stock': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400',
@@ -117,7 +125,7 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
             <Alert className="border-yellow-200 bg-yellow-50 dark:bg-yellow-950/30">
               <AlertCircle className="h-4 w-4 text-yellow-600" />
               <AlertDescription className="text-yellow-800 dark:text-yellow-200">
-                ⚠️ <strong>LOW STOCK</strong> - Current stock: {product.stockUnits} {product.unitType} (Reorder level: {product.reorderLevel})
+                ⚠️ <strong>LOW STOCK</strong> - Current stock: {formattedStockUnits} {product.unitType} (Reorder level: {formattedReorderLevel})
               </AlertDescription>
             </Alert>
           )}
@@ -181,7 +189,7 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
                         <Package className="h-4 w-4 text-muted-foreground" />
                         <p className="text-sm text-muted-foreground">Remaining Quantity</p>
                       </div>
-                      <p className="text-2xl font-bold">{product.stockUnits} <span className="text-sm text-muted-foreground">{product.unitType}</span></p>
+                      <p className="text-2xl font-bold">{formattedStockUnits} <span className="text-sm text-muted-foreground">{product.unitType}</span></p>
                       {product.value !== undefined && product.value !== null && (
                         <p className="text-sm text-muted-foreground">Value: {currencySymbol}{(Number(product.value) || 0).toFixed(2)}</p>
                       )}
@@ -314,11 +322,11 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <p className="text-sm text-muted-foreground">Reorder Level</p>
-                      <p className="font-medium text-base">{product.reorderLevel || 0} {product.unitType}</p>
+                      <p className="font-medium text-base">{formattedReorderLevel} {product.unitType}</p>
                     </div>
                     <div>
                       <p className="text-sm text-muted-foreground">Current Stock</p>
-                      <p className="font-medium text-base">{product.stockUnits || 0} {product.unitType}</p>
+                      <p className="font-medium text-base">{formattedStockUnits} {product.unitType}</p>
                     </div>
                   </div>
                 </CardContent>

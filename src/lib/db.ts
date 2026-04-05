@@ -159,6 +159,7 @@ export interface InventoryItem {
     _dirty?: boolean;
     _operation?: 'create' | 'update' | 'delete';
     _synced_at?: string;
+    _purchaseSyncPending?: boolean;
 }
 
 export interface PurchaseRecord {
@@ -179,10 +180,12 @@ export interface PurchaseRecord {
     quantityRemaining: number; // New field for FIFO
     costPerUnit: number;
     totalCost: number;
+    sellingPrice?: number;
     paymentStatus: 'Paid' | 'Unpaid' | 'Partial' | 'Credit' | 'Pending';
     amountDue: number;
     batchNumber?: string;
     expiryDate?: string;
+    allowQuantityDecrease?: boolean;
     receivedDate: string; // ISO string
     createdAt?: string;
     updatedAt?: string;
@@ -635,6 +638,8 @@ export interface CartItem extends InventoryItem {
     quantity: number;
     price: number;
     notes?: string;
+    inventoryItemId: string;
+    branchId: string;
     savedAt?: string;
 }
 

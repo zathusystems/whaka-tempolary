@@ -34,6 +34,7 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover';
 import { Calendar } from '@/components/ui/calendar';
+import type { EditablePurchaseGroup } from './purchase-editor-types';
 
 type ReceiveStockFormValues = {
   supplierId?: string;
@@ -41,6 +42,10 @@ type ReceiveStockFormValues = {
   vatAmount?: number;
   paymentStatus?: 'Paid' | 'Unpaid';
   items: {
+    purchaseRecordId?: string;
+    originalQuantityReceived?: number;
+    originalQuantityRemaining?: number;
+    originalSessionId?: string;
     productId: string;
     quantity: number | '';
     cost: number | '';
@@ -174,6 +179,100 @@ const normalizeReceiveStockDraft = (draft: ReceiveStockDraft | null | undefined)
         : [createEmptyReceiveStockItem()],
 });
 
+const normalizeSupplierMatchValue = (value: unknown): string => {
+    return String(value || '').trim().toLowerCase();
+};
+
+const resolveSupplierNameForPurchase = (purchase: EditablePurchaseGroup): string => {
+    const firstItem = purchase.items[0];
+    const candidates = [purchase.supplierName, firstItem?.supplierName]
+        .map((value) => String(value || '').trim())
+        .filter((value) => value.length > 0 && value.toLowerCase() !== 'no supplier');
+
+    return candidates[0] || '';
+};
+
+const resolveSupplierIdForPurchase = (
+    purchase: EditablePurchaseGroup,
+    suppliers: Supplier[]
+): string => {
+    const purchaseSupplierId = String(purchase.supplierId || '').trim();
+    if (purchaseSupplierId && suppliers.some((supplier) => String(supplier.id) === purchaseSupplierId)) {
+        return purchaseSupplierId;
+    }
+
+    const firstItem = purchase.items[0];
+    const itemSupplierId = String(firstItem?.supplierId || '').trim();
+    if (itemSupplierId && suppliers.some((supplier) => String(supplier.id) === itemSupplierId)) {
+        return itemSupplierId;
+    }
+
+    const supplierNameCandidates = [
+        resolveSupplierNameForPurchase(purchase),
+    ]
+        .map((value) => normalizeSupplierMatchValue(value))
+        .filter((value) => value && value !== 'no supplier');
+
+    const matchedSupplier = supplierNameCandidates.length > 0
+        ? suppliers.find((supplier) =>
+            supplierNameCandidates.includes(normalizeSupplierMatchValue(supplier.name))
+        )
+        : undefined;
+
+    if (matchedSupplier) {
+        return String(matchedSupplier.id);
+    }
+
+    return purchaseSupplierId || itemSupplierId || '';
+};
+
+const buildSupplierFieldValueForPurchase = (
+    purchase: EditablePurchaseGroup,
+    suppliers: Supplier[]
+): string => {
+    const resolvedSupplierId = resolveSupplierIdForPurchase(purchase, suppliers);
+    if (resolvedSupplierId) {
+        return resolvedSupplierId;
+    }
+
+    const supplierName = resolveSupplierNameForPurchase(purchase);
+    return supplierName ? `editing-supplier:${supplierName}` : '';
+};
+
+const buildReceiveStockValuesFromPurchase = (
+    purchase: EditablePurchaseGroup,
+    inventoryItems: InventoryItem[],
+    suppliers: Supplier[]
+): ReceiveStockFormValues => {
+    const inventoryById = new Map(inventoryItems.map((item) => [String(item.id), item]));
+    const resolvedSupplierId = buildSupplierFieldValueForPurchase(purchase, suppliers);
+    const paymentStatus: 'Paid' | 'Unpaid' = purchase.paymentStatus === 'Paid' ? 'Paid' : 'Unpaid';
+    const items = purchase.items.length > 0
+        ? purchase.items.map((item) => ({
+            purchaseRecordId: item.id ? String(item.id) : undefined,
+            originalQuantityReceived: Number(item.quantityReceived || 0),
+            originalQuantityRemaining: Number(item.quantityRemaining || 0),
+            originalSessionId: item.sessionId,
+            productId: String(item.productId || '').trim(),
+            quantity: toNumberOrBlank(item.quantityReceived, 1),
+            cost: toNumberOrBlank(item.costPerUnit, 0),
+            sellingPrice: toOptionalNumber(inventoryById.get(String(item.productId || '').trim())?.price),
+            taxRate: normalizeTaxRate(item.taxRate),
+            taxCalculationMethod: resolveTaxMethod(item.taxCalculationMethod),
+            batchNumber: typeof item.batchNumber === 'string' ? item.batchNumber : '',
+            expiryDate: parseOptionalDate(item.expiryDate),
+        }))
+        : [createEmptyReceiveStockItem()];
+
+    return {
+        supplierId: resolvedSupplierId,
+        referenceNumber: purchase.referenceNumber || '',
+        vatAmount: toOptionalNumber(purchase.vatAmount),
+        paymentStatus,
+        items,
+    };
+};
+
 const getReceiveStockDraftStorageKey = (branchId: string, businessType: BusinessType): string => {
     const normalizedBranchId = normalizeBranchId(branchId) || String(branchId || 'default').trim() || 'default';
     return `${RECEIVE_STOCK_DRAFT_STORAGE_KEY_PREFIX}:${normalizedBranchId}:${businessType}`;
@@ -185,6 +284,17 @@ const isPriceLocked = (item?: InventoryItem | null): boolean => {
 
 const isTaxLocked = (item?: InventoryItem | null): boolean => {
     return Boolean(item?.tax_locked ?? item?.taxLocked);
+};
+
+const resolveInventoryStatus = (stockUnits: number, reorderLevel: number): InventoryItem['status'] => {
+    if (stockUnits > reorderLevel) return 'In Stock';
+    if (stockUnits > 0) return 'Low Stock';
+    return 'Out of Stock';
+};
+
+const isLocalOnlyPurchaseRecord = (record: PurchaseRecord): boolean => {
+    const recordId = String(record.id ?? '').trim();
+    return record._operation === 'create' || typeof record.id === 'number' || /^\d+$/.test(recordId);
 };
 
 const calculateItemVat = (
@@ -336,8 +446,23 @@ const getSessionChoicesFromResponse = (response: any): SessionChoice[] => {
     return Array.from(uniqueChoices.values()).sort((a, b) => b.sortValue - a.sortValue);
 };
 
-export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppliers, onFormSubmit }: { branchId: string; businessType: BusinessType, inventoryItems: InventoryItem[], suppliers: Supplier[], onFormSubmit: () => void }) => {
+export const ReceiveStockForm = ({
+    branchId,
+    businessType,
+    inventoryItems,
+    suppliers,
+    onFormSubmit,
+    editingPurchase,
+}: {
+    branchId: string;
+    businessType: BusinessType;
+    inventoryItems: InventoryItem[];
+    suppliers: Supplier[];
+    onFormSubmit: () => void;
+    editingPurchase?: EditablePurchaseGroup | null;
+}) => {
     const { user } = useAuth();
+    const isEditMode = Boolean(editingPurchase);
     const [isSubmitting, setIsSubmitting] = React.useState(false);
     const isSubmittingRef = React.useRef(false);
     const normalizedUserRole = String(user?.role || '').toLowerCase();
@@ -354,6 +479,25 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     const [isLoadingSessionChoices, setIsLoadingSessionChoices] = React.useState(false);
     const [productSearchTerms, setProductSearchTerms] = React.useState<Record<string, string>>({});
     const [productPickerOpen, setProductPickerOpen] = React.useState<Record<string, boolean>>({});
+    const editingSessionId = React.useMemo(
+        () =>
+            editingPurchase?.items
+                .map((item) => String(item.sessionId || '').trim())
+                .find((value) => value.length > 0),
+        [editingPurchase]
+    );
+    const editingRequiresFuelSession = React.useMemo(
+        () =>
+            Boolean(
+                editingPurchase?.items.some((item) => {
+                    const product = inventoryItems.find(
+                        (candidate) => String(candidate.id) === String(item.productId || '').trim()
+                    );
+                    return Boolean(product?.isFuel);
+                })
+            ),
+        [editingPurchase, inventoryItems]
+    );
     
     React.useEffect(() => {
         let isCancelled = false;
@@ -367,6 +511,15 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                     if (!isCancelled) {
                         setSessionId(undefined);
                         setResolvedSessionHasPump(null);
+                    }
+                    return;
+                }
+
+                if (editingPurchase) {
+                    if (!isCancelled) {
+                        manualSessionSelectionRef.current = true;
+                        setSessionId(editingSessionId || undefined);
+                        setResolvedSessionHasPump(editingSessionId ? editingRequiresFuelSession : null);
                     }
                     return;
                 }
@@ -501,7 +654,16 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         return () => {
             isCancelled = true;
         };
-    }, [branchId, user?.uid, user?.email, user?.businessId, isAdminUser]);
+    }, [
+        branchId,
+        user?.uid,
+        user?.email,
+        user?.businessId,
+        isAdminUser,
+        editingPurchase,
+        editingSessionId,
+        editingRequiresFuelSession,
+    ]);
     
     // Log suppliers received
     React.useEffect(() => {
@@ -560,6 +722,43 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     );
     const referenceNumberValue = useWatch({ control, name: "referenceNumber" });
     const paymentStatusValue = useWatch({ control, name: "paymentStatus" });
+    const supplierOptions = React.useMemo(() => {
+        if (!editingPurchase) {
+            return suppliers;
+        }
+
+        const supplierFieldValue = buildSupplierFieldValueForPurchase(editingPurchase, suppliers);
+        const supplierName = resolveSupplierNameForPurchase(editingPurchase);
+        if (!supplierFieldValue || !supplierName) {
+            return suppliers;
+        }
+
+        const alreadyPresent = suppliers.some((supplier) => {
+            const supplierId = String(supplier.id || '').trim();
+            return (
+                supplierId === supplierFieldValue ||
+                normalizeSupplierMatchValue(supplier.name) === normalizeSupplierMatchValue(supplierName)
+            );
+        });
+
+        if (alreadyPresent) {
+            return suppliers;
+        }
+
+        return [
+            {
+                id: supplierFieldValue,
+                name: supplierName,
+                businessId: user?.businessId || undefined,
+                branchId: branchId || undefined,
+            } as Supplier,
+            ...suppliers,
+        ];
+    }, [editingPurchase, suppliers, user?.businessId, branchId]);
+    const editingPurchaseSupplierName = React.useMemo(
+        () => (editingPurchase ? resolveSupplierNameForPurchase(editingPurchase) : ''),
+        [editingPurchase]
+    );
 
     React.useEffect(() => {
         defaultFuelModeRef.current = defaultFuelMode;
@@ -582,6 +781,10 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     }, [draftStorageKey]);
 
     const saveDraft = React.useCallback((showToast = false) => {
+        if (isEditMode) {
+            return false;
+        }
+
         if (typeof window === 'undefined') {
             return false;
         }
@@ -622,12 +825,18 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
 
             return false;
         }
-    }, [draftStorageKey, getValues, isFuelMode]);
+    }, [draftStorageKey, getValues, isFuelMode, isEditMode]);
 
     React.useEffect(() => {
         hasHydratedDraftRef.current = false;
 
         try {
+            if (editingPurchase) {
+                reset(buildReceiveStockValuesFromPurchase(editingPurchase, inventoryItems, suppliers));
+                setIsFuelMode(editingRequiresFuelSession);
+                return;
+            }
+
             const rawDraft = typeof window !== 'undefined'
                 ? localStorage.getItem(draftStorageKey)
                 : null;
@@ -651,10 +860,10 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         } finally {
             hasHydratedDraftRef.current = true;
         }
-    }, [draftStorageKey, reset]);
+    }, [draftStorageKey, reset, editingPurchase, inventoryItems, suppliers, editingRequiresFuelSession]);
 
     React.useEffect(() => {
-        if (!hasHydratedDraftRef.current || isSubmitting || typeof window === 'undefined') {
+        if (!hasHydratedDraftRef.current || isSubmitting || typeof window === 'undefined' || isEditMode) {
             return;
         }
 
@@ -665,18 +874,20 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         return () => {
             window.clearTimeout(timeoutId);
         };
-    }, [supplierId, referenceNumberValue, paymentStatusValue, watchedItems, isFuelMode, isSubmitting, saveDraft]);
+    }, [supplierId, referenceNumberValue, paymentStatusValue, watchedItems, isFuelMode, isSubmitting, saveDraft, isEditMode]);
+
+    const canToggleFuelModeInForm = canToggleFuelMode && !isEditMode;
 
     const handleFuelModeToggle = React.useCallback((checked: boolean) => {
-        if (!canToggleFuelMode) return;
+        if (!canToggleFuelModeInForm) return;
         setIsFuelMode(checked);
         replace([createEmptyReceiveStockItem()]);
-    }, [replace, canToggleFuelMode]);
+    }, [replace, canToggleFuelModeInForm]);
 
     const supplierFilteredProducts = supplierId 
         ? inventoryItems.filter(item => {
             // Match by supplier ID or supplier name
-            const itemSupplier = suppliers.find(s => s.id === supplierId);
+            const itemSupplier = supplierOptions.find(s => String(s.id) === String(supplierId));
             const matches = item.supplier === itemSupplier?.name || item.supplier === itemSupplier?.id;
             console.log('[ReceiveStockForm] Checking item:', item.name, 'supplier:', item.supplier, 'matches:', matches, 'isProduced:', item.isProduced);
             return matches && !item.isProduced;
@@ -778,11 +989,16 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
 
     const getAvailableProductsForRow = React.useCallback((rowIndex: number) => {
         const currentProductId = String(watchedItems?.[rowIndex]?.productId || '').trim();
-        return filteredProducts.filter((product) => {
+        const currentProduct = inventoryItems.find((product) => product.id === currentProductId);
+        const rowProducts = currentProduct && !filteredProducts.some((product) => product.id === currentProductId)
+            ? [currentProduct, ...filteredProducts]
+            : filteredProducts;
+
+        return rowProducts.filter((product) => {
             if (product.id === currentProductId) return true;
             return !selectedProductIds.has(product.id);
         });
-    }, [filteredProducts, selectedProductIds, watchedItems]);
+    }, [filteredProducts, inventoryItems, selectedProductIds, watchedItems]);
 
     const filterProductsBySearch = React.useCallback((products: InventoryItem[], searchTerm: string) => {
         const normalizedSearch = String(searchTerm || '').trim().toLowerCase();
@@ -900,7 +1116,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         return availableSessions.filter((session) => session.hasPump === requiresPump);
     }, [availableSessions, requiredSessionKind]);
 
-    const enforceSessionKind = true;
+    const enforceSessionKind = !isEditMode;
 
     const sessionHasPump = React.useMemo(() => {
         if (!sessionId) return null;
@@ -910,7 +1126,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     }, [sessionId, availableSessions, resolvedSessionHasPump]);
 
     const hasSessionChoices = applicableSessions.length > 0;
-    const shouldEnforceSessionMatch = isAdminUser ? hasSessionChoices : Boolean(sessionId);
+    const shouldEnforceSessionMatch = enforceSessionKind && (isAdminUser ? hasSessionChoices : Boolean(sessionId));
     const sessionMatchesRequired =
         sessionHasPump !== null &&
         (requiredSessionKind === 'pump' ? sessionHasPump : !sessionHasPump);
@@ -928,9 +1144,11 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
     const shouldWarnNoSessions =
         isAdminUser && enforceSessionKind && !hasSessionChoices && !isLoadingSessionChoices;
     const sessionIdForSubmit =
-        sessionId && (isAdminUser ? (hasSessionChoices ? sessionMatchesRequired : false) : sessionMatchesRequired)
-            ? sessionId
-            : undefined;
+        isEditMode
+            ? (sessionId || editingSessionId)
+            : sessionId && (isAdminUser ? (hasSessionChoices ? sessionMatchesRequired : false) : sessionMatchesRequired)
+                ? sessionId
+                : undefined;
     const isSubmitDisabled =
         isSubmitting ||
         sessionMismatch ||
@@ -996,7 +1214,21 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
         isSubmittingRef.current = true;
         setIsSubmitting(true);
 
-        const selectedSupplier = data.supplierId ? suppliers.find(s => s.id === data.supplierId) : null;
+        const selectedSupplier = data.supplierId
+            ? supplierOptions.find((s) => String(s.id) === String(data.supplierId))
+            : null;
+        const isSyntheticEditingSupplier = Boolean(
+            selectedSupplier?.id && String(selectedSupplier.id).startsWith('editing-supplier:')
+        );
+        const editingPurchaseFirstItem = editingPurchase?.items[0];
+        const selectedSupplierId = selectedSupplier
+            ? isSyntheticEditingSupplier
+                ? String(editingPurchase?.supplierId || editingPurchaseFirstItem?.supplierId || '').trim() || undefined
+                : String(selectedSupplier.id)
+            : undefined;
+        const selectedSupplierName = selectedSupplier?.name
+            || editingPurchaseSupplierName
+            || 'No Supplier';
         const paymentStatus: 'Paid' | 'Unpaid' = data.paymentStatus === 'Unpaid' ? 'Unpaid' : 'Paid';
         const referenceNumber = data.referenceNumber?.trim() || undefined;
 
@@ -1027,21 +1259,94 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
             const vatAmount = Number.isFinite(totalVat) ? totalVat : 0;
             const amountPaid = paymentStatus === 'Paid' ? totalWithVat : 0;
             const amountDue = paymentStatus === 'Paid' ? 0 : totalWithVat;
-            // Generate UUID v4 like suppliers do
-            const poId = uuidv4();
+            const nowIso = new Date().toISOString();
+            const poId = editingPurchase?.purchaseOrderId || editingPurchase?.groupId || uuidv4();
             const baseReceivedAt = Date.now();
-            const updatedInventoryItemIds = new Set<string>();
+            const deletedLineWarnings: string[] = [];
+            let purchaseOrderSyncOperation: 'create' | 'update' = isEditMode ? 'update' : 'create';
             
             console.log('[Purchases] Form submission - validItems:', validItems);
             console.log('[Purchases] Calculated totalCost:', totalCost);
             console.log('[Purchases] Calculated totalItems:', validItems.length);
 
-            await db.transaction('rw', db.inventory, db.purchaseHistory, db.purchaseOrders, async () => {
-                for (const [index, item] of validItems.entries()) {
-                    const product = await db.inventory.get(item.productId);
-                    if (!product) continue;
+            const applyInventoryPurchaseUpdate = async ({
+                product,
+                stockDelta,
+                nextCostPerUnit,
+                nextSellingPrice,
+                updateSellingPrice,
+            }: {
+                product: InventoryItem;
+                stockDelta: number;
+                nextCostPerUnit: number;
+                nextSellingPrice?: number;
+                updateSellingPrice: boolean;
+            }) => {
+                const currentStock = Number(product.stockUnits || 0);
+                const nextStock = currentStock + stockDelta;
 
+                if (nextStock < -0.0001) {
+                    throw new Error(`Not enough stock available to update ${product.name}.`);
+                }
+
+                const safeNextStock = Math.max(0, nextStock);
+                const nextValue = Number.isFinite(safeNextStock * nextCostPerUnit)
+                    ? Number((safeNextStock * nextCostPerUnit).toFixed(2))
+                    : product.value;
+                const inventoryUpdate: Partial<InventoryItem> = {
+                    stockUnits: safeNextStock,
+                    cost: nextCostPerUnit,
+                    value: nextValue,
+                    status: resolveInventoryStatus(safeNextStock, Number(product.reorderLevel || 0)),
+                    _purchaseSyncPending: true,
+                };
+
+                if (updateSellingPrice && nextSellingPrice !== undefined) {
+                    inventoryUpdate.price = nextSellingPrice;
+                }
+
+                await db.inventory.update(product.id, inventoryUpdate);
+            };
+
+            await db.transaction('rw', db.inventory, db.purchaseHistory, db.purchaseOrders, async () => {
+                const currentOrder = isEditMode ? await db.purchaseOrders.get(poId) : undefined;
+                const currentRecords = new Map<string, PurchaseRecord>();
+                const retainedRecordIds = new Set<string>();
+                const itemSnapshots: Array<{
+                    id: string;
+                    inventoryItemId: string;
+                    quantityOrdered: number;
+                    quantityRemaining: number;
+                    quantityReceived: number;
+                    costPerUnit: number;
+                }> = [];
+
+                if (editingPurchase) {
+                    for (const originalRecord of editingPurchase.items) {
+                        const recordId = String(originalRecord.id || '').trim();
+                        if (!recordId) {
+                            continue;
+                        }
+
+                        const currentRecord = await db.purchaseHistory.get(originalRecord.id as any);
+                        if (currentRecord) {
+                            currentRecords.set(recordId, currentRecord);
+                        }
+                    }
+                }
+
+                for (const [index, item] of validItems.entries()) {
+                    const submittedProductId = String(item.productId || '').trim();
                     const quantityReceived = Number(item.quantity);
+                    if (!submittedProductId || !Number.isFinite(quantityReceived) || quantityReceived <= 0) {
+                        throw new Error('Each purchase line needs a product and a quantity greater than zero.');
+                    }
+
+                    const product = await db.inventory.get(submittedProductId);
+                    if (!product) {
+                        throw new Error('One of the selected products could not be found locally. Please refresh inventory and try again.');
+                    }
+
                     const costPerUnit = Number(item.cost);
                     const itemTotalCost = quantityReceived * costPerUnit;
                     const taxDefaults = getDefaultTaxForProduct(product.id);
@@ -1049,13 +1354,9 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                     const taxMethod = resolveTaxMethod(item.taxCalculationMethod ?? taxDefaults.taxCalculationMethod);
                     const itemVatAmount = calculateItemVat(costPerUnit, quantityReceived, taxRate, taxMethod);
                     const itemGross = calculateItemGross(costPerUnit, quantityReceived, itemVatAmount, taxMethod);
-                    const newStock = (product.stockUnits || 0) + quantityReceived;
                     const normalizedCostPerUnit = Number.isFinite(costPerUnit)
                         ? Number(costPerUnit.toFixed(4))
                         : Number(product.cost || 0);
-                    const nextValue = Number.isFinite(newStock * normalizedCostPerUnit)
-                        ? Number((newStock * normalizedCostPerUnit).toFixed(2))
-                        : product.value;
                     const submittedSellingPrice = Number(item.sellingPrice);
                     const hasSubmittedSellingPrice =
                         item.sellingPrice !== undefined &&
@@ -1067,36 +1368,102 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                         : undefined;
                     const currentSellingPrice = toOptionalNumber(product.price);
                     const productPriceLocked = isPriceLocked(product);
-                    
-                    // Update main inventory item. Purchase cost stays as entered, even when VAT is inclusive.
-                    const inventoryUpdate: Partial<InventoryItem> = {
-                        stockUnits: newStock,
-                        cost: normalizedCostPerUnit,
-                        value: nextValue,
-                        status: newStock > (product.reorderLevel || 0) ? 'In Stock' : (newStock > 0 ? 'Low Stock' : 'Out of Stock'),
-                        _dirty: true,
-                        _operation: 'update'
-                    };
-
-                    if (!productPriceLocked && normalizedSellingPrice !== undefined && normalizedSellingPrice !== currentSellingPrice) {
-                        inventoryUpdate.price = normalizedSellingPrice;
-                    }
-
-                    await db.inventory.update(item.productId, inventoryUpdate);
-                    updatedInventoryItemIds.add(item.productId);
-
                     const receivedDate = new Date(baseReceivedAt + index).toISOString();
+                    const purchaseRecordId = String(item.purchaseRecordId || '').trim();
+                    const existingRecord = purchaseRecordId ? currentRecords.get(purchaseRecordId) : undefined;
+
+                    if (existingRecord) {
+                        retainedRecordIds.add(purchaseRecordId);
+
+                        if (String(existingRecord.productId || '').trim() !== submittedProductId) {
+                            throw new Error('Existing purchase lines keep their original product. Remove the line and add a new one if you need a different product.');
+                        }
+
+                        const currentQuantityRemaining = Math.max(0, Number(existingRecord.quantityRemaining || 0));
+                        const currentQuantityReceived = Math.max(0, Number(existingRecord.quantityReceived || 0));
+                        const consumedQuantity = Math.max(0, currentQuantityReceived - currentQuantityRemaining);
+
+                        if (quantityReceived < consumedQuantity) {
+                            throw new Error(`You cannot reduce ${product.name} below ${consumedQuantity} because some of the batch has already been consumed.`);
+                        }
+
+                        const nextQuantityRemaining = Math.max(0, quantityReceived - consumedQuantity);
+                        const quantityDelta = nextQuantityRemaining - currentQuantityRemaining;
+
+                        await applyInventoryPurchaseUpdate({
+                            product,
+                            stockDelta: quantityDelta,
+                            nextCostPerUnit: normalizedCostPerUnit,
+                            nextSellingPrice: normalizedSellingPrice,
+                            updateSellingPrice:
+                                !productPriceLocked &&
+                                normalizedSellingPrice !== undefined &&
+                                normalizedSellingPrice !== currentSellingPrice,
+                        });
+
+                        const nextOperation = existingRecord._operation === 'create' ? 'create' : 'update';
+                        await db.purchaseHistory.update(existingRecord.id as any, {
+                            productId: product.id,
+                            productName: product.name,
+                            supplierId: selectedSupplierId || '',
+                            supplierName: selectedSupplierName,
+                            branchId: branchId,
+                            sessionId: sessionIdForSubmit || existingRecord.sessionId || item.originalSessionId,
+                            referenceNumber: referenceNumber,
+                            vatAmount: vatAmount,
+                            taxRate: taxRate,
+                            taxCalculationMethod: taxMethod,
+                            taxAmount: itemVatAmount,
+                            quantityReceived: quantityReceived,
+                            quantityRemaining: nextQuantityRemaining,
+                            costPerUnit: costPerUnit,
+                            totalCost: itemTotalCost,
+                            sellingPrice: normalizedSellingPrice,
+                            paymentStatus: paymentStatus,
+                            amountDue: paymentStatus === 'Paid' ? 0 : itemGross,
+                            batchNumber: item.batchNumber,
+                            expiryDate: item.expiryDate ? format(item.expiryDate, 'yyyy-MM-dd') : undefined,
+                            receivedDate: existingRecord.receivedDate || receivedDate,
+                            purchaseOrderId: poId,
+                            updatedAt: nowIso,
+                            allowQuantityDecrease: nextQuantityRemaining < currentQuantityRemaining ? true : undefined,
+                            _dirty: true,
+                            _operation: nextOperation,
+                        });
+                        purchaseRecordIds.push(purchaseRecordId);
+                        itemSnapshots.push({
+                            id: purchaseRecordId,
+                            inventoryItemId: product.id,
+                            quantityOrdered: quantityReceived,
+                            quantityRemaining: nextQuantityRemaining,
+                            quantityReceived: quantityReceived,
+                            costPerUnit: costPerUnit,
+                        });
+                        await syncService.markAsDirty('PurchaseRecord', purchaseRecordId, nextOperation);
+                        continue;
+                    }
 
                     // Create a new batch record (PurchaseRecord) for this purchase with sync flags
                     // This maps to PurchaseOrderItem on the backend
-                    const purchaseRecordId = uuidv4();
+                    await applyInventoryPurchaseUpdate({
+                        product,
+                        stockDelta: quantityReceived,
+                        nextCostPerUnit: normalizedCostPerUnit,
+                        nextSellingPrice: normalizedSellingPrice,
+                        updateSellingPrice:
+                            !productPriceLocked &&
+                            normalizedSellingPrice !== undefined &&
+                            normalizedSellingPrice !== currentSellingPrice,
+                    });
+
+                    const newPurchaseRecordId = uuidv4();
                     const purchaseRecord: Omit<PurchaseRecord, 'id'> = {
                         productId: product.id,
                         productName: product.name,
-                        supplierId: selectedSupplier?.id,
-                        supplierName: selectedSupplier?.name || 'No Supplier',
+                        supplierId: selectedSupplierId || '',
+                        supplierName: selectedSupplierName,
                         branchId: branchId,
-                    sessionId: sessionIdForSubmit,  // Link to active session if available
+                        sessionId: sessionIdForSubmit || item.originalSessionId,  // Link to active session if available
                         referenceNumber: referenceNumber,
                         vatAmount: vatAmount,
                         taxRate: taxRate,
@@ -1106,6 +1473,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                         quantityRemaining: quantityReceived,
                         costPerUnit: costPerUnit,
                         totalCost: itemTotalCost,
+                        sellingPrice: normalizedSellingPrice,
                         paymentStatus: paymentStatus,
                         amountDue: paymentStatus === 'Paid' ? 0 : itemGross,
                         batchNumber: item.batchNumber,
@@ -1119,22 +1487,80 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                     // Add to database with UUID as ID
                     await db.purchaseHistory.put({
                         ...purchaseRecord,
-                        id: purchaseRecordId
+                        id: newPurchaseRecordId
                     } as PurchaseRecord);
-                    purchaseRecordIds.push(purchaseRecordId);
-                    console.log('[Purchases] Created purchase record with UUID:', purchaseRecordId);
+                    purchaseRecordIds.push(newPurchaseRecordId);
+                    itemSnapshots.push({
+                        id: newPurchaseRecordId,
+                        inventoryItemId: product.id,
+                        quantityOrdered: quantityReceived,
+                        quantityRemaining: quantityReceived,
+                        quantityReceived: quantityReceived,
+                        costPerUnit: costPerUnit,
+                    });
+                    console.log('[Purchases] Created purchase record with UUID:', newPurchaseRecordId);
                     
                     // Mark purchase record for sync (this will create PurchaseOrderItem on backend)
-                    await syncService.markAsDirty('PurchaseRecord', purchaseRecordId, 'create');
+                    await syncService.markAsDirty('PurchaseRecord', newPurchaseRecordId, 'create');
                 }
 
-                // Create a purchase order header for this stock receipt
-                // This will be synced separately and reused by PurchaseRecord items
-                await db.purchaseOrders.add({
+                if (editingPurchase) {
+                    for (const currentRecord of currentRecords.values()) {
+                        const currentRecordId = String(currentRecord.id || '').trim();
+                        if (!currentRecordId || retainedRecordIds.has(currentRecordId)) {
+                            continue;
+                        }
+
+                        const inventoryItem = await db.inventory.get(String(currentRecord.productId || '').trim());
+                        if (inventoryItem) {
+                            const currentStock = Math.max(0, Number(inventoryItem.stockUnits || 0));
+                            const quantityRemaining = Math.max(0, Number(currentRecord.quantityRemaining || 0));
+                            const safeQuantityToRemove = Math.max(0, Math.min(currentStock, quantityRemaining));
+                            const normalizedInventoryCost = Number.isFinite(Number(inventoryItem.cost || 0))
+                                ? Number(Number(inventoryItem.cost || 0).toFixed(4))
+                                : 0;
+
+                            await applyInventoryPurchaseUpdate({
+                                product: inventoryItem,
+                                stockDelta: -safeQuantityToRemove,
+                                nextCostPerUnit: normalizedInventoryCost,
+                                nextSellingPrice: toOptionalNumber(inventoryItem.price),
+                                updateSellingPrice: false,
+                            });
+
+                            if (safeQuantityToRemove < quantityRemaining) {
+                                deletedLineWarnings.push(inventoryItem.name);
+                            }
+                        }
+
+                        if (isLocalOnlyPurchaseRecord(currentRecord)) {
+                            await db.purchaseHistory.delete(currentRecord.id as any);
+                            continue;
+                        }
+
+                        await db.purchaseHistory.update(currentRecord.id as any, {
+                            updatedAt: nowIso,
+                            allowQuantityDecrease: true,
+                            _dirty: true,
+                            _operation: 'delete',
+                        });
+                        await syncService.markAsDirty('PurchaseRecord', currentRecordId, 'delete');
+                    }
+                }
+
+                const purchaseOrderOperation = isEditMode
+                    ? currentOrder?._operation === 'create'
+                        ? 'create'
+                        : 'update'
+                    : 'create';
+                purchaseOrderSyncOperation = purchaseOrderOperation;
+
+                await db.purchaseOrders.put({
+                    ...(currentOrder || {}),
                     id: poId,
-                    orderNumber: poId,
-                    supplierId: selectedSupplier?.id,
-                    supplierName: selectedSupplier?.name || 'No Supplier',
+                    orderNumber: currentOrder?.orderNumber || poId,
+                    supplierId: selectedSupplierId,
+                    supplierName: selectedSupplierName,
                     status: 'Received',
                     totalItems: validItems.length,
                     totalCost: totalCost,
@@ -1143,54 +1569,55 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                     paymentStatus: paymentStatus,
                     amountPaid: amountPaid,
                     amountDue: amountDue,
-                    notes: `Stock received from ${selectedSupplier?.name || 'No Supplier'}`,
-                    createdBy: user.displayName || user.email || 'System',
+                    notes: `Stock received from ${selectedSupplierName}`,
+                    createdBy: currentOrder?.createdBy || user.displayName || user.email || 'System',
                     branchId: branchId,
-                    items: [],  // Items will be added via PurchaseRecord sync
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString(),
+                    items: itemSnapshots,
+                    createdAt: currentOrder?.createdAt || nowIso,
+                    updatedAt: nowIso,
                     
                     // MRA Compliance Fields
                     supplierTin: selectedSupplier?.supplierTin || undefined,
                     supplierVatRegistered: selectedSupplier?.vatRegistered || false,
                     
                     // EIS Tracking Fields
-                    eisSynced: false,
-                    eisSyncedAt: undefined,
+                    eisSynced: currentOrder?.eisSynced || false,
+                    eisSyncedAt: currentOrder?.eisSyncedAt,
                     
                     // Approval Workflow
-                    approvedBy: undefined,
-                    approvedAt: undefined,
+                    approvedBy: currentOrder?.approvedBy,
+                    approvedAt: currentOrder?.approvedAt,
                     
                     _dirty: true,
-                    _operation: 'create'
+                    _operation: purchaseOrderOperation,
                 });
-                console.log('[Purchases] Created purchase order header:', poId);
+                console.log('[Purchases] Upserted purchase order header:', poId);
             });
 
-            // Mark updated inventory items for sync
-            for (const inventoryItemId of updatedInventoryItemIds) {
-                await syncService.markAsDirty('InventoryItem', inventoryItemId, 'update');
-            }
             // Mark PurchaseOrder for sync (header only, items come from PurchaseRecord)
-            await syncService.markAsDirty('PurchaseOrder', poId, 'create');
+            await syncService.markAsDirty(
+                'PurchaseOrder',
+                poId,
+                purchaseOrderSyncOperation
+            );
 
             // Log audit action for stock receipt
             await logAuditAction({
                 userId: user.uid,
                 userName: user.displayName || user.email || 'Unknown',
                 branchId: branchId,
-                actionType: 'STOCK_RECEIVE',
-                entityType: 'Purchase',
-                entityId: purchaseRecordIds[0]?.toString() || 'unknown',
+                actionType: isEditMode ? 'STOCK_RECEIVE_UPDATE' : 'STOCK_RECEIVE',
+                entityType: isEditMode ? 'PurchaseOrder' : 'Purchase',
+                entityId: isEditMode ? poId : purchaseRecordIds[0]?.toString() || 'unknown',
                 details: {
-                    supplier: selectedSupplier?.name || 'No Supplier',
-                    itemsCount: data.items.length,
+                    supplier: selectedSupplierName,
+                    itemsCount: validItems.length,
                     totalCost: totalCost,
                     referenceNumber: referenceNumber,
                     vatAmount: vatAmount,
                     paymentStatus: paymentStatus,
                     purchaseOrderId: poId,
+                    deletedLineWarnings,
                 },
             });
 
@@ -1203,12 +1630,23 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                 await syncService.performFullSync(activeBranchId);
             }
             
-            clearDraft();
-            toast({ title: 'Stock Received Successfully' });
+            if (!isEditMode) {
+                clearDraft();
+            }
+            toast({
+                title: isEditMode ? 'Purchase updated successfully' : 'Stock Received Successfully',
+                description: deletedLineWarnings.length > 0
+                    ? 'Some removed lines only deducted stock that is still available locally.'
+                    : undefined,
+            });
             onFormSubmit();
         } catch (error) {
             console.error('Failed to receive stock:', error);
-            toast({ variant: 'destructive', title: 'Error receiving stock' });
+            toast({
+                variant: 'destructive',
+                title: isEditMode ? 'Error updating purchase' : 'Error receiving stock',
+                description: error instanceof Error ? error.message : undefined,
+            });
         } finally {
             isSubmittingRef.current = false;
             setIsSubmitting(false);
@@ -1229,7 +1667,11 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                 <Select onValueChange={field.onChange} value={field.value || ''}>
                                     <FormControl><SelectTrigger disabled={isSubmitting}><SelectValue placeholder="Select a supplier (optional)" /></SelectTrigger></FormControl>
                                     <SelectContent>
-                                        {suppliers.map(s => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}
+                                        {supplierOptions.map((supplier) => (
+                                            <SelectItem key={String(supplier.id)} value={String(supplier.id)}>
+                                                {supplier.name}
+                                            </SelectItem>
+                                        ))}
                                     </SelectContent>
                                 </Select>
                                 <FormMessage />
@@ -1308,16 +1750,20 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                 <Switch
                                     checked={isFuelMode}
                                     onCheckedChange={handleFuelModeToggle}
-                                    disabled={!canToggleFuelMode}
+                                    disabled={!canToggleFuelModeInForm}
                                 />
                                 <span className={cn('text-xs', isFuelMode ? 'font-semibold text-foreground' : 'text-muted-foreground')}>
                                     Fuel
                                 </span>
                             </div>
                         </div>
-                        {!canToggleFuelMode && (
+                        {!canToggleFuelModeInForm && (
                             <p className="text-xs text-muted-foreground mt-2">
-                                {hasFuelItems ? 'Only fuel items are available.' : 'Only non-fuel items are available.'}
+                                {isEditMode
+                                    ? 'Product type stays fixed while editing an existing purchase.'
+                                    : hasFuelItems
+                                        ? 'Only fuel items are available.'
+                                        : 'Only non-fuel items are available.'}
                             </p>
                         )}
                     </div>
@@ -1385,6 +1831,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                             const rowItem = watchedItems?.[index];
                             const selectedProductId = String(rowItem?.productId || '').trim();
                             const selectedProduct = inventoryItems.find((item) => item.id === selectedProductId);
+                            const isExistingPurchaseLine = Boolean(rowItem?.purchaseRecordId);
                             const rowQuantity = Number(rowItem?.quantity || 0);
                             const rowCost = Number(rowItem?.cost || 0);
                             const rowRate = normalizeTaxRate(rowItem?.taxRate);
@@ -1423,7 +1870,7 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                                         productPickerOpen[field.id] && 'ring-2 ring-ring ring-offset-2',
                                                                         !selectField.value && 'text-muted-foreground'
                                                                     )}
-                                                                    disabled={isSubmitting}
+                                                                    disabled={isSubmitting || isExistingPurchaseLine}
                                                                 >
                                                                     <span className="truncate">
                                                                         {availableProducts.find((product) => product.id === selectField.value)?.name ||
@@ -1498,6 +1945,11 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                                                             </div>
                                                         </PopoverContent>
                                                     </Popover>
+                                                    {isExistingPurchaseLine && (
+                                                        <p className="text-[11px] text-muted-foreground">
+                                                            Existing purchase lines keep their original product.
+                                                        </p>
+                                                    )}
                                                 </FormItem>
                                             )}
                                         />
@@ -1708,12 +2160,14 @@ export const ReceiveStockForm = ({ branchId, businessType, inventoryItems, suppl
                 </div>
 
                 <DialogFooter>
-                    <Button type="button" variant="outline" onClick={() => saveDraft(true)} disabled={isSubmitting}>
-                        Save Draft
-                    </Button>
+                    {!isEditMode && (
+                        <Button type="button" variant="outline" onClick={() => saveDraft(true)} disabled={isSubmitting}>
+                            Save Draft
+                        </Button>
+                    )}
                     <Button type="submit" disabled={isSubmitDisabled}>
                         {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                        {isSubmitting ? 'Submitting...' : 'Receive Stock'}
+                        {isSubmitting ? 'Submitting...' : isEditMode ? 'Update Purchase' : 'Receive Stock'}
                     </Button>
                 </DialogFooter>
                 </fieldset>

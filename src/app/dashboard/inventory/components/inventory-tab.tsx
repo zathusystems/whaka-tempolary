@@ -8,7 +8,6 @@ import {
   PlusCircle,
   Upload,
   Download,
-  RefreshCcw,
   Edit,
   History,
   Trash2,
@@ -28,6 +27,7 @@ import {
 import { toast } from '@/hooks/use-toast';
 import { db, type InventoryItem, type MRAMapping, type RecipeIngredient } from '@/lib/db';
 import { type BusinessType } from '@/lib/inventory/config';
+import { formatInventoryQuantity, shouldPreferWholeStockCounts } from '@/lib/quantity-format';
 import { deleteProduct } from '@/lib/services/product-service';
 import { useAuth } from '@/hooks/use-auth';
 import { useCurrency } from '@/hooks/use-currency';
@@ -140,8 +140,6 @@ interface InventoryTabProps {
     onAddItem: () => void;
     onEditItem: (item: InventoryItem) => void;
     onImport: () => void;
-    onRestoreInclusiveCosts: () => void;
-    isRestoringInclusiveCosts?: boolean;
     onTransfer: () => void;
 }
 
@@ -153,8 +151,6 @@ export function InventoryTab({
     onAddItem,
     onEditItem,
     onImport,
-    onRestoreInclusiveCosts,
-    isRestoringInclusiveCosts = false,
     onTransfer
 }: InventoryTabProps) {
     const { user } = useAuth();
@@ -179,6 +175,10 @@ export function InventoryTab({
     const currencySymbol = getCurrencySymbol();
     const showItemTypeBadge =
       currentBusinessType === 'Restaurant' || currentBusinessType === 'Bar & Liquor';
+    const preferWholeStockCounts = React.useMemo(
+        () => shouldPreferWholeStockCounts(currentBusinessType),
+        [currentBusinessType]
+    );
     const exportTemplateColumns = React.useMemo(
         () => getInventoryTemplateColumnsForBusinessType(currentBusinessType),
         [currentBusinessType]
@@ -393,6 +393,9 @@ export function InventoryTab({
             ? estimatedRecipeCost
             : toSafeNumber(item.cost);
         const displayValue = getDisplayValue(item);
+        const formattedStockUnits = formatInventoryQuantity(item.stockUnits, {
+            preferWholeNumbers: preferWholeStockCounts,
+        });
         
         return (
             <TableRow key={item.id}>
@@ -417,20 +420,20 @@ export function InventoryTab({
                     {item.status && <Badge variant={statusBadgeVariant[item.status]}>{item.status === 'Low Stock' && <AlertCircle className="mr-1 h-3 w-3" />}{item.status}</Badge>}
                 </TableCell>
                 <TableCell className="text-right font-medium">
-                    {isSellable ? `${currencySymbol}${(Number(item.price) || 0).toFixed(2)}` : item.stockUnits}
+                    {isSellable ? `${currencySymbol}${(Number(item.price) || 0).toFixed(2)}` : formattedStockUnits}
                 </TableCell>
                 <TableCell className="text-muted-foreground">{item.unitType || 'N/A'}</TableCell>
                 <TableCell>{item.isProduced ? 'In-house' : (item.supplier || (isSellable ? 'In-house' : 'N/A'))}</TableCell>
                 <TableCell className="text-right">
                     {isSellable && item.isSoldInPortions && item.portionsPerUnit ? (
                         <div className="text-sm">
-                            <div className="font-semibold">{item.stockUnits} {item.unitType}</div>
+                            <div className="font-semibold">{formattedStockUnits} {item.unitType}</div>
                             <div className="text-xs text-muted-foreground">
                                 {Math.floor((item.stockUnits || 0) * item.portionsPerUnit)} {portionLabel}
                             </div>
                         </div>
                     ) : (
-                        <div className="font-semibold">{item.stockUnits} {item.unitType}</div>
+                        <div className="font-semibold">{formattedStockUnits} {item.unitType}</div>
                     )}
                 </TableCell>
                 <TableCell className="text-right font-semibold">
@@ -464,6 +467,9 @@ export function InventoryTab({
             ? estimatedRecipeCost
             : toSafeNumber(item.cost);
         const displayValue = getDisplayValue(item);
+        const formattedStockUnits = formatInventoryQuantity(item.stockUnits, {
+            preferWholeNumbers: preferWholeStockCounts,
+        });
 
         return (
             <Card key={item.id} className="mb-4">
@@ -524,7 +530,7 @@ export function InventoryTab({
                                 <div>
                                     <p className="text-muted-foreground">Remaining</p>
                                     <p className="font-medium">
-                                        {item.stockUnits ?? 0} <span className="text-muted-foreground">{item.unitType || 'unit'}</span>
+                                        {formattedStockUnits} <span className="text-muted-foreground">{item.unitType || 'unit'}</span>
                                     </p>
                                     {item.isSoldInPortions && item.portionsPerUnit && (
                                         <p className="text-xs text-muted-foreground mt-1">
@@ -537,7 +543,7 @@ export function InventoryTab({
                             <>
                                 <div>
                                     <p className="text-muted-foreground">Stock</p>
-                                    <p className="font-medium">{item.stockUnits} <span className="text-muted-foreground">{item.unitType}</span></p>
+                                    <p className="font-medium">{formattedStockUnits} <span className="text-muted-foreground">{item.unitType}</span></p>
                                 </div>
                                 <div>
                                     <p className="text-muted-foreground">Value</p>
@@ -564,14 +570,6 @@ export function InventoryTab({
             <div className="flex w-full flex-col items-stretch gap-2 mb-6 sm:flex-row">
                 <Button onClick={onAddItem}>
                     <PlusCircle className="mr-2 h-4 w-4" /> Add Item
-                </Button>
-                <Button
-                    variant="outline"
-                    onClick={onRestoreInclusiveCosts}
-                    disabled={isRestoringInclusiveCosts}
-                >
-                    <RefreshCcw className={`mr-2 h-4 w-4${isRestoringInclusiveCosts ? ' animate-spin' : ''}`} />
-                    {isRestoringInclusiveCosts ? 'Restoring...' : 'Restore Inclusive Cost'}
                 </Button>
                 {/* <Button variant="outline" onClick={onTransfer}>
                     <Repeat className="mr-2 h-4 w-4" /> Transfer Stock

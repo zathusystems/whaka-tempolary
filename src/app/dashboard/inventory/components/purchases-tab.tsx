@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { format } from 'date-fns';
-import { Truck, Loader2, ChevronDown, Cloud, CloudOff, Download, Trash2 } from 'lucide-react';
+import { Truck, Loader2, ChevronDown, Cloud, CloudOff, Download, Pencil, Trash2 } from 'lucide-react';
 
 import { db, type Business as BusinessRecord, type InventoryItem, type PurchaseRecord } from '@/lib/db';
 import { useAuth } from '@/hooks/use-auth';
@@ -15,6 +15,7 @@ import { toast } from '@/hooks/use-toast';
 import { logAuditAction } from '@/lib/audit';
 import { syncService } from '@/lib/services/sync-service';
 import { generatePurchaseInvoicePDF } from '@/lib/purchase-invoice-pdf';
+import type { EditablePurchaseGroup } from './purchase-editor-types';
 import { PaginationControls, usePaginatedItems } from './pagination-controls';
 import {
   Dialog,
@@ -39,6 +40,7 @@ interface PurchasesTabProps {
     isMobile: boolean;
     searchTerm: string;
     onReceiveStock: () => void;
+    onEditPurchase: (purchase: EditablePurchaseGroup) => void;
     branchId: string;
     currency?: string;
 }
@@ -185,7 +187,7 @@ const isLocalOnlyPurchaseRecord = (record: PurchaseRecord): boolean => {
     return record._operation === 'create' || typeof record.id === 'number' || /^\d+$/.test(recordId);
 };
 
-export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onReceiveStock, branchId, currency = 'USD' }: PurchasesTabProps) {
+export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onReceiveStock, onEditPurchase, branchId, currency = 'USD' }: PurchasesTabProps) {
     const { user, business } = useAuth();
     const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
     const [pendingChanges, setPendingChanges] = useState(0);
@@ -361,6 +363,26 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
         setSelectedPurchase(purchase);
         setIsModalOpen(true);
     };
+
+    const handleEditPurchase = React.useCallback((purchase: PurchaseGroup | null) => {
+        if (!purchase) {
+            return;
+        }
+
+        const firstItem = purchase.items[0];
+        onEditPurchase({
+            groupId: purchase.groupId,
+            purchaseOrderId: firstItem?.purchaseOrderId || purchase.groupId,
+            receivedDate: purchase.receivedDate,
+            supplierId: purchase.supplierId || firstItem?.supplierId,
+            supplierName: purchase.supplierName || firstItem?.supplierName || 'No Supplier',
+            paymentStatus: (purchase.paymentStatus || 'Paid') as PurchaseRecord['paymentStatus'],
+            referenceNumber: firstItem?.referenceNumber,
+            vatAmount: purchase.vatAmount,
+            items: purchase.items,
+        });
+        setIsModalOpen(false);
+    }, [onEditPurchase]);
 
     const handleDownloadInvoicePdf = async () => {
         if (!selectedPurchase) {
@@ -725,6 +747,14 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                                     <Download className="mr-2 h-4 w-4" />
                                 )}
                                 Download Invoice PDF
+                            </Button>
+                            <Button
+                                variant="outline"
+                                onClick={() => handleEditPurchase(selectedPurchase)}
+                                disabled={!selectedPurchase || isDeletingPurchase || isExportingInvoice}
+                            >
+                                <Pencil className="mr-2 h-4 w-4" />
+                                Edit Purchase
                             </Button>
                             <Button
                                 variant="destructive"

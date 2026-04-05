@@ -69,6 +69,25 @@ export const Receipt = ({
     return String(value).trim();
   };
 
+  const resolveCashierReceiptLabel = (...candidates: Array<unknown>): string => {
+    for (const candidate of candidates) {
+      const raw = toTrimmedString(candidate);
+      if (!raw) {
+        continue;
+      }
+
+      const exactNumericMatch = raw.match(/^\d+$/);
+      if (exactNumericMatch) {
+        const parsed = Number.parseInt(exactNumericMatch[0], 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          return `Cashier ${parsed}`;
+        }
+      }
+    }
+
+    return 'Cashier';
+  };
+
   const resolveBuyerField = (...candidates: Array<unknown>): string => {
     for (const candidate of candidates) {
       const trimmed = toTrimmedString(candidate);
@@ -131,7 +150,6 @@ export const Receipt = ({
     return db.sessions.get(sessionId);
   }, [(order as any).sessionId, (order as any).session_id, (order as any).session]);
 
-  const cashierName = receiptSession?.userName?.trim();
   const resolvedBusiness = business || offlineBusiness || undefined;
   const businessName = resolvedBusiness?.name?.trim() || 'Mwaka POS Inc.';
   const businessNameDisplay = businessName.toUpperCase();
@@ -182,28 +200,14 @@ export const Receipt = ({
     (receiptSession as any)?.branch_id ??
     (receiptSession as any)?.branch
   );
-  let cachedCashier = '';
-  if (typeof window !== 'undefined') {
-    try {
-      const raw = localStorage.getItem('handy-pos-user');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        cachedCashier =
-          toTrimmedString(parsed?.displayName) ||
-          toTrimmedString(parsed?.email) ||
-          toTrimmedString(parsed?.phone);
-      }
-    } catch {
-      // Ignore parse errors; fallback below.
-    }
-  }
-  const cashierDisplay =
-    cashierName ||
-    toTrimmedString((receiptSession as any)?.userEmail ?? (receiptSession as any)?.user_email) ||
-    toTrimmedString((order as any)?.createdByName ?? (order as any)?.created_by_name) ||
-    toTrimmedString((order as any)?.createdBy ?? (order as any)?.created_by) ||
-    cachedCashier ||
-    'N/A';
+  const cashierReceiptLabel = resolveCashierReceiptLabel(
+    receiptSession?.userId,
+    (receiptSession as any)?.user_id,
+    (order as any)?.createdById,
+    (order as any)?.created_by_id,
+    (order as any)?.userId,
+    (order as any)?.user_id
+  );
   const pumpName = toTrimmedString(
     (order as any).pumpName ??
     (order as any).pump_name ??
@@ -477,7 +481,7 @@ export const Receipt = ({
           <p className={`${metaTextClass} leading-snug`}>Email: {businessEmail || 'N/A'}</p>
           <p className={`${metaTextClass} leading-snug`}>TPIN: {businessTin || 'N/A'}</p>
           {/* <p className={`${metaTextClass} leading-snug`}>Branch: {branchIdDisplay || 'N/A'}</p> */}
-          <p className={`${metaTextClass} leading-snug`}>Cashier: {cashierDisplay}</p>
+          <p className={`${metaTextClass} leading-snug`}>{cashierReceiptLabel}</p>
           {pumpName && <p className={`${metaTextClass} leading-snug`}>Pump: {pumpName}</p>}
         </div>
       )}

@@ -23,6 +23,7 @@ import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
 
 import { AddProductForm } from './components/product-form';
+import type { EditablePurchaseGroup } from './components/purchase-editor-types';
 import { ReceiveStockForm } from './components/receive-stock-form';
 import { TransferStockForm } from './components/transfer-stock-form';
 import { RecordWasteForm } from './components/waste-form';
@@ -178,6 +179,7 @@ export default function InventoryPage() {
   const [currentBusinessType, setCurrentBusinessType] = useState<BusinessType>('Grocery');
   const [isAddFormOpen, setAddFormOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<InventoryItem | undefined>(undefined);
+  const [editingPurchase, setEditingPurchase] = useState<EditablePurchaseGroup | null>(null);
   const [isReceiveStockOpen, setReceiveStockOpen] = useState(false);
   const [isTransferStockOpen, setTransferStockOpen] = useState(false);
   const [isImportModalOpen, setImportModalOpen] = useState(false);
@@ -1429,8 +1431,6 @@ export default function InventoryPage() {
                     onAddItem={() => setAddFormOpen(true)}
                     onEditItem={handleEditItem}
                     onImport={() => setImportModalOpen(true)}
-                    onRestoreInclusiveCosts={() => setIsRestoreInclusiveCostsOpen(true)}
-                    isRestoringInclusiveCosts={isRestoringInclusiveCosts}
                     onTransfer={() => setTransferStockOpen(true)}
                 />
             </TabsContent>
@@ -1439,7 +1439,14 @@ export default function InventoryPage() {
                     purchaseHistoryData={purchaseHistoryData}
                     isMobile={isMobile}
                     searchTerm={searchTerm}
-                    onReceiveStock={() => setReceiveStockOpen(true)}
+                    onReceiveStock={() => {
+                        setEditingPurchase(null);
+                        setReceiveStockOpen(true);
+                    }}
+                    onEditPurchase={(purchase) => {
+                        setEditingPurchase(purchase);
+                        setReceiveStockOpen(true);
+                    }}
                     branchId={activeBranchId}
                     currency={businessCurrency}
                 />
@@ -1496,12 +1503,22 @@ export default function InventoryPage() {
         </div>
         </DialogContent>
     </Dialog>
-     <Dialog open={isReceiveStockOpen} onOpenChange={setReceiveStockOpen}>
+     <Dialog
+        open={isReceiveStockOpen}
+        onOpenChange={(open) => {
+            setReceiveStockOpen(open);
+            if (!open) {
+                setEditingPurchase(null);
+            }
+        }}
+    >
         <DialogContent className="sm:max-w-5xl max-h-[92vh] flex flex-col">
             <DialogHeader className="sticky top-0 bg-background z-10 pt-6">
-            <DialogTitle>Receive Stock</DialogTitle>
+            <DialogTitle>{editingPurchase ? 'Edit Purchase' : 'Receive Stock'}</DialogTitle>
             <DialogDescription>
-                Record new inventory received from a supplier.
+                {editingPurchase
+                    ? 'Update an existing stock receipt without losing its batch purpose or offline sync behavior.'
+                    : 'Record new inventory received from a supplier.'}
             </DialogDescription>
         </DialogHeader>
         <div className="-mx-6 px-6 pb-6">
@@ -1510,7 +1527,11 @@ export default function InventoryPage() {
                 businessType={currentBusinessType} 
                 inventoryItems={inventoryData || []} 
                 suppliers={suppliersData || []}
-                onFormSubmit={() => setReceiveStockOpen(false)} 
+                editingPurchase={editingPurchase}
+                onFormSubmit={() => {
+                    setReceiveStockOpen(false);
+                    setEditingPurchase(null);
+                }} 
             />
         </div>
         </DialogContent>

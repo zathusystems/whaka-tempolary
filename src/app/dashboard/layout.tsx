@@ -101,6 +101,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { ThemeCustomizer } from '@/components/theme-customizer';
 import { syncBusinessBranchesFromServer } from '@/lib/branch-sync';
+import { formatInventoryQuantity, formatNotificationBadgeCount } from '@/lib/quantity-format';
 
 // Helper to remove auth sync items from queue
 const removeAuthSyncItem = (itemId: string) => {
@@ -127,6 +128,35 @@ const removeAuthSyncItem = (itemId: string) => {
   } catch (e) {
     console.error('[SyncQueue] Failed to remove item from queue:', e);
   }
+};
+
+const toBackendBranchId = (id: string): string => {
+  const normalized = String(id || '').trim();
+  if (!normalized) return normalized;
+
+  const brnMatch = /^BRN-(\d+)$/i.exec(normalized);
+  if (brnMatch) return brnMatch[1];
+
+  const legacyBranchMatch = /^branch-(\d+)$/i.exec(normalized);
+  if (legacyBranchMatch) return legacyBranchMatch[1];
+
+  if (/^\d+$/.test(normalized)) return normalized;
+  return normalized;
+};
+
+const getBranchIdCandidates = (branchId?: string | null): string[] => {
+  const normalized = String(branchId || '').trim();
+  if (!normalized) return [];
+
+  const backendId = toBackendBranchId(normalized);
+  const candidates = new Set<string>([normalized, backendId]);
+
+  if (/^\d+$/.test(backendId)) {
+    candidates.add(`BRN-${backendId}`);
+    candidates.add(`branch-${backendId}`);
+  }
+
+  return Array.from(candidates).filter((candidate) => candidate.length > 0);
 };
 
 // Helper to clear all failed order sync items
@@ -830,26 +860,50 @@ function Header() {
   }, [business?.id, user?.branchId, branches, activeBranchId, activeBranch]);
 
   const lowStockItems = useLiveQuery(
-    () => activeBranchId ? db.inventory
-      .where({ branchId: activeBranchId, itemType: 'ingredient' })
-      .and(item => (item.stockUnits || 0) <= (item.reorderLevel || 0))
-      .toArray() : [],
+    async () => {
+      const branchCandidates = getBranchIdCandidates(activeBranchId);
+      if (branchCandidates.length === 0) return [];
+
+      return db.inventory
+        .where('branchId')
+        .anyOf(branchCandidates)
+        .and((item) => {
+          if (item._operation === 'delete') return false;
+
+          const stockUnits = Number(item.stockUnits || 0);
+          const reorderLevel = Number(item.reorderLevel || 0);
+          const status = String(item.status || '').trim();
+          const isLowByStatus = status === 'Low Stock' || status === 'Out of Stock';
+          const isLowByQuantity = stockUnits <= reorderLevel;
+
+          return isLowByStatus || isLowByQuantity;
+        })
+        .toArray();
+    },
     [activeBranchId]
   ) || [];
 
   const expiringItems = useLiveQuery(
     () => {
-        if (!activeBranchId) return [];
+        const branchCandidates = getBranchIdCandidates(activeBranchId);
+        if (branchCandidates.length === 0) return [];
         const ninetyDaysFromNow = addDays(new Date(), 90).toISOString();
         return db.purchaseHistory
-            .where('branchId').equals(activeBranchId)
-            .and(item => !!item.expiryDate && item.expiryDate <= ninetyDaysFromNow && isBefore(new Date(), parseISO(item.expiryDate)) && item.quantityRemaining > 0)
+            .where('branchId').anyOf(branchCandidates)
+            .and(item => (
+              item._operation !== 'delete' &&
+              !!item.expiryDate &&
+              item.expiryDate <= ninetyDaysFromNow &&
+              isBefore(new Date(), parseISO(item.expiryDate)) &&
+              item.quantityRemaining > 0
+            ))
             .toArray();
     },
     [activeBranchId]
   ) || [];
 
   const totalNotifications = lowStockItems.length + expiringItems.length;
+  const notificationBadgeLabel = formatNotificationBadgeCount(totalNotifications);
 
   
 
@@ -988,23 +1042,23 @@ function Header() {
                   <Bell />
                   {totalNotifications > 0 && (
                     <Badge
-                      className="absolute top-1 right-1 h-4 w-4 justify-center p-0 text-[10px]"
+                      className="absolute top-1 right-1 flex h-4 min-w-[1rem] items-center justify-center px-1 text-[10px]"
                       variant="destructive"
                     >
-                      {totalNotifications}
+                      {notificationBadgeLabel}
                     </Badge>
                   )}
                   <span className="sr-only">Notifications</span>
                 </Button>
               </SheetTrigger>
-              <SheetContent className="tauri-android-sidebar-safe-top">
+              <SheetContent className="tauri-android-sidebar-safe-top flex flex-col">
                 <SheetHeader>
                   <SheetTitle>Notifications & Alerts</SheetTitle>
                   <SheetDescription>
                     You have {totalNotifications} new critical alerts.
                   </SheetDescription>
                 </SheetHeader>
-                <div className="mt-4 space-y-4">
+                <div className="mt-4 flex-1 min-h-0 space-y-4 overflow-y-auto pr-1">
                   {lowStockItems.map((item) => (
                     <div key={`low-${item.id}`} className="flex items-start gap-3 rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-3">
                       <div className="mt-1 flex h-5 w-5 items-center justify-center rounded-full bg-yellow-500/20 text-yellow-600">
@@ -1015,7 +1069,7 @@ function Header() {
                           Low Stock: {item.name}
                         </p>
                         <p className="text-xs text-muted-foreground">
-                          Only {item.stockUnits} {item.unitType} remaining. Reorder level is {item.reorderLevel}.
+                          Only {formatInventoryQuantity(item.stockUnits)} {item.unitType} remaining. Reorder level is {formatInventoryQuantity(item.reorderLevel)}.
                         </p>
                         <Button size="xs" variant="outline" className="mt-2 text-xs h-7">
                           Create Purchase Order
@@ -1087,7 +1141,7 @@ function Header() {
                     </div>
                     <div className="flex justify-between gap-4">
                       <span className="text-muted-foreground">Quantity Remaining</span>
-                      <span className="font-medium text-right">{selectedExpiryBatch.quantityRemaining}</span>
+                      <span className="font-medium text-right">{formatInventoryQuantity(selectedExpiryBatch.quantityRemaining)}</span>
                     </div>
                     <div className="flex justify-between gap-4">
                       <span className="text-muted-foreground">Received Date</span>

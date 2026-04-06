@@ -14,6 +14,7 @@ import { cn } from '@/lib/utils';
 import { logAuditAction } from '@/lib/audit';
 import { syncService } from '@/lib/services/sync-service';
 import { authFetch } from '@/lib/auth-fetch';
+import { normalizePurchaseBatchQuantities } from '@/lib/purchase-quantity';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';
@@ -248,20 +249,27 @@ const buildReceiveStockValuesFromPurchase = (
     const resolvedSupplierId = buildSupplierFieldValueForPurchase(purchase, suppliers);
     const paymentStatus: 'Paid' | 'Unpaid' = purchase.paymentStatus === 'Paid' ? 'Paid' : 'Unpaid';
     const items = purchase.items.length > 0
-        ? purchase.items.map((item) => ({
-            purchaseRecordId: item.id ? String(item.id) : undefined,
-            originalQuantityReceived: Number(item.quantityReceived || 0),
-            originalQuantityRemaining: Number(item.quantityRemaining || 0),
-            originalSessionId: item.sessionId,
-            productId: String(item.productId || '').trim(),
-            quantity: toNumberOrBlank(item.quantityReceived, 1),
-            cost: toNumberOrBlank(item.costPerUnit, 0),
-            sellingPrice: toOptionalNumber(inventoryById.get(String(item.productId || '').trim())?.price),
-            taxRate: normalizeTaxRate(item.taxRate),
-            taxCalculationMethod: resolveTaxMethod(item.taxCalculationMethod),
-            batchNumber: typeof item.batchNumber === 'string' ? item.batchNumber : '',
-            expiryDate: parseOptionalDate(item.expiryDate),
-        }))
+        ? purchase.items.map((item) => {
+            const normalizedQuantities = normalizePurchaseBatchQuantities(
+                item.quantityReceived,
+                item.quantityRemaining
+            );
+
+            return {
+                purchaseRecordId: item.id ? String(item.id) : undefined,
+                originalQuantityReceived: normalizedQuantities.quantityReceived,
+                originalQuantityRemaining: normalizedQuantities.quantityRemaining,
+                originalSessionId: item.sessionId,
+                productId: String(item.productId || '').trim(),
+                quantity: toNumberOrBlank(normalizedQuantities.quantityReceived, 1),
+                cost: toNumberOrBlank(item.costPerUnit, 0),
+                sellingPrice: toOptionalNumber(inventoryById.get(String(item.productId || '').trim())?.price),
+                taxRate: normalizeTaxRate(item.taxRate),
+                taxCalculationMethod: resolveTaxMethod(item.taxCalculationMethod),
+                batchNumber: typeof item.batchNumber === 'string' ? item.batchNumber : '',
+                expiryDate: parseOptionalDate(item.expiryDate),
+            };
+        })
         : [createEmptyReceiveStockItem()];
 
     return {
@@ -759,6 +767,10 @@ export const ReceiveStockForm = ({
         () => (editingPurchase ? resolveSupplierNameForPurchase(editingPurchase) : ''),
         [editingPurchase]
     );
+    const hasOpenProductPicker = React.useMemo(
+        () => Object.values(productPickerOpen).some(Boolean),
+        [productPickerOpen]
+    );
 
     React.useEffect(() => {
         defaultFuelModeRef.current = defaultFuelMode;
@@ -828,6 +840,13 @@ export const ReceiveStockForm = ({
     }, [draftStorageKey, getValues, isFuelMode, isEditMode]);
 
     React.useEffect(() => {
+        const shouldPreserveCurrentValues =
+            hasHydratedDraftRef.current && (form.formState.isDirty || hasOpenProductPicker);
+
+        if (shouldPreserveCurrentValues) {
+            return;
+        }
+
         hasHydratedDraftRef.current = false;
 
         try {
@@ -860,7 +879,16 @@ export const ReceiveStockForm = ({
         } finally {
             hasHydratedDraftRef.current = true;
         }
-    }, [draftStorageKey, reset, editingPurchase, inventoryItems, suppliers, editingRequiresFuelSession]);
+    }, [
+        draftStorageKey,
+        reset,
+        editingPurchase,
+        inventoryItems,
+        suppliers,
+        editingRequiresFuelSession,
+        form.formState.isDirty,
+        hasOpenProductPicker,
+    ]);
 
     React.useEffect(() => {
         if (!hasHydratedDraftRef.current || isSubmitting || typeof window === 'undefined' || isEditMode) {
@@ -2101,6 +2129,7 @@ export const ReceiveStockForm = ({
                                                     <PopoverTrigger asChild>
                                                     <FormControl>
                                                         <Button
+                                                        type="button"
                                                         variant={'outline'}
                                                         className={cn('pl-3 text-left font-normal', !field.value && 'text-muted-foreground')}
                                                         disabled={isSubmitting}

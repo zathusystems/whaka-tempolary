@@ -15,6 +15,7 @@ import { toast } from '@/hooks/use-toast';
 import { logAuditAction } from '@/lib/audit';
 import { syncService } from '@/lib/services/sync-service';
 import { generatePurchaseInvoicePDF } from '@/lib/purchase-invoice-pdf';
+import { normalizePurchaseBatchQuantities } from '@/lib/purchase-quantity';
 import type { EditablePurchaseGroup } from './purchase-editor-types';
 import { PaginationControls, usePaginatedItems } from './pagination-controls';
 import {
@@ -263,6 +264,15 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
         const groups: Record<string, PurchaseGroup> = {};
         
         purchaseHistoryData?.forEach((record) => {
+            const normalizedQuantities = normalizePurchaseBatchQuantities(
+                record.quantityReceived,
+                record.quantityRemaining
+            );
+            const normalizedRecord: PurchaseRecord = {
+                ...record,
+                quantityReceived: normalizedQuantities.quantityReceived,
+                quantityRemaining: normalizedQuantities.quantityRemaining,
+            };
             const key = record.purchaseOrderId || `${record.receivedDate}-${record.supplierId}`;
             const recordDisplayDate = formatPurchaseDate(
                 record.receivedDate,
@@ -297,21 +307,21 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                 groups[key].dateSortValue = recordSortDate;
             }
 
-            groups[key].items.push(record);
-            const vatAmount = resolveRecordVat(record);
-            const grossAmount = resolveRecordGross(record, vatAmount);
+            groups[key].items.push(normalizedRecord);
+            const vatAmount = resolveRecordVat(normalizedRecord);
+            const grossAmount = resolveRecordGross(normalizedRecord, vatAmount);
 
-            groups[key].totalCost += record.totalCost;
+            groups[key].totalCost += normalizedRecord.totalCost;
             groups[key].totalVat += vatAmount;
             groups[key].totalWithVat += grossAmount;
-            groups[key].amountDue += Number(record.amountDue || 0);
+            groups[key].amountDue += Number(normalizedRecord.amountDue || 0);
             groups[key].paymentStatus = resolveGroupStatus([
                 groups[key].paymentStatus,
-                record.paymentStatus,
+                normalizedRecord.paymentStatus,
             ].filter(Boolean));
 
-            if (groups[key].vatAmount === undefined && record.vatAmount !== undefined) {
-                groups[key].vatAmount = record.vatAmount;
+            if (groups[key].vatAmount === undefined && normalizedRecord.vatAmount !== undefined) {
+                groups[key].vatAmount = normalizedRecord.vatAmount;
             }
         });
         

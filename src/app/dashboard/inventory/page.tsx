@@ -21,6 +21,7 @@ import { syncInventoryFromBackend, getInventorySyncStatus, markInventorySynced }
 import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
+import { normalizePurchaseBatchQuantities } from '@/lib/purchase-quantity';
 
 import { AddProductForm } from './components/product-form';
 import type { EditablePurchaseGroup } from './components/purchase-editor-types';
@@ -431,7 +432,7 @@ export default function InventoryPage() {
 
             const quantityReceivedRaw = poItem.quantity_received ?? poItem.quantityReceived ?? 0;
             const quantityReceivedParsed = Number(quantityReceivedRaw);
-            const quantityReceived = Number.isFinite(quantityReceivedParsed) ? quantityReceivedParsed : 0;
+            const parsedQuantityReceived = Number.isFinite(quantityReceivedParsed) ? quantityReceivedParsed : 0;
 
             const quantityRemainingRaw = poItem.quantity_remaining ?? poItem.quantityRemaining;
             const quantityRemainingParsed = Number(quantityRemainingRaw);
@@ -441,9 +442,14 @@ export default function InventoryPage() {
               quantityRemainingRaw !== '' &&
               Number.isFinite(quantityRemainingParsed);
 
-            const quantityRemaining = hasExplicitRemaining
-              ? Math.max(0, quantityRemainingParsed)
-              : Math.max(0, existingRecord?.quantityRemaining ?? quantityReceived);
+            const normalizedQuantities = normalizePurchaseBatchQuantities(
+              parsedQuantityReceived,
+              hasExplicitRemaining
+                ? Math.max(0, quantityRemainingParsed)
+                : Math.max(0, existingRecord?.quantityRemaining ?? parsedQuantityReceived)
+            );
+            const quantityReceived = normalizedQuantities.quantityReceived;
+            const quantityRemaining = normalizedQuantities.quantityRemaining;
 
             const sessionIdRaw = poItem.session_id ?? poItem.sessionId ?? existingRecord?.sessionId;
             const sessionId = sessionIdRaw !== undefined && sessionIdRaw !== null && sessionIdRaw !== ''

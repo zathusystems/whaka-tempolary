@@ -1,5 +1,6 @@
 import { db, type Order, type Session, type InventoryItem, type PurchaseOrder, type TakeOrder } from '@/lib/db';
 import { authFetch } from '@/lib/auth-fetch';
+import { normalizePurchaseBatchQuantities } from '@/lib/purchase-quantity';
 
 interface SyncChange {
   id: string;
@@ -1092,11 +1093,22 @@ class SyncService {
 
       for (const po of purchaseOrders) {
         if (po._dirty) {
+          const purchaseOrderOperation = po._operation || 'update';
+          const purchaseOrderData = this.sanitizeForSync(po);
+
+          // Purchase batches are authoritative in PurchaseRecord sync.
+          // Keep header sync focused on totals/status/supplier fields so older
+          // backends do not create duplicate PurchaseOrderItem rows from the
+          // purchase-order payload itself.
+          if (purchaseOrderOperation !== 'delete' && purchaseOrderData && typeof purchaseOrderData === 'object') {
+            delete purchaseOrderData.items;
+          }
+
           changes.push({
             id: po.id,
             entity_type: 'PurchaseOrder',
-            op: po._operation || 'update',
-            data: this.sanitizeForSync(po),
+            op: purchaseOrderOperation,
+            data: purchaseOrderData,
             timestamp: new Date().toISOString()
           });
         }
@@ -2178,17 +2190,21 @@ class SyncService {
                   return null;
                 }
 
-                const quantityReceived = this.toNumber(
+                const quantityReceivedRaw = this.toNumber(
                   item?.quantityReceived ?? rawItem?.quantity_received ?? 0,
                   0
                 );
                 const quantityOrdered = this.toNumber(
-                  item?.quantityOrdered ?? rawItem?.quantity_ordered ?? quantityReceived,
-                  quantityReceived
+                  item?.quantityOrdered ?? rawItem?.quantity_ordered ?? quantityReceivedRaw,
+                  quantityReceivedRaw
                 );
-                const quantityRemaining = this.toNumber(
-                  item?.quantityRemaining ?? rawItem?.quantity_remaining ?? quantityReceived,
-                  quantityReceived
+                const quantityRemainingRaw = this.toNumber(
+                  item?.quantityRemaining ?? rawItem?.quantity_remaining ?? quantityReceivedRaw,
+                  quantityReceivedRaw
+                );
+                const normalizedQuantities = normalizePurchaseBatchQuantities(
+                  quantityReceivedRaw,
+                  quantityRemainingRaw
                 );
 
                 return {
@@ -2200,9 +2216,9 @@ class SyncService {
                     rawItem?.inventory_item_name ??
                     rawItem?.item_name ??
                     undefined,
-                  quantityOrdered,
-                  quantityReceived,
-                  quantityRemaining,
+                  quantityOrdered: Math.max(quantityOrdered, normalizedQuantities.quantityReceived),
+                  quantityReceived: normalizedQuantities.quantityReceived,
+                  quantityRemaining: normalizedQuantities.quantityRemaining,
                   costPerUnit: this.toNumber(item?.costPerUnit ?? rawItem?.cost_per_unit ?? 0, 0),
                   taxRate: this.toNumber(item?.taxRate ?? rawItem?.tax_rate ?? 0, 0),
                   taxCalculationMethod:
@@ -2376,7 +2392,7 @@ class SyncService {
 
               const quantityReceivedRaw = item?.quantityReceived ?? rawItem?.quantity_received ?? 0;
               const quantityReceivedParsed = Number(quantityReceivedRaw);
-              const quantityReceived = Number.isFinite(quantityReceivedParsed) ? quantityReceivedParsed : 0;
+              const parsedQuantityReceived = Number.isFinite(quantityReceivedParsed) ? quantityReceivedParsed : 0;
 
               const quantityRemainingRaw = item?.quantityRemaining ?? rawItem?.quantity_remaining;
               const quantityRemainingParsed = Number(quantityRemainingRaw);
@@ -2386,9 +2402,14 @@ class SyncService {
                 quantityRemainingRaw !== '' &&
                 Number.isFinite(quantityRemainingParsed);
 
-              const quantityRemaining = hasExplicitRemaining
-                ? Math.max(0, quantityRemainingParsed)
-                : Math.max(0, existingRecord?.quantityRemaining ?? quantityReceived);
+              const normalizedQuantities = normalizePurchaseBatchQuantities(
+                parsedQuantityReceived,
+                hasExplicitRemaining
+                  ? Math.max(0, quantityRemainingParsed)
+                  : Math.max(0, existingRecord?.quantityRemaining ?? parsedQuantityReceived)
+              );
+              const quantityReceived = normalizedQuantities.quantityReceived;
+              const quantityRemaining = normalizedQuantities.quantityRemaining;
 
               const costPerUnit = this.toNumber(item?.costPerUnit ?? rawItem?.cost_per_unit ?? 0, 0);
               const totalCost = this.toNumber(

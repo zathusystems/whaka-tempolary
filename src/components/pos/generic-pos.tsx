@@ -377,15 +377,17 @@ const ProductCard = ({
   onAddToCart,
   productIcon,
   currencyFormatter,
-  isAvailable,
+  canAddToCart,
   stockInfo,
+  stockTone,
 }: {
   item: InventoryItem;
   onAddToCart: (item: InventoryItem) => void;
   productIcon: React.ReactNode;
   currencyFormatter: (amount: number) => string;
-  isAvailable: boolean;
+  canAddToCart: boolean;
   stockInfo: string;
+  stockTone: 'available' | 'warning' | 'out';
 }) => {
   const price = item.price || 0;
   
@@ -393,7 +395,7 @@ const ProductCard = ({
     <Card
       className={cn(
         "flex cursor-pointer flex-col overflow-hidden transition-all hover:shadow-md",
-        !isAvailable && "opacity-50 cursor-not-allowed"
+        !canAddToCart && "opacity-50 cursor-not-allowed"
       )}
       role="button"
     >
@@ -405,7 +407,11 @@ const ProductCard = ({
         <p className="text-sm text-muted-foreground">{item.category}</p>
         <p className={cn(
           "text-xs mt-1 font-medium",
-          isAvailable ? "text-green-600" : "text-red-600"
+          stockTone === 'available'
+            ? "text-green-600"
+            : stockTone === 'warning'
+              ? "text-amber-600"
+              : "text-red-600"
         )}>
           {stockInfo}
         </p>
@@ -2287,7 +2293,14 @@ export const GenericPos = ({
     return canProduce;
   };
 
-  const getStockInfo = (item: InventoryItem): { text: string; isAvailable: boolean; hasMRAMapping: boolean } => {
+  const getStockInfo = (
+    item: InventoryItem
+  ): {
+    text: string;
+    canAddToCart: boolean;
+    hasMRAMapping: boolean;
+    stockTone: 'available' | 'warning' | 'out';
+  } => {
     // First check stock/availability regardless of MRA mapping
     let stockText = '';
     let hasStock = false;
@@ -2305,8 +2318,9 @@ export const GenericPos = ({
     if (!shouldEnforceTaxMapping) {
       return {
         text: stockText,
-        isAvailable: hasStock,
+        canAddToCart: hasStock,
         hasMRAMapping: true,
+        stockTone: hasStock ? 'available' : 'out',
       };
     }
 
@@ -2320,16 +2334,20 @@ export const GenericPos = ({
         : (!mraStatus.isApproved ? '⚠️ MRA Pending Approval' : '⚠️ MRA Not Synced');
       return {
         text: mappingWarning,
-        isAvailable: false,
+        // Let the add-to-cart handler do the final backend-aware validation.
+        // This avoids dead product clicks when the local mapping cache is stale.
+        canAddToCart: hasStock,
         hasMRAMapping: false,
+        stockTone: hasStock ? 'warning' : 'out',
       };
     }
     
     // If has MRA mapping, show stock info
     return {
       text: stockText,
-      isAvailable: hasStock,
+      canAddToCart: hasStock,
       hasMRAMapping: true,
+      stockTone: hasStock ? 'available' : 'out',
     };
   };
 
@@ -2349,22 +2367,22 @@ export const GenericPos = ({
     }
     
     return (
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
         {itemsToDisplay.map((item) => {
-          const { text: stockInfo, isAvailable } = getStockInfo(item);
+          const { text: stockInfo, canAddToCart, stockTone } = getStockInfo(item);
           return (
             <div
               key={item.id}
               onClick={async (e) => {
                 e.stopPropagation();
-                if (isAvailable) {
+                if (canAddToCart) {
                   await onAddToCart(item);
                 }
               }}
               role="button"
               tabIndex={0}
               onKeyDown={async (e) => {
-                if ((e.key === 'Enter' || e.key === ' ') && isAvailable) {
+                if ((e.key === 'Enter' || e.key === ' ') && canAddToCart) {
                   e.preventDefault();
                   await onAddToCart(item);
                 }
@@ -2375,8 +2393,9 @@ export const GenericPos = ({
                 onAddToCart={() => {}}
                 productIcon={productIcon}
                 currencyFormatter={formatCurrency}
-                isAvailable={isAvailable}
+                canAddToCart={canAddToCart}
                 stockInfo={stockInfo}
+                stockTone={stockTone}
               />
             </div>
           );
@@ -2403,15 +2422,15 @@ export const GenericPos = ({
     return (
       <div className="space-y-2">
         {itemsToDisplay.map((item) => {
-          const { text: stockInfo, isAvailable } = getStockInfo(item);
+          const { text: stockInfo, canAddToCart, stockTone } = getStockInfo(item);
           return (
             <div 
               key={item.id} 
               className={cn(
                 "flex items-center gap-4 rounded-md border p-2 cursor-pointer hover:bg-muted",
-                !isAvailable && "opacity-50 cursor-not-allowed"
+                !canAddToCart && "opacity-50 cursor-not-allowed"
               )} 
-              onClick={async () => isAvailable && await onAddToCart(item)}
+              onClick={async () => canAddToCart && await onAddToCart(item)}
             >
               <div className="flex h-12 w-12 items-center justify-center rounded-md bg-muted/50">
                  {productIcon}
@@ -2421,7 +2440,11 @@ export const GenericPos = ({
                 <p className="text-sm text-muted-foreground">{item.category}</p>
                 <p className={cn(
                   "text-xs mt-1 font-medium",
-                  isAvailable ? "text-green-600" : "text-red-600"
+                  stockTone === 'available'
+                    ? "text-green-600"
+                    : stockTone === 'warning'
+                      ? "text-amber-600"
+                      : "text-red-600"
                 )}>
                   {stockInfo}
                 </p>
@@ -2516,6 +2539,7 @@ export const GenericPos = ({
               <Button variant="ghost" size="icon" onClick={onClearCart}><Trash2 className="text-destructive" /></Button>
             </DialogClose>
           </div>
+          
         </DialogHeader>
         <div className="flex-1 overflow-y-auto p-4">{renderCartItems()}</div>
         <div className="mt-auto border-t">{renderCartFooter()}</div>

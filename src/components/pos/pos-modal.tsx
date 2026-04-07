@@ -404,96 +404,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     return null;
   }, [toBoolean]);
 
-  // Persist cart to IndexedDB - branch-specific
-  const saveCartToDb = useCallback(async (cartItems: CartItem[]) => {
-    try {
-      // Clear only cart items for THIS branch
-      await db.cart.where('branchId').equals(branchId).delete();
-      
-      if (cartItems.length > 0) {
-        const normalizedCartItems = cartItems
-          .map((item) => {
-            const inventoryItemId = resolveCartInventoryItemId(item) || String(item.id || '').trim();
-            const lineId =
-              String(item.id || '').trim() ||
-              buildCartLineId(inventoryItemId, {
-                isVariablePrice: item.isVariablePrice,
-                notes: item.notes,
-              });
-
-            if (!inventoryItemId || !lineId) {
-              return null;
-            }
-
-            return {
-              ...item,
-              id: lineId,
-              branchId,
-              inventoryItemId,
-              savedAt: new Date().toISOString(),
-            };
-          })
-          .filter(Boolean) as CartItem[];
-
-        if (normalizedCartItems.length > 0) {
-          // Use put semantics so stale packaged-app IndexedDB rows cannot block cart saves.
-          await db.cart.bulkPut(normalizedCartItems as any);
-        }
-
-        console.log('[Cart] Saved to IndexedDB for branch', branchId, ':', normalizedCartItems.length, 'items');
-      } else {
-        console.log('[Cart] Cleared cart for branch', branchId);
-      }
-    } catch (error) {
-      console.error('[Cart] Error saving to IndexedDB:', error);
-    }
-  }, [branchId]);
-
-  // Load cart from IndexedDB on mount or branch change
+  // Keep cart in memory only. Reset when the active branch changes so carts never bleed across branches.
   useEffect(() => {
-    const loadCartFromDb = async () => {
-      try {
-        const savedCart = await db.cart.where('branchId').equals(branchId).toArray();
-        if (savedCart.length > 0) {
-          const cartItems = savedCart
-            .map((item) => {
-              const { branchId: _branchId, savedAt, ...cartItem } = item as any;
-              const resolvedInventoryItemId = resolveCartInventoryItemId(cartItem);
-              const resolvedLineId = String(cartItem.id || resolvedInventoryItemId || '').trim();
-
-              if (!resolvedLineId) {
-                return null;
-              }
-
-              return {
-                ...cartItem,
-                id: resolvedLineId,
-                inventoryItemId: resolvedInventoryItemId || resolvedLineId,
-              } as CartItem;
-            })
-            .filter((item): item is CartItem => Boolean(item));
-          setCart(cartItems);
-          console.log('[Cart] Loaded from IndexedDB for branch', branchId, ':', cartItems.length, 'items');
-        } else {
-          // No cart for this branch, clear the state
-          setCart([]);
-          console.log('[Cart] No saved cart for branch', branchId);
-        }
-      } catch (error) {
-        console.error('[Cart] Error loading from IndexedDB:', error);
-        setCart([]);
-      }
-    };
-
-    if (branchId) {
-      loadCartFromDb();
-    }
+    setCart([]);
   }, [branchId]);
-
-  // Save cart whenever it changes
-  useEffect(() => {
-    saveCartToDb(cart);
-  }, [cart, saveCartToDb]);
 
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [isLoadingSession, setIsLoadingSession] = useState(true);
@@ -2184,10 +2098,8 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         description: `${paymentMethod} sale completed for ${total.toFixed(2)}.`,
       });
 
-      // Clear cart from both state and IndexedDB
+      // Clear the in-memory cart after a successful sale.
       handleClearCart();
-      await db.cart.where('branchId').equals(branchId).delete();
-      console.log('[Cart] Cleared from IndexedDB after successful sale');
 
       let printableOrder: Order | null = finalOrder;
       if (finalOrder?.id) {

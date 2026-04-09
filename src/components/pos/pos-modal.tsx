@@ -287,6 +287,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   useEffect(() => {
     if (!isOpen) {
       setSearchQuery('');
+      setCart([]);
     }
   }, [isOpen]);
 

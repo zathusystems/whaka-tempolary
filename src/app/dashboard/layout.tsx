@@ -716,7 +716,7 @@ function SyncQueueDropdown({ branchId }: { branchId: string | null }) {
 }
 
 
-function Header() {
+function Header({ onPosClick }: { onPosClick?: () => void }) {
   const { user, logout, business } = useAuth();
   const router = useRouter();
   const [isProfileModalOpen, setProfileModalOpen] = useState(false);
@@ -730,7 +730,6 @@ function Header() {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
   const [activeBranch, setActiveBranch] = useState<Branch | null>(null);
-  const [isPosModalOpen, setIsPosModalOpen] = useState(false);
   const [selectedExpiryBatch, setSelectedExpiryBatch] = useState<PurchaseRecord | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [businessName, setBusinessName] = useState<string>(() => {
@@ -1003,7 +1002,7 @@ function Header() {
           */}
 
           <div className="flex items-center gap-1">
-            <Button size="sm" onClick={() => setIsPosModalOpen(true)}>
+            <Button size="sm" onClick={() => onPosClick?.()}>
                 <MonitorPlay className="mr-2 h-4 w-4" /> POS
             </Button>
 
@@ -1257,13 +1256,6 @@ function Header() {
           user={user}
           isOpen={isProfileModalOpen}
           onOpenChange={setProfileModalOpen}
-        />
-      )}
-      {activeBranchId && (
-        <PosModal
-          branchId={activeBranchId}
-          isOpen={isPosModalOpen}
-          onOpenChange={setIsPosModalOpen}
         />
       )}
     </>
@@ -1554,7 +1546,7 @@ export default function DashboardLayout({
            <AppSidebar user={user} onPosClick={() => setIsPosModalOpen(true)} />
         </Sidebar>
         <div className="flex-1 flex flex-col overflow-y-auto">
-          <Header />
+          <Header onPosClick={() => setIsPosModalOpen(true)} />
           <main className="flex-1 w-full bg-background/95">
             <div className="mx-auto flex h-full w-full max-w-[1540px] flex-col px-4 py-4 sm:px-6 lg:px-8 xl:py-6 2xl:px-10">
               {children}

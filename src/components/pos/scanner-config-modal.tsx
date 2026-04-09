@@ -15,6 +15,7 @@ import { Switch } from '@/components/ui/switch';
 import { useToast } from '@/hooks/use-toast';
 import { scannerService, type ScannerConfig, type ScannerSettings } from '@/lib/services/scanner-service';
 import { scannerDiscoveryService, type DiscoveredScanner } from '@/lib/services/scanner-discovery-service';
+import { safeLocalStorageGetItem } from '@/lib/safe-local-storage';
 import { v4 as uuidv4 } from 'uuid';
 
 interface ScannerConfigModalProps {
@@ -30,7 +31,7 @@ export function ScannerConfigModal({ isOpen, onOpenChange }: ScannerConfigModalP
   const [isScanning, setIsScanning] = useState(false);
   const [discoveredScanners, setDiscoveredScanners] = useState<DiscoveredScanner[]>([]);
 
-  const branchId = localStorage.getItem('handypos-active-branch') || 'main';
+  const branchId = safeLocalStorageGetItem('handypos-active-branch') || 'main';
 
   // Load scanners and settings
   useEffect(() => {

@@ -31,6 +31,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/use-auth';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
+import { safeLocalStorageGetItem, safeLocalStorageSetItem } from '@/lib/safe-local-storage';
 import { v4 as uuidv4 } from 'uuid';
 import {
   Dialog,
@@ -296,7 +297,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    const storedViewMode = window.localStorage.getItem(LOCAL_STORAGE_KEYS.POS_MODAL_VIEW_MODE);
+    const storedViewMode = safeLocalStorageGetItem(LOCAL_STORAGE_KEYS.POS_MODAL_VIEW_MODE);
     if (storedViewMode === 'grid' || storedViewMode === 'list') {
       setViewMode(storedViewMode);
       setIsViewModeReady(true);
@@ -313,7 +314,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   // Persist user preference for grid/list view mode.
   useEffect(() => {
     if (!isViewModeReady || typeof window === 'undefined') return;
-    window.localStorage.setItem(LOCAL_STORAGE_KEYS.POS_MODAL_VIEW_MODE, viewMode);
+    safeLocalStorageSetItem(LOCAL_STORAGE_KEYS.POS_MODAL_VIEW_MODE, viewMode);
   }, [viewMode, isViewModeReady]);
 
   const toFiniteNumber = useCallback((value: unknown, fallback = 0): number => {
@@ -867,7 +868,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
           const applyCachedTaxMappingPolicy = () => {
             if (typeof window === 'undefined') return;
             try {
-              const storedSettingsRaw = window.localStorage.getItem('handypos-business-settings');
+              const storedSettingsRaw = safeLocalStorageGetItem('handypos-business-settings');
               if (!storedSettingsRaw) return;
               const parsed = JSON.parse(storedSettingsRaw);
               const storedBusinessId = String(parsed?.businessId || '').trim();

@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { safeLocalStorageGetItem } from '@/lib/safe-local-storage';
 import { ShoppingBasket, CheckCircle2, Clock, AlertCircle, X, ChevronDown, ChevronUp, Phone, User, Utensils, Calendar, Tag } from 'lucide-react';
 import { useCurrency } from '@/hooks/use-currency';
 import { format, parseISO } from 'date-fns';
@@ -177,7 +178,7 @@ export function ViewOrdersModal({ branchId, isOpen, onOpenChange }: ViewOrdersMo
           method: 'PATCH',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('access_token') || ''}`
+            'Authorization': `Bearer ${safeLocalStorageGetItem('access_token') || ''}`
           },
           body: JSON.stringify({ status: newStatus })
         }

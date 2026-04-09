@@ -51,6 +51,7 @@ import { useToast } from '@/hooks/use-toast';
 import { getOfflineBusinessProfile } from '@/lib/business-profile';
 import { PRINTER_CONFIG_UPDATED_EVENT, type PrinterSettings } from '@/lib/services/printer-service';
 import { getNextReceiptCopyNumber, markReceiptPrinted } from '@/lib/services/receipt-copy-service';
+import { safeLocalStorageGetItem } from '@/lib/safe-local-storage';
 
 
 export type BuyerDetails = {
@@ -561,6 +562,14 @@ const PaymentDialog = ({
     const [isProcessingPayment, setIsProcessingPayment] = useState(false);
     const shouldEnforceTaxMapping = eisEnabled && blockSalesIfTaxMappingMissing === true;
     const defaultTaxRateDecimal = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
+    const activeBranchId = useMemo(
+        () => branchId ?? safeLocalStorageGetItem('handypos-active-branch') ?? 'main',
+        [branchId]
+    );
+    const normalizedActiveBranchId = useMemo(
+        () => normalizeBranchIdentifier(activeBranchId),
+        [activeBranchId]
+    );
     const mappingRefreshAttemptedRef = useRef(false);
     const mappingItemFetchAttemptedRef = useRef(false);
     const taxMethodSummary = useMemo(() => {
@@ -624,16 +633,9 @@ const PaymentDialog = ({
             }
 
             try {
-                const activeBranchId = normalizeBranchIdentifier(
-                    branchId ?? (
-                        typeof window !== 'undefined'
-                            ? localStorage.getItem('handypos-active-branch')
-                            : ''
-                    )
-                );
                 const shouldScopeByBranch =
-                    Boolean(activeBranchId) &&
-                    !['main', 'main-branch', 'main_branch'].includes(activeBranchId.toLowerCase());
+                    Boolean(normalizedActiveBranchId) &&
+                    !['main', 'main-branch', 'main_branch'].includes(normalizedActiveBranchId.toLowerCase());
                 const localMappings = await db.mraMappings.toArray();
                 const scopedMappings = localMappings.filter((mapping) => {
                     const mappingBranchId = normalizeBranchIdentifier(
@@ -650,7 +652,7 @@ const PaymentDialog = ({
                     if (!shouldScopeByBranch) {
                         return true;
                     }
-                    return mappingBranchId === activeBranchId;
+                    return mappingBranchId === normalizedActiveBranchId;
                 });
 
                 let mappingByItemId = buildMappingLookup(scopedMappings);
@@ -742,7 +744,7 @@ const PaymentDialog = ({
                                 if (!shouldScopeByBranch) {
                                     return true;
                                 }
-                                return mappingBranchId === activeBranchId;
+                                return mappingBranchId === normalizedActiveBranchId;
                             });
                             mappingByItemId = buildMappingLookup(refreshedScopedMappings);
                         }
@@ -844,7 +846,7 @@ const PaymentDialog = ({
                                 if (!shouldScopeByBranch) {
                                     return true;
                                 }
-                                return mappingBranchId === activeBranchId;
+                                return mappingBranchId === normalizedActiveBranchId;
                             });
                             mappingByItemId = buildMappingLookup(refreshedScopedMappings);
                         }
@@ -1118,7 +1120,7 @@ const PaymentDialog = ({
         return () => {
             cancelled = true;
         };
-    }, [cart, subtotal, tax, taxLabel, eisEnabled, shouldEnforceTaxMapping, defaultTaxRateDecimal]);
+    }, [cart, subtotal, tax, taxLabel, eisEnabled, shouldEnforceTaxMapping, defaultTaxRateDecimal, branchId, normalizedActiveBranchId]);
 
     const total = calculatedGrossAmount;
     const hasBlockingUnmapped = shouldEnforceTaxMapping && unmappedProducts.length > 0;
@@ -1301,7 +1303,6 @@ const PaymentDialog = ({
 
     const refreshPrinterState = useCallback(async () => {
         const { printerService } = await import('@/lib/services/printer-service');
-        const activeBranchId = localStorage.getItem('handypos-active-branch') || 'main';
         const [defaultPrinter, currentSettings] = await Promise.all([
             printerService.getDefaultPrinter(activeBranchId),
             printerService.getPrinterSettings(activeBranchId),
@@ -1312,7 +1313,7 @@ const PaymentDialog = ({
             currentSettings,
             (defaultPrinter?.paperWidth as '80mm' | '58mm') || '80mm'
         );
-    }, [applyPrinterSettingsToReceipt]);
+    }, [activeBranchId, applyPrinterSettingsToReceipt]);
 
     const waitForFiscalInvoiceNumber = useCallback(
         async (orderToPrint: Order, timeoutMs: number = 15000): Promise<Order> => {
@@ -1393,7 +1394,6 @@ const PaymentDialog = ({
                 }
             }
 
-            const activeBranchId = localStorage.getItem('handypos-active-branch') || 'main';
             const [settings, defaultPrinter] = await Promise.all([
                 printerService.getPrinterSettings(activeBranchId),
                 printerService.getDefaultPrinter(activeBranchId),
@@ -1518,7 +1518,7 @@ const PaymentDialog = ({
             setIsPrinting(false);
             printJobLockRef.current = false;
         }
-    }, [toast, applyPrinterSettingsToReceipt, completedOrder, eisEnabled, waitForFiscalInvoiceNumber]);
+    }, [activeBranchId, toast, applyPrinterSettingsToReceipt, completedOrder, eisEnabled, waitForFiscalInvoiceNumber]);
 
     useEffect(() => {
         if (step !== 'confirmation' || !completedOrder || autoPrintHandled) {
@@ -1542,7 +1542,6 @@ const PaymentDialog = ({
             try {
                 setIsAutoPrintRunning(true);
                 const { printerService } = await import('@/lib/services/printer-service');
-                const activeBranchId = localStorage.getItem('handypos-active-branch') || 'main';
                 const settings = await printerService.getPrinterSettings(activeBranchId);
 
                 if (cancelled) {
@@ -1572,7 +1571,7 @@ const PaymentDialog = ({
         return () => {
             cancelled = true;
         };
-    }, [step, completedOrder, autoPrintHandled, handlePrintReceipt, applyPrinterSettingsToReceipt]);
+    }, [step, completedOrder, autoPrintHandled, handlePrintReceipt, applyPrinterSettingsToReceipt, activeBranchId]);
 
     useEffect(() => {
         if (step === 'payment') {
@@ -1605,7 +1604,7 @@ const PaymentDialog = ({
         return () => {
             cancelled = true;
         };
-    }, [step, completedOrder, refreshPrinterState]);
+    }, [step, completedOrder, refreshPrinterState, activeBranchId]);
 
     useEffect(() => {
         if (step !== 'confirmation' || !completedOrder) {
@@ -1614,7 +1613,6 @@ const PaymentDialog = ({
 
         const handlePrinterUpdate = (event: Event) => {
             const customEvent = event as CustomEvent<{ branchId?: string }>;
-            const activeBranchId = localStorage.getItem('handypos-active-branch') || 'main';
             const updatedBranchId = String(customEvent.detail?.branchId || '').trim();
             if (updatedBranchId && updatedBranchId !== activeBranchId) {
                 return;
@@ -1627,7 +1625,7 @@ const PaymentDialog = ({
 
         window.addEventListener(PRINTER_CONFIG_UPDATED_EVENT, handlePrinterUpdate);
         return () => window.removeEventListener(PRINTER_CONFIG_UPDATED_EVENT, handlePrinterUpdate);
-    }, [step, completedOrder, refreshPrinterState]);
+    }, [step, completedOrder, refreshPrinterState, activeBranchId]);
     
     if (step === 'confirmation' && completedOrder) {
         const displayOrderNumber = (completedOrder as any).orderNumber ?? (completedOrder as any).order_number ?? '-';
@@ -1985,6 +1983,14 @@ export const GenericPos = ({
   const [paymentSessionId, setPaymentSessionId] = useState(0);
   const { format: formatCurrency } = useCurrency();
   const shouldEnforceTaxMapping = eisEnabled && blockSalesIfTaxMappingMissing === true;
+  const activeBranchId = useMemo(
+    () => branchId ?? safeLocalStorageGetItem('handypos-active-branch') ?? 'main',
+    [branchId]
+  );
+  const normalizedActiveBranchId = useMemo(
+    () => normalizeBranchIdentifier(activeBranchId),
+    [activeBranchId]
+  );
   
   const defaultTaxRateDecimal = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
   const taxLabel = defaultTaxRate ? `${defaultTaxRate.name} (${defaultTaxRate.rate}%)` : 'Tax';
@@ -2025,16 +2031,9 @@ export const GenericPos = ({
   }, [mraMappings]);
 
   const mappingByItemId = useMemo(() => {
-    const activeBranchId = normalizeBranchIdentifier(
-      branchId ?? (
-        typeof window !== 'undefined'
-          ? localStorage.getItem('handypos-active-branch')
-          : ''
-      )
-    );
     const shouldScopeByBranch =
-      Boolean(activeBranchId) &&
-      !['main', 'main-branch', 'main_branch'].includes(activeBranchId.toLowerCase());
+      Boolean(normalizedActiveBranchId) &&
+      !['main', 'main-branch', 'main_branch'].includes(normalizedActiveBranchId.toLowerCase());
 
     const scopedMappings = (mraMappings || []).filter((mapping) => {
       const mappingBranchId = normalizeBranchIdentifier(
@@ -2049,11 +2048,11 @@ export const GenericPos = ({
       if (!shouldScopeByBranch) {
         return true;
       }
-      return mappingBranchId === activeBranchId;
+      return mappingBranchId === normalizedActiveBranchId;
     });
 
     return buildMappingLookup(scopedMappings);
-  }, [branchId, mraMappings]);
+  }, [mraMappings, normalizedActiveBranchId]);
 
   const cartSummary = useMemo(() => {
     if (!cart || cart.length === 0) {

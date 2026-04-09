@@ -1,6 +1,7 @@
 'use client';
 
 import { db, type Business } from '@/lib/db';
+import { safeLocalStorageGetItem } from '@/lib/safe-local-storage';
 
 const LOCAL_STORAGE_KEYS = {
   AUTH_BUSINESS: 'handy-pos-business',
@@ -46,7 +47,7 @@ function getStoredBusinessTin(): string {
     return '';
   }
   const settings = parseStoredJson<{ tin?: unknown; tax_pin?: unknown; taxPin?: unknown }>(
-    localStorage.getItem(LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS)
+    safeLocalStorageGetItem(LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS)
   );
   return (
     normalizeTin(settings?.tin) ||
@@ -60,13 +61,13 @@ export function resolveOfflineBusinessId(): string | null {
     return null;
   }
 
-  const directId = normalizeBusinessId(localStorage.getItem(LOCAL_STORAGE_KEYS.BUSINESS_ID));
+  const directId = normalizeBusinessId(safeLocalStorageGetItem(LOCAL_STORAGE_KEYS.BUSINESS_ID));
   if (directId) {
     return directId;
   }
 
   const authBusiness = parseStoredJson<{ id?: string | number }>(
-    localStorage.getItem(LOCAL_STORAGE_KEYS.AUTH_BUSINESS)
+    safeLocalStorageGetItem(LOCAL_STORAGE_KEYS.AUTH_BUSINESS)
   );
   const authBusinessId = normalizeBusinessId(authBusiness?.id);
   if (authBusinessId) {
@@ -74,7 +75,7 @@ export function resolveOfflineBusinessId(): string | null {
   }
 
   const businessSettings = parseStoredJson<{ businessId?: string | number }>(
-    localStorage.getItem(LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS)
+    safeLocalStorageGetItem(LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS)
   );
   const settingsBusinessId = normalizeBusinessId(businessSettings?.businessId);
   if (settingsBusinessId) {
@@ -82,7 +83,7 @@ export function resolveOfflineBusinessId(): string | null {
   }
 
   const authUser = parseStoredJson<{ businessId?: string | number }>(
-    localStorage.getItem(LOCAL_STORAGE_KEYS.AUTH_USER)
+    safeLocalStorageGetItem(LOCAL_STORAGE_KEYS.AUTH_USER)
   );
   const authUserBusinessId = normalizeBusinessId(authUser?.businessId);
   if (authUserBusinessId) {

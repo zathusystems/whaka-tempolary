@@ -31,6 +31,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/use-auth';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
+import { warmBranchMraMappingCache } from '@/lib/mra-mapping-cache';
 import { safeLocalStorageGetItem, safeLocalStorageSetItem } from '@/lib/safe-local-storage';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -230,6 +231,18 @@ const buildMappingLookup = (mappings: any[]): Map<string, any> => {
   }
 
   return lookup;
+};
+
+const extractMappingsFromResponse = (response: any): any[] => {
+  if (Array.isArray(response)) {
+    return response;
+  }
+
+  if (Array.isArray(response?.results)) {
+    return response.results;
+  }
+
+  return [];
 };
 
 const resolveMappingBranchId = (mapping: any): string => {
@@ -798,6 +811,41 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     [branchId]
   );
   const hasCachedInventory = (allInventory?.length ?? 0) > 0;
+
+  useEffect(() => {
+    if (!isOpen || !branchId || (!eisEnabled && !blockSalesIfTaxMappingMissing)) {
+      return;
+    }
+
+    const inventoryItemIds = (allInventory || [])
+      .filter((item) => item.itemType === 'sellable')
+      .map((item) => String(item.id || '').trim())
+      .filter((itemId) => itemId.length > 0);
+
+    if (inventoryItemIds.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const warmMraCache = async () => {
+      const result = await warmBranchMraMappingCache({
+        branchId,
+        inventoryItemIds,
+        logPrefix: '[POS Modal]',
+      });
+
+      if (!cancelled && result.refreshed) {
+        console.log('[POS Modal] MRA cache warm result:', result);
+      }
+    };
+
+    void warmMraCache();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [allInventory, blockSalesIfTaxMappingMissing, branchId, eisEnabled, isOpen]);
   
   const defaultTaxRate = useLiveQuery(
     async () => {
@@ -970,67 +1018,6 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
             : await db.inventory.where({ branchId: branchId }).toArray();
 
           console.log('[POS Modal] Inventory cache now has', refreshedItems.length, 'items for branch:', branchId);
-
-            // Keep MRA mappings in sync with inventory so product cards and add-to-cart checks stay accurate.
-            try {
-              const mappingsResponse = await authFetch.fetch<any>(`/inventory/mra-mappings/?branch_id=${encodeURIComponent(backendBranchId)}`);
-              let mappings: any[] = [];
-
-              if (Array.isArray(mappingsResponse)) {
-                mappings = mappingsResponse;
-              } else if (mappingsResponse?.results && Array.isArray(mappingsResponse.results)) {
-                mappings = mappingsResponse.results;
-              }
-
-              const nowIso = new Date().toISOString();
-              for (const rawMapping of mappings) {
-                const mappingItemId = resolveMappingInventoryItemId(rawMapping);
-                if (!mappingItemId) {
-                  continue;
-                }
-
-                const taxType = rawMapping.mra_tax_type === 'zero' || rawMapping.mra_tax_type === 'exempt'
-                  ? rawMapping.mra_tax_type
-                  : (rawMapping.mraTaxType === 'zero' || rawMapping.mraTaxType === 'exempt' ? rawMapping.mraTaxType : 'standard');
-                const calculationMethod = String(
-                  rawMapping.tax_calculation_method ??
-                  rawMapping.taxCalculationMethod ??
-                  rawMapping.calculation_method ??
-                  rawMapping.calculationMethod ??
-                  ''
-                ).trim().toLowerCase().startsWith('excl')
-                  ? 'exclusive'
-                  : 'inclusive';
-
-                await db.mraMappings.put({
-                  id: String(rawMapping.id || `${mappingItemId}-mapping`),
-                  inventoryItemId: mappingItemId,
-                  branchId: normalizeBranchId(
-                    rawMapping.branch ??
-                    rawMapping.branch_id ??
-                    backendBranchId
-                  ) || undefined,
-                  mraProductCode: rawMapping.mra_product_code || rawMapping.mraProductCode || '',
-                  mraProductName: rawMapping.mra_product_name || rawMapping.mraProductName || '',
-                  mraTaxType: taxType,
-                  mraTaxRate: Number(rawMapping.mra_tax_rate ?? rawMapping.mraTaxRate ?? 0),
-                  mraUnitMeasure: rawMapping.mra_unit_measure || rawMapping.mraUnitMeasure || '',
-                  taxCalculationMethod: calculationMethod,
-                  isApproved: Boolean(rawMapping.is_approved ?? rawMapping.isApproved),
-                  approvedAt: rawMapping.approved_at || rawMapping.approvedAt || undefined,
-                  mraSynced: Boolean(rawMapping.mra_synced ?? rawMapping.mraSynced),
-                  lastSyncedAt: rawMapping.last_synced_at || rawMapping.lastSyncedAt || undefined,
-                  createdAt: rawMapping.created_at || rawMapping.createdAt || nowIso,
-                  updatedAt: nowIso,
-                  _dirty: false,
-                  _synced_at: nowIso,
-                });
-              }
-
-              console.log('[POS Modal] Synced', mappings.length, 'MRA mappings for branch:', backendBranchId);
-            } catch (mappingError) {
-              console.warn('[POS Modal] Failed to refresh MRA mappings for POS open:', mappingError);
-            }
         } catch (error) {
           console.error('[POS Modal] Error fetching inventory from backend:', error);
           console.log('[POS Modal] Falling back to cached inventory for branch:', branchId);
@@ -1147,24 +1134,32 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         if (!isReadyForSale && navigator.onLine) {
           try {
             const backendBranchId = toBackendBranchId(branchId);
-            if (!backendBranchId) {
-              throw new Error('Missing branch id for MRA mapping validation');
-            }
-            const response = await authFetch.fetch<any>(
-              `/inventory/mra-mappings/?inventory_item=${encodeURIComponent(normalizedItemId)}&branch_id=${encodeURIComponent(backendBranchId)}`
-            );
-            
             let mappings: any[] = [];
-            if (Array.isArray(response)) {
-              mappings = response;
-            } else if (response?.results && Array.isArray(response.results)) {
-              mappings = response.results;
+
+            if (backendBranchId) {
+              const scopedResponse = await authFetch.fetch<any>(
+                `/inventory/mra-mappings/?inventory_item=${encodeURIComponent(normalizedItemId)}&branch_id=${encodeURIComponent(backendBranchId)}`
+              );
+              mappings = extractMappingsFromResponse(scopedResponse);
+            }
+
+            let readyMapping = mappings.find((m) => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced));
+
+            // Some backends return shared/unscoped mappings only without a branch filter.
+            if (!readyMapping) {
+              const fallbackResponse = await authFetch.fetch<any>(
+                `/inventory/mra-mappings/?inventory_item=${encodeURIComponent(normalizedItemId)}`
+              );
+              const fallbackMappings = extractMappingsFromResponse(fallbackResponse);
+              if (fallbackMappings.length > 0) {
+                mappings = [...mappings, ...fallbackMappings];
+                readyMapping = mappings.find((m) => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced));
+              }
             }
 
             if (mappings.length === 0) {
               mappingStatus = 'missing';
             } else {
-              const readyMapping = mappings.find(m => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced));
               if (readyMapping) {
                 isReadyForSale = true;
                 mappingStatus = 'ready';

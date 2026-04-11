@@ -39,6 +39,7 @@ import { saveSaleToLocalStorage, addPendingSale, markSaleAsSynced, markSaleAsFai
 import { syncInventoryFromBackend } from '@/lib/services/inventory-sync';
 import { isTauriApp } from '@/lib/tauri-init';
 import { logAuditAction } from '@/lib/audit';
+import { warmBranchMraMappingCache } from '@/lib/mra-mapping-cache';
 
 export type CartItem = InventoryItem & {
   quantity: number;
@@ -205,6 +206,52 @@ const buildMappingLookup = (mappings: any[]): Map<string, any> => {
   }
 
   return lookup;
+};
+
+const resolveMappingBranchId = (mapping: any): string => {
+  return normalizeBranchId(
+    mapping?.branchId ??
+      mapping?.branch_id ??
+      mapping?.branch
+  );
+};
+
+const filterMappingsForBranch = (mappings: any[], branchId?: string | number | null): any[] => {
+  const normalizedBranchId = normalizeBranchId(branchId);
+  const shouldScopeByBranch =
+    Boolean(normalizedBranchId) &&
+    !['main', 'main-branch', 'main_branch'].includes(normalizedBranchId.toLowerCase());
+
+  return mappings.filter((mapping) => {
+    const mappingBranchId = resolveMappingBranchId(mapping);
+    if (!mappingBranchId) {
+      return true;
+    }
+    if (!shouldScopeByBranch) {
+      return true;
+    }
+    return mappingBranchId === normalizedBranchId;
+  });
+};
+
+const pickPreferredMapping = (mappings: any[]): any => {
+  let preferred: any = undefined;
+  for (const mapping of mappings) {
+    preferred = choosePreferredMapping(preferred, mapping);
+  }
+  return preferred;
+};
+
+const extractMappingsFromResponse = (response: any): any[] => {
+  if (Array.isArray(response)) {
+    return response;
+  }
+
+  if (Array.isArray(response?.results)) {
+    return response.results;
+  }
+
+  return [];
 };
 
 type NormalizedTaxType = 'standard' | 'zero' | 'exempt';
@@ -485,6 +532,41 @@ export default function PosPage() {
     },
     [activeBranchId]
   );
+
+  useEffect(() => {
+    if (!activeBranchId || (!eisEnabled && !blockSalesIfTaxMappingMissing)) {
+      return;
+    }
+
+    const inventoryItemIds = (allInventory || [])
+      .filter((item) => item.itemType === 'sellable')
+      .map((item) => String(item.id || '').trim())
+      .filter((itemId) => itemId.length > 0);
+
+    if (inventoryItemIds.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const warmMraCache = async () => {
+      const result = await warmBranchMraMappingCache({
+        branchId: activeBranchId,
+        inventoryItemIds,
+        logPrefix: '[POS Page]',
+      });
+
+      if (!cancelled && result.refreshed) {
+        console.log('[POS Page] MRA cache warm result:', result);
+      }
+    };
+
+    void warmMraCache();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeBranchId, allInventory, blockSalesIfTaxMappingMissing, eisEnabled]);
   
   const defaultTaxRate = useLiveQuery(
     async () => {
@@ -558,19 +640,31 @@ export default function PosPage() {
         
         // First try local database
         try {
-          const localMapping = await db.mraMappings
+          const itemId = String(item.id || '').trim();
+          const directLocalMappings = await db.mraMappings
             .where('inventoryItemId')
-            .equals(item.id)
-            .first();
+            .equals(itemId)
+            .toArray();
+          let localMapping = pickPreferredMapping(filterMappingsForBranch(directLocalMappings, activeBranchId));
+
+          if (!localMapping) {
+            const allMappings = await db.mraMappings.toArray();
+            const scopedMappings = filterMappingsForBranch(allMappings, activeBranchId);
+            const lookup = buildMappingLookup(scopedMappings);
+            localMapping = lookup.get(itemId);
+          }
+
+          const localApproved = Boolean(localMapping?.isApproved ?? localMapping?.is_approved);
+          const localSynced = Boolean(localMapping?.mraSynced ?? localMapping?.mra_synced);
           
-          if (localMapping && localMapping.isApproved && localMapping.mraSynced) {
+          if (localMapping && localApproved && localSynced) {
             console.log('[POS Page] ✓ Found APPROVED & SYNCED MRA mapping in local database for:', item.name);
             isReadyForSale = true;
             mappingStatus = 'ready';
-          } else if (localMapping && !localMapping.isApproved) {
+          } else if (localMapping && !localApproved) {
             console.log('[POS Page] ⚠ MRA mapping found but NOT APPROVED for:', item.name);
             mappingStatus = 'pending';
-          } else if (localMapping && !localMapping.mraSynced) {
+          } else if (localMapping && !localSynced) {
             console.log('[POS Page] ⚠ MRA mapping found but NOT SYNCED for:', item.name);
             mappingStatus = 'unsynced';
           } else {
@@ -579,24 +673,37 @@ export default function PosPage() {
           }
         } catch (dbError) {
           console.warn('[POS Page] Error checking local database:', dbError);
+          mappingStatus = 'missing';
         }
         
         // If not ready locally, try API to get latest status
         if (!isReadyForSale && navigator.onLine) {
           try {
             const backendBranchId = normalizeBranchId(activeBranchId);
-            const branchFilter = backendBranchId
-              ? `&branch_id=${encodeURIComponent(backendBranchId)}`
-              : '';
-            const response = await authFetch.fetch<any>(
-              `/inventory/mra-mappings/?inventory_item=${encodeURIComponent(String(item.id))}${branchFilter}`
-            );
-            
             let mappings: any[] = [];
-            if (Array.isArray(response)) {
-              mappings = response;
-            } else if (response?.results && Array.isArray(response.results)) {
-              mappings = response.results;
+
+            if (backendBranchId) {
+              const scopedResponse = await authFetch.fetch<any>(
+                `/inventory/mra-mappings/?inventory_item=${encodeURIComponent(String(item.id))}&branch_id=${encodeURIComponent(backendBranchId)}`
+              );
+              mappings = extractMappingsFromResponse(scopedResponse);
+            }
+
+            let readyMapping = mappings.find(
+              (m) => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced)
+            );
+
+            if (!readyMapping) {
+              const fallbackResponse = await authFetch.fetch<any>(
+                `/inventory/mra-mappings/?inventory_item=${encodeURIComponent(String(item.id))}`
+              );
+              const fallbackMappings = extractMappingsFromResponse(fallbackResponse);
+              if (fallbackMappings.length > 0) {
+                mappings = [...mappings, ...fallbackMappings];
+                readyMapping = mappings.find(
+                  (m) => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced)
+                );
+              }
             }
 
             console.log('[POS Page] API response for MRA mappings:', mappings.length, 'mappings found');
@@ -607,9 +714,6 @@ export default function PosPage() {
               isReadyForSale = false;
             } else {
               // Check if any mapping is BOTH approved AND synced
-              const readyMapping = mappings.find(
-                (m) => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced)
-              );
               if (readyMapping) {
                 console.log('[POS Page] ✓ Found APPROVED & SYNCED MRA mapping from API for:', item.name);
                 isReadyForSale = true;
@@ -619,7 +723,7 @@ export default function PosPage() {
                 try {
                   const taxType = readyMapping.mra_tax_type === 'zero' || readyMapping.mra_tax_type === 'exempt'
                     ? readyMapping.mra_tax_type
-                    : 'standard';
+                    : (readyMapping.mraTaxType === 'zero' || readyMapping.mraTaxType === 'exempt' ? readyMapping.mraTaxType : 'standard');
                   const calculationMethod = String(
                     readyMapping.tax_calculation_method ??
                     readyMapping.taxCalculationMethod ??
@@ -635,18 +739,22 @@ export default function PosPage() {
                   await db.mraMappings.put({
                     id: String(readyMapping.id || `${mappingItemId}-mapping`),
                     inventoryItemId: mappingItemId,
-                    branchId: activeBranchId || undefined,
-                    mraProductCode: readyMapping.mra_product_code || '',
-                    mraProductName: readyMapping.mra_product_name || item.name,
+                    branchId: normalizeBranchId(
+                      readyMapping.branch ??
+                      readyMapping.branch_id ??
+                      backendBranchId
+                    ) || undefined,
+                    mraProductCode: readyMapping.mra_product_code || readyMapping.mraProductCode || '',
+                    mraProductName: readyMapping.mra_product_name || readyMapping.mraProductName || item.name,
                     mraTaxType: taxType,
-                    mraTaxRate: Number(readyMapping.mra_tax_rate || 0),
-                    mraUnitMeasure: readyMapping.mra_unit_measure || '',
+                    mraTaxRate: Number(readyMapping.mra_tax_rate ?? readyMapping.mraTaxRate ?? 0),
+                    mraUnitMeasure: readyMapping.mra_unit_measure || readyMapping.mraUnitMeasure || '',
                     taxCalculationMethod: calculationMethod,
-                    isApproved: Boolean(readyMapping.is_approved),
-                    approvedAt: readyMapping.approved_at || undefined,
-                    mraSynced: Boolean(readyMapping.mra_synced),
-                    lastSyncedAt: nowIso,
-                    createdAt: readyMapping.created_at || nowIso,
+                    isApproved: Boolean(readyMapping.is_approved ?? readyMapping.isApproved),
+                    approvedAt: readyMapping.approved_at || readyMapping.approvedAt || undefined,
+                    mraSynced: Boolean(readyMapping.mra_synced ?? readyMapping.mraSynced),
+                    lastSyncedAt: readyMapping.last_synced_at || readyMapping.lastSyncedAt || nowIso,
+                    createdAt: readyMapping.created_at || readyMapping.createdAt || nowIso,
                     updatedAt: nowIso,
                   });
                 } catch (cacheError) {

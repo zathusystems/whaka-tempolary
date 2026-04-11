@@ -33,12 +33,13 @@ export interface SyncQueueItem {
   metadata?: Record<string, any>;
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://pos.zathusystems.com/api';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://pos.express-travel-ticketing.online/api';
 const SYNC_QUEUE_KEY = 'handypos-sync-queue';
 const SYNC_QUEUE_MIGRATION_KEY = 'handypos-sync-queue-migrated-v1';
 const AUTH_TOKENS_KEY = 'handypos-auth-tokens';
 const MAX_RETRIES = 3;
 const SYNC_INTERVAL = 30000; // 30 seconds
+const TRANSIENT_NETWORK_RETRY_DELAY_MS = 800;
 
 class AuthenticatedFetch {
   private tokens: AuthTokens | null = null;
@@ -141,6 +142,53 @@ class AuthenticatedFetch {
     );
   }
 
+  private async delay(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private shouldRetryTransientNetworkError(
+    error: unknown,
+    attempt: number,
+    maxAttempts: number
+  ): boolean {
+    if (attempt >= maxAttempts) {
+      return false;
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return false;
+    }
+
+    return this.isLikelyNetworkError(error);
+  }
+
+  private async executeFetchWithRetry(
+    input: string,
+    init: RequestInit,
+    options: {
+      maxAttempts?: number;
+      label?: string;
+    } = {}
+  ): Promise<Response> {
+    const maxAttempts = Math.max(1, options.maxAttempts ?? 1);
+    const label = options.label || input;
+    let attempt = 1;
+
+    while (true) {
+      try {
+        return await fetch(input, init);
+      } catch (error) {
+        if (!this.shouldRetryTransientNetworkError(error, attempt, maxAttempts)) {
+          throw error;
+        }
+
+        console.warn(`[AuthFetch] Transient network error during ${label}; retrying request (attempt ${attempt + 1}/${maxAttempts})`, error);
+        await this.delay(TRANSIENT_NETWORK_RETRY_DELAY_MS * attempt);
+        attempt += 1;
+      }
+    }
+  }
+
   /**
    * Provide a more actionable message for desktop users when the backend cannot be reached.
    */
@@ -149,13 +197,20 @@ class AuthenticatedFetch {
     requestUrl: string,
     options: { queued?: boolean; offline?: boolean } = {}
   ): Error {
+    let requestHost = requestUrl;
+    try {
+      requestHost = new URL(requestUrl).host;
+    } catch {
+      requestHost = requestUrl;
+    }
+
     const userMessage = options.queued
       ? options.offline
         ? 'Offline - request queued for retry'
-        : 'Network error - request queued for retry'
+        : `Could not reach ${requestHost} - request queued for retry`
       : options.offline
         ? 'No internet connection.'
-        : 'Internet access problem. Please check your connection and try again.';
+        : `Could not reach ${requestHost}. Your internet may still be connected, but the app could not contact the server. Check hotspot/VPN/DNS/server availability and try again.`;
     const originalMessage = error instanceof Error ? error.message : String(error ?? '');
 
     const wrapped = new Error(userMessage);
@@ -512,7 +567,10 @@ class AuthenticatedFetch {
 
     try {
       // Always attempt to fetch from server (Django is always accessible locally)
-      const response = await fetch(fullUrl, fetchOptions);
+      const response = await this.executeFetchWithRetry(fullUrl, fetchOptions, {
+        maxAttempts: method === 'GET' ? 2 : 1,
+        label: `${method} ${fullUrl}`,
+      });
 
       // Handle token expiration (but not for login/register endpoints)
       if (response.status === 401) {
@@ -611,7 +669,7 @@ class AuthenticatedFetch {
     console.log('[DEBUG LOGIN] Body:', body);
 
     try {
-      const response = await fetch(fullUrl, {
+      const response = await this.executeFetchWithRetry(fullUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -619,6 +677,9 @@ class AuthenticatedFetch {
         },
         credentials: 'include',
         body: JSON.stringify(body),
+      }, {
+        maxAttempts: 2,
+        label: `LOGIN ${fullUrl}`,
       });
 
       console.log('[DEBUG LOGIN] Response status:', response.status);

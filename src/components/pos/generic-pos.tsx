@@ -19,7 +19,6 @@ import {
 } from 'lucide-react';
 import type { CartItem, PaymentMethod } from '@/app/dashboard/pos/page';
 import type { InventoryItem, Order, TaxRate } from '@/lib/db';
-import { useIsMobile } from '@/hooks/use-mobile';
 import { useCurrency } from '@/hooks/use-currency';
 import { authFetch } from '@/lib/auth-fetch';
 import { Button } from '@/components/ui/button';
@@ -1977,7 +1976,6 @@ export const GenericPos = ({
   blockSalesIfTaxMappingMissing = false,
   branchId,
 }: PosProps) => {
-  const isMobile = useIsMobile();
   const [isPaymentDialogOpen, setPaymentDialogOpen] = useState(false);
   const [showPrinterConfig, setShowPrinterConfig] = useState(false);
   const [paymentSessionId, setPaymentSessionId] = useState(0);
@@ -2524,7 +2522,7 @@ export const GenericPos = ({
   const renderMobileCartDialog = () => (
     <Dialog>
       <DialogTrigger asChild>
-        <Button size="lg" className="fixed bottom-4 right-4 z-10 h-14 w-auto rounded-full shadow-lg">
+        <Button size="lg" className="fixed bottom-4 right-4 z-10 h-14 w-auto rounded-full shadow-lg lg:hidden">
           <span>View Cart ({cart.reduce((acc, item) => acc + item.quantity, 0)})</span>
           <Separator orientation="vertical" className="mx-3 h-6" />
           <span className="font-bold">{formatCurrency(total)}</span>
@@ -2570,7 +2568,7 @@ export const GenericPos = ({
         </div>
       )}
 
-      {isMobile && hasItemsInCart && renderMobileCartDialog()}
+      {hasItemsInCart && renderMobileCartDialog()}
     </div>
     <Dialog open={isPaymentDialogOpen} onOpenChange={setPaymentDialogOpen}>
         <PaymentDialog 

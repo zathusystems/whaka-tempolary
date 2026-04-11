@@ -2,6 +2,7 @@
 
 import { db, type InventoryItem } from '@/lib/db';
 import { authFetch } from '@/lib/auth-fetch';
+import { recordMraMappingCacheRefresh } from '@/lib/mra-mapping-cache';
 
 function toBackendBranchId(id: string): string {
   const normalized = String(id || '').trim();
@@ -325,6 +326,10 @@ export async function syncInventoryFromBackend(branchId: string): Promise<{
       }
 
       console.log('[InventorySync] Successfully synced', mraMappingsSynced, 'MRA mappings');
+      recordMraMappingCacheRefresh(branchId, {
+        inventoryItemCount: mraMappings.length,
+        missingItemCount: 0,
+      });
     } catch (error) {
       console.error('[InventorySync] Failed to fetch MRA mappings:', error);
     }

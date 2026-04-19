@@ -20,9 +20,12 @@ export async function createPurchaseRecord(
   userName: string
 ): Promise<PurchaseRecord> {
   try {
+    const nowIso = new Date().toISOString();
     // 1. Save to local database immediately with sync flag
     const purchaseWithSync = {
       ...purchase,
+      createdAt: purchase.createdAt || nowIso,
+      updatedAt: purchase.updatedAt || nowIso,
       _dirty: true,
       _operation: 'create' as const
     };
@@ -69,9 +72,11 @@ export async function updatePurchaseRecord(
   branchId: string
 ): Promise<void> {
   try {
+    const nowIso = new Date().toISOString();
     // 1. Update local database immediately with sync flag
     const updatesWithSync = {
       ...updates,
+      updatedAt: updates.updatedAt || nowIso,
       _dirty: true,
       _operation: 'update' as const
     };

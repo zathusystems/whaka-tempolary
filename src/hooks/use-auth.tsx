@@ -5,6 +5,11 @@ import React, { createContext, useContext, useState, useEffect, ReactNode } from
 import { syncService } from '@/lib/services/sync-service';
 import { normalizeRole } from '@/lib/rbac/role-utils';
 import { clearSessionContextStorage } from '@/lib/session-context-storage';
+import {
+  clearDesktopSessionSnapshot,
+  hydrateSessionSnapshotFromDesktopStore,
+  syncSessionSnapshotToDesktopStore,
+} from '@/lib/desktop-session-store';
 
 // Define the shape of the user object and the auth context
 export interface User {
@@ -323,6 +328,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     if (authFetch && authFetch.logout) {
       authFetch.logout();
     }
+
+    void clearDesktopSessionSnapshot();
   };
 
   useEffect(() => {
@@ -331,6 +338,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     const bootstrapAuth = async () => {
       // Check for a user and business in localStorage on initial load
       try {
+        await hydrateSessionSnapshotFromDesktopStore();
+
         const tokens = readValidAuthTokens();
         const hasValidTokens = Boolean(tokens);
         const fallbackUserFromToken = tokens ? buildUserFromToken(tokens.access) : null;
@@ -435,6 +444,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
         if (!hasValidTokens && (storedUser || storedBusiness)) {
           clearAuthStorage();
         }
+
+        if (hasValidTokens) {
+          void syncSessionSnapshotToDesktopStore();
+        }
       } catch (error) {
         console.error('Failed to parse from localStorage', error);
         clearAuthStorage();
@@ -512,6 +525,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // Now set the new user
     localStorage.setItem(AUTH_STORAGE_KEYS.USER, JSON.stringify(normalizedUserData));
     setUser(normalizedUserData);
+    void syncSessionSnapshotToDesktopStore();
   };
 
   const logout = () => {
@@ -523,6 +537,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const selectBusiness = (businessData: Business) => {
     localStorage.setItem(AUTH_STORAGE_KEYS.BUSINESS, JSON.stringify(businessData));
     setBusiness(businessData);
+    void syncSessionSnapshotToDesktopStore();
   };
 
   const value = { user, business, loading, login, logout, selectBusiness };

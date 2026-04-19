@@ -93,6 +93,10 @@ import { Separator } from '@/components/ui/separator';
 import { logAuditAction } from '@/lib/audit';
 import { downloadTextFile } from '@/lib/file-download';
 import { calculateZReportSummary } from '@/lib/z-report-print';
+import {
+  getProductReportingCategoryMeta,
+  type ProductReportingCategory,
+} from '@/lib/session-product-report';
 import SaleDetailModal from '@/app/dashboard/sessions/modals/sale-detail-modal';
 
 type RefundFormValues = {
@@ -242,6 +246,20 @@ const EMPTY_EIS_SUMMARY = {
 const toFiniteNumber = (value: unknown, fallback = 0): number => {
     const parsed = typeof value === 'number' ? value : Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const formatQuantity = (value: number): string => {
+    const quantity = toFiniteNumber(value, 0);
+    return quantity.toFixed(Math.abs(quantity - Math.round(quantity)) < 1e-9 ? 2 : 3);
+};
+
+const ProductTypeBadge = ({ productType }: { productType: ProductReportingCategory }) => {
+    const meta = getProductReportingCategoryMeta(productType);
+    return (
+        <Badge variant="outline" className={meta.badgeClassName}>
+            {meta.shortLabel}
+        </Badge>
+    );
 };
 
 const normalizeOrderForReport = (order: Order) => {
@@ -564,11 +582,11 @@ export default function ReportsPage() {
 
 
     const kpiMetrics = [
-        { title: 'Total Revenue (with Tax)', value: formatCurrency(data.totalRevenue), icon: DollarSign },
+        { title: 'Total Sales', value: formatCurrency(data.totalSales), icon: DollarSign },
         { title: 'Gross Profit', value: formatCurrency(data.grossProfit), icon: TrendingUp },
         { title: 'Net Profit', value: formatCurrency(data.netProfit), icon: TrendingUp },
         { title: 'Total Transactions', value: data.totalTransactions.toString(), icon: ShoppingCart },
-        { title: 'Avg. Order Value', value: formatCurrency(data.averageOrderValue), icon: BarChart },
+        // { title: 'Avg. Sale Value', value: formatCurrency(data.averageSaleValue), icon: BarChart },
         { title: 'Profit Margin', value: `${data.profitMargin.toFixed(2)}%`, icon: TrendingDown },
     ];
 
@@ -824,7 +842,7 @@ export default function ReportsPage() {
 
         <TabsContent value="sales">
             <div className="grid gap-6">
-                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
                     {kpiMetrics.map(metric => (
                         <FinancialKpiCard
                             key={metric.title}
@@ -835,6 +853,61 @@ export default function ReportsPage() {
                         />
                     ))}
                 </div>
+
+                <Card>
+                    <CardHeader>
+                        <CardTitle>Product Type Sales Mix</CardTitle>
+                        <CardDescription>Separate sales totals for normal products, oils, and fuel in the selected period.</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        {loading ? (
+                            <div className="grid gap-4 md:grid-cols-3">
+                                {[...Array(3)].map((_, index) => (
+                                    <div key={index} className="rounded-lg border p-4">
+                                        <Skeleton className="h-5 w-28" />
+                                        <div className="mt-4 space-y-3">
+                                            <Skeleton className="h-4 w-full" />
+                                            <Skeleton className="h-4 w-5/6" />
+                                            <Skeleton className="h-4 w-2/3" />
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="grid gap-4 md:grid-cols-3">
+                                {data.salesByProductType.map((entry) => (
+                                    <div key={entry.category} className="rounded-lg border bg-muted/20 p-4">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div>
+                                                <p className="font-medium">{entry.label}</p>
+                                                <p className="text-xs text-muted-foreground">
+                                                    {entry.itemCount} product{entry.itemCount === 1 ? '' : 's'}
+                                                </p>
+                                            </div>
+                                            <Badge variant="outline" className={entry.badgeClassName}>
+                                                {entry.shortLabel}
+                                            </Badge>
+                                        </div>
+                                        <div className="mt-4 space-y-2 text-sm">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <span className="text-muted-foreground">Total Sales</span>
+                                                <span className="font-semibold">{formatCurrency(entry.amount)}</span>
+                                            </div>
+                                            <div className="flex items-center justify-between gap-3">
+                                                <span className="text-muted-foreground">Qty Sold</span>
+                                                <span>{formatQuantity(entry.quantity)}</span>
+                                            </div>
+                                            <div className="flex items-center justify-between gap-3">
+                                                <span className="text-muted-foreground">Distinct Products</span>
+                                                <span>{entry.itemCount}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </CardContent>
+                </Card>
 
                 <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
                     <Card className="col-span-1 lg:col-span-3">
@@ -860,7 +933,7 @@ export default function ReportsPage() {
                     <Card className="col-span-1 lg:col-span-2">
                         <CardHeader>
                             <CardTitle>Profit & Loss Statement</CardTitle>
-                            <CardDescription>A simplified P&L for the selected period.</CardDescription>
+                            <CardDescription>P&L for the selected period.</CardDescription>
                         </CardHeader>
                         <CardContent>
                             {loading ? (
@@ -874,9 +947,9 @@ export default function ReportsPage() {
                             ) : (
                                 <Table>
                                     <TableBody>
-                                        <TableRow><TableCell>Subtotal (Before Tax)</TableCell><TableCell className="text-right font-medium">{formatCurrency(data.totalSubtotal)}</TableCell></TableRow>
+                                        <TableRow><TableCell>Revenue (Excl. Tax)</TableCell><TableCell className="text-right font-medium">{formatCurrency(data.totalRevenue)}</TableCell></TableRow>
                                         <TableRow><TableCell>Tax Collected</TableCell><TableCell className="text-right font-medium text-green-600">+{formatCurrency(data.totalTax)}</TableCell></TableRow>
-                                        <TableRow className="bg-muted/50 font-semibold"><TableCell>Total Revenue</TableCell><TableCell className="text-right">{formatCurrency(data.totalRevenue)}</TableCell></TableRow>
+                                        <TableRow className="bg-muted/50 font-semibold"><TableCell>Total Sales (Incl. Tax)</TableCell><TableCell className="text-right">{formatCurrency(data.totalSales)}</TableCell></TableRow>
                                         <TableRow><TableCell>Cost of Goods Sold (COGS)</TableCell><TableCell className="text-right font-medium">{`-${formatCurrency(data.totalCogs)}`}</TableCell></TableRow>
                                         <TableRow className="bg-muted/50 font-semibold"><TableCell>Gross Profit</TableCell><TableCell className="text-right">{formatCurrency(data.grossProfit)}</TableCell></TableRow>
                                         <TableRow><TableCell>Operating Expenses</TableCell><TableCell className="text-right font-medium">{`-${formatCurrency(data.totalExpenses)}`}</TableCell></TableRow>
@@ -948,12 +1021,40 @@ export default function ReportsPage() {
                     </CardHeader>
                     <CardContent>
                         <Table>
-                            <TableHeader><TableRow><TableHead>Product</TableHead><TableHead className="text-right">Quantity Sold</TableHead><TableHead className="text-right">Revenue (Before Tax)</TableHead><TableHead className="text-right">Revenue (With Tax)</TableHead></TableRow></TableHeader>
+                            <TableHeader>
+                                <TableRow>
+                                    <TableHead>Product</TableHead>
+                                    <TableHead>Type</TableHead>
+                                    <TableHead className="text-right">Quantity Sold</TableHead>
+                                    <TableHead className="text-right">Revenue</TableHead>
+                                    <TableHead className="text-right">Total Sales</TableHead>
+                                </TableRow>
+                            </TableHeader>
                             <TableBody>
                                 {loading ? (
-                                    [...Array(5)].map((_, i) => <TableRow key={i}><TableCell><Skeleton className="h-5 w-3/4" /></TableCell><TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell><TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell><TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell></TableRow>)
+                                    [...Array(5)].map((_, i) => (
+                                        <TableRow key={i}>
+                                            <TableCell><Skeleton className="h-5 w-3/4" /></TableCell>
+                                            <TableCell><Skeleton className="h-5 w-16" /></TableCell>
+                                            <TableCell><Skeleton className="ml-auto h-5 w-14" /></TableCell>
+                                            <TableCell><Skeleton className="ml-auto h-5 w-20" /></TableCell>
+                                            <TableCell><Skeleton className="ml-auto h-5 w-20" /></TableCell>
+                                        </TableRow>
+                                    ))
+                                ) : data.topProducts.length === 0 ? (
+                                    <TableRow>
+                                        <TableCell colSpan={5} className="text-center text-muted-foreground">
+                                            No product sales for this period.
+                                        </TableCell>
+                                    </TableRow>
                                 ) : data.topProducts.map(product => (
-                                    <TableRow key={product.name}><TableCell className="font-medium">{product.name}</TableCell><TableCell className="text-right">{product.quantity}</TableCell><TableCell className="text-right font-semibold">{formatCurrency(product.revenue)}</TableCell><TableCell className="text-right font-semibold text-green-600">{formatCurrency(product.revenueWithTax)}</TableCell></TableRow>
+                                    <TableRow key={product.name}>
+                                        <TableCell className="font-medium">{product.name}</TableCell>
+                                        <TableCell><ProductTypeBadge productType={product.productType} /></TableCell>
+                                        <TableCell className="text-right">{formatQuantity(product.quantity)}</TableCell>
+                                        <TableCell className="text-right font-semibold">{formatCurrency(product.revenue)}</TableCell>
+                                        <TableCell className="text-right font-semibold text-green-600">{formatCurrency(product.totalSales)}</TableCell>
+                                    </TableRow>
                                 ))}
                             </TableBody>
                         </Table>
@@ -971,6 +1072,7 @@ export default function ReportsPage() {
                                 <TableHeader>
                                     <TableRow>
                                         <TableHead>Product</TableHead>
+                                        <TableHead>Type</TableHead>
                                         <TableHead className="text-right">Qty Sold</TableHead>
                                         <TableHead className="text-right">Avg/Day</TableHead>
                                         <TableHead className="text-right">Remaining</TableHead>
@@ -981,6 +1083,7 @@ export default function ReportsPage() {
                                         [...Array(5)].map((_, i) => (
                                             <TableRow key={i}>
                                                 <TableCell><Skeleton className="h-5 w-3/4" /></TableCell>
+                                                <TableCell><Skeleton className="h-5 w-16" /></TableCell>
                                                 <TableCell><Skeleton className="ml-auto h-5 w-12" /></TableCell>
                                                 <TableCell><Skeleton className="ml-auto h-5 w-12" /></TableCell>
                                                 <TableCell><Skeleton className="ml-auto h-5 w-16" /></TableCell>
@@ -988,17 +1091,18 @@ export default function ReportsPage() {
                                         ))
                                     ) : data.fastMovingProducts.length === 0 ? (
                                         <TableRow>
-                                            <TableCell colSpan={4} className="text-center text-muted-foreground">
+                                            <TableCell colSpan={5} className="text-center text-muted-foreground">
                                                 No product movement for this period.
                                             </TableCell>
                                         </TableRow>
                                     ) : data.fastMovingProducts.map((product, index) => (
                                         <TableRow key={`fast-${product.name}-${index}`}>
                                             <TableCell className="font-medium">{product.name}</TableCell>
-                                            <TableCell className="text-right">{product.quantity.toFixed(2)}</TableCell>
-                                            <TableCell className="text-right">{product.averagePerDay.toFixed(2)}</TableCell>
+                                            <TableCell><ProductTypeBadge productType={product.productType} /></TableCell>
+                                            <TableCell className="text-right">{formatQuantity(product.quantity)}</TableCell>
+                                            <TableCell className="text-right">{formatQuantity(product.averagePerDay)}</TableCell>
                                             <TableCell className="text-right">
-                                                {product.currentStock.toFixed(2)} {product.unitType}
+                                                {formatQuantity(product.currentStock)} {product.unitType}
                                             </TableCell>
                                         </TableRow>
                                     ))}
@@ -1017,6 +1121,7 @@ export default function ReportsPage() {
                                 <TableHeader>
                                     <TableRow>
                                         <TableHead>Product</TableHead>
+                                        <TableHead>Type</TableHead>
                                         <TableHead className="text-right">Qty Sold</TableHead>
                                         <TableHead className="text-right">Avg/Day</TableHead>
                                         <TableHead className="text-right">Remaining</TableHead>
@@ -1027,6 +1132,7 @@ export default function ReportsPage() {
                                         [...Array(5)].map((_, i) => (
                                             <TableRow key={i}>
                                                 <TableCell><Skeleton className="h-5 w-3/4" /></TableCell>
+                                                <TableCell><Skeleton className="h-5 w-16" /></TableCell>
                                                 <TableCell><Skeleton className="ml-auto h-5 w-12" /></TableCell>
                                                 <TableCell><Skeleton className="ml-auto h-5 w-12" /></TableCell>
                                                 <TableCell><Skeleton className="ml-auto h-5 w-16" /></TableCell>
@@ -1034,17 +1140,18 @@ export default function ReportsPage() {
                                         ))
                                     ) : data.slowMovingProducts.length === 0 ? (
                                         <TableRow>
-                                            <TableCell colSpan={4} className="text-center text-muted-foreground">
+                                            <TableCell colSpan={5} className="text-center text-muted-foreground">
                                                 No products available for movement analysis.
                                             </TableCell>
                                         </TableRow>
                                     ) : data.slowMovingProducts.map((product, index) => (
                                         <TableRow key={`slow-${product.name}-${index}`}>
                                             <TableCell className="font-medium">{product.name}</TableCell>
-                                            <TableCell className="text-right">{product.quantity.toFixed(2)}</TableCell>
-                                            <TableCell className="text-right">{product.averagePerDay.toFixed(2)}</TableCell>
+                                            <TableCell><ProductTypeBadge productType={product.productType} /></TableCell>
+                                            <TableCell className="text-right">{formatQuantity(product.quantity)}</TableCell>
+                                            <TableCell className="text-right">{formatQuantity(product.averagePerDay)}</TableCell>
                                             <TableCell className="text-right">
-                                                {product.currentStock.toFixed(2)} {product.unitType}
+                                                {formatQuantity(product.currentStock)} {product.unitType}
                                             </TableCell>
                                         </TableRow>
                                     ))}
@@ -1074,12 +1181,12 @@ export default function ReportsPage() {
                     <CardHeader><CardTitle>Category Revenue</CardTitle><CardDescription>Table view of revenue per category.</CardDescription></CardHeader>
                     <CardContent>
                          <Table>
-                            <TableHeader><TableRow><TableHead>Category</TableHead><TableHead className="text-right">Revenue (Before Tax)</TableHead><TableHead className="text-right">Revenue (With Tax)</TableHead></TableRow></TableHeader>
+                            <TableHeader><TableRow><TableHead>Category</TableHead><TableHead className="text-right">Revenue</TableHead><TableHead className="text-right">Total Sales</TableHead></TableRow></TableHeader>
                             <TableBody>
                                 {loading ? (
                                      [...Array(5)].map((_, i) => <TableRow key={i}><TableCell><Skeleton className="h-5 w-3/4" /></TableCell><TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell><TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell></TableRow>)
                                 ) : data.salesByCategory.map(cat => (
-                                    <TableRow key={cat.name}><TableCell className="font-medium">{cat.name}</TableCell><TableCell className="text-right font-semibold">{formatCurrency(cat.revenue)}</TableCell><TableCell className="text-right font-semibold text-green-600">{formatCurrency(cat.revenueWithTax)}</TableCell></TableRow>
+                                    <TableRow key={cat.name}><TableCell className="font-medium">{cat.name}</TableCell><TableCell className="text-right font-semibold">{formatCurrency(cat.revenue)}</TableCell><TableCell className="text-right font-semibold text-green-600">{formatCurrency(cat.totalSales)}</TableCell></TableRow>
                                 ))}
                             </TableBody>
                         </Table>
@@ -1095,12 +1202,12 @@ export default function ReportsPage() {
                 </CardHeader>
                 <CardContent>
                     <Table>
-                        <TableHeader><TableRow><TableHead>Staff Member</TableHead><TableHead className="text-right">Transactions</TableHead><TableHead className="text-right">Sales (Before Tax)</TableHead><TableHead className="text-right">Sales (With Tax)</TableHead></TableRow></TableHeader>
+                        <TableHeader><TableRow><TableHead>Staff Member</TableHead><TableHead className="text-right">Transactions</TableHead><TableHead className="text-right">Revenue</TableHead><TableHead className="text-right">Total Sales</TableHead></TableRow></TableHeader>
                         <TableBody>
                              {loading ? (
                                 [...Array(3)].map((_, i) => <TableRow key={i}><TableCell><Skeleton className="h-5 w-1/2" /></TableCell><TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell><TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell><TableCell><Skeleton className="h-5 w-1/4 ml-auto" /></TableCell></TableRow>)
                             ) : data.salesByStaff.map(staff => (
-                                <TableRow key={staff.name}><TableCell className="font-medium">{staff.name}</TableCell><TableCell className="text-right">{staff.transactions}</TableCell><TableCell className="text-right font-semibold">{formatCurrency(staff.sales)}</TableCell><TableCell className="text-right font-semibold text-green-600">{formatCurrency(staff.salesWithTax)}</TableCell></TableRow>
+                                <TableRow key={staff.name}><TableCell className="font-medium">{staff.name}</TableCell><TableCell className="text-right">{staff.transactions}</TableCell><TableCell className="text-right font-semibold">{formatCurrency(staff.revenue)}</TableCell><TableCell className="text-right font-semibold text-green-600">{formatCurrency(staff.totalSales)}</TableCell></TableRow>
                             ))}
                         </TableBody>
                     </Table>

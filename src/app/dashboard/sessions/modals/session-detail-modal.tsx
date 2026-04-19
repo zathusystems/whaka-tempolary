@@ -36,11 +36,23 @@ import {
 } from '@/components/ui/table';
 import { syncSessionOrdersToLocalDb } from '@/lib/session-order-sync';
 import {
+  resolveSessionFinancialSummary,
+  resolveSessionPaymentBreakdown,
+} from '@/lib/session-financials';
+import {
   buildZReportPrintHtml,
   calculateZReportSummary,
   isSessionClosedForZReport,
   SESSION_END_REPORT_TITLE,
 } from '@/lib/z-report-print';
+import {
+  createInventoryProductCategoryResolver,
+  getProductReportingCategoryMeta,
+  summarizeProductCategoryRows,
+  summarizeSessionOrderProductMix,
+  toProductCategorySummaryRows,
+  type ProductReportingCategory,
+} from '@/lib/session-product-report';
 import { SaleDetailModal } from './index';
 
 const LOCAL_STORAGE_KEYS = {
@@ -209,6 +221,33 @@ const sortOrdersByMostRecent = (orders: Order[]): Order[] => {
     });
 };
 
+const MobileInfoRow = ({
+  label,
+  value,
+  valueClassName = '',
+}: {
+  label: string;
+  value: React.ReactNode;
+  valueClassName?: string;
+}) => (
+  <div className="flex items-start justify-between gap-3 text-sm">
+    <span className="text-muted-foreground">{label}</span>
+    <div className={`text-right ${valueClassName}`}>{value}</div>
+  </div>
+);
+
+const formatQuantityDisplay = (value: number): string => {
+  if (!Number.isFinite(value)) {
+    return '0.00';
+  }
+
+  if (Math.abs(value - Math.round(value)) < 1e-9) {
+    return value.toFixed(2);
+  }
+
+  return value.toFixed(3);
+};
+
 const SessionSalesListModal = ({ sessionId }: { sessionId: string }) => {
   const { format: formatCurrency } = useCurrency();
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -237,70 +276,136 @@ const SessionSalesListModal = ({ sessionId }: { sessionId: string }) => {
           <CardDescription>{orderedSessionSales.length} sale{orderedSessionSales.length !== 1 ? 's' : ''} recorded in this session</CardDescription>
         </CardHeader>
         <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Order #</TableHead>
-                <TableHead>Time</TableHead>
-                <TableHead>Buyer</TableHead>
-                <TableHead>Items</TableHead>
-                <TableHead>Payment</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Subtotal</TableHead>
-                <TableHead className="text-right">Tax</TableHead>
-                <TableHead className="text-right">Total</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {orderedSessionSales.length > 0 ? (
-                orderedSessionSales.map((order) => {
+          {orderedSessionSales.length > 0 ? (
+            <>
+              <div className="space-y-3 md:hidden">
+                {orderedSessionSales.map((order) => {
                   const buyerDetails = resolveBuyerDetails(order);
                   const buyerName = buyerDetails.name || 'Walk-in';
                   const eisStatus = resolveEisStatus(order);
                   const isEisPending = eisStatus === 'PENDING' || (!eisStatus && Boolean((order as any)?._dirty));
+                  const createdAt = new Date(order.createdAt);
+                  const orderTimeLabel = Number.isNaN(createdAt.getTime()) ? '-' : format(createdAt, 'HH:mm:ss');
+
                   return (
-                    <TableRow 
+                    <button
                       key={order.id}
-                      className={`cursor-pointer hover:bg-muted/50 ${order.status === 'Voided' ? 'opacity-60' : ''}`}
+                      type="button"
+                      className={`w-full rounded-lg border bg-card p-4 text-left transition-colors hover:bg-muted/40 ${order.status === 'Voided' ? 'opacity-60' : ''}`}
                       onClick={() => setSelectedOrder(order)}
                     >
-                      <TableCell className="font-medium">#{order.orderNumber}</TableCell>
-                      <TableCell className="text-sm">{format(new Date(order.createdAt), 'HH:mm:ss')}</TableCell>
-                      <TableCell className="text-sm">
-                        <div className="font-medium">{buyerName}</div>
-                        {buyerDetails.phone && (
-                          <div className="text-xs text-muted-foreground">{buyerDetails.phone}</div>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-sm">{order.items.length} item{order.items.length !== 1 ? 's' : ''}</TableCell>
-                      <TableCell className="text-sm">{order.paymentMethod}</TableCell>
-                      <TableCell>
-                        <div className="flex flex-col items-start gap-1">
-                          <Badge variant={orderStatusBadge[order.status]}>
-                            {order.status}
-                          </Badge>
-                          {isEisPending && (
-                            <Badge variant="outline" className="border-amber-300 text-amber-700">
-                              EIS Pending
-                            </Badge>
-                          )}
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-semibold">Order #{order.orderNumber}</p>
+                          <p className="text-xs text-muted-foreground">{orderTimeLabel}</p>
                         </div>
-                      </TableCell>
-                      <TableCell className="text-right text-sm">{formatCurrency(order.subtotal)}</TableCell>
-                      <TableCell className="text-right text-sm">{formatCurrency(order.tax)}</TableCell>
-                      <TableCell className="text-right font-medium text-sm">{formatCurrency(order.total)}</TableCell>
-                    </TableRow>
+                        <div className="text-right">
+                          <p className="text-xs text-muted-foreground">Total</p>
+                          <p className="font-semibold">{formatCurrency(order.total)}</p>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Badge variant={orderStatusBadge[order.status]}>
+                          {order.status}
+                        </Badge>
+                        {isEisPending && (
+                          <Badge variant="outline" className="border-amber-300 text-amber-700">
+                            EIS Pending
+                          </Badge>
+                        )}
+                      </div>
+
+                      <div className="mt-3 space-y-2">
+                        <MobileInfoRow
+                          label="Buyer"
+                          value={
+                            <div className="space-y-0.5 text-right">
+                              <div className="font-medium">{buyerName}</div>
+                              {buyerDetails.phone && (
+                                <div className="text-xs text-muted-foreground">{buyerDetails.phone}</div>
+                              )}
+                            </div>
+                          }
+                        />
+                        <MobileInfoRow
+                          label="Items"
+                          value={`${order.items.length} item${order.items.length !== 1 ? 's' : ''}`}
+                        />
+                        <MobileInfoRow label="Payment" value={order.paymentMethod} />
+                        <MobileInfoRow label="Subtotal" value={formatCurrency(order.subtotal)} />
+                        <MobileInfoRow label="Tax" value={formatCurrency(order.tax)} />
+                      </div>
+                    </button>
                   );
-                })
-              ) : (
-                <TableRow>
-                  <TableCell colSpan={9} className="h-24 text-center">
-                    <p className="text-muted-foreground">No sales recorded in this session.</p>
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
+                })}
+              </div>
+
+              <div className="hidden md:block">
+                <Table className="min-w-[920px]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Order #</TableHead>
+                      <TableHead>Time</TableHead>
+                      <TableHead>Buyer</TableHead>
+                      <TableHead>Items</TableHead>
+                      <TableHead>Payment</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="text-right">Subtotal</TableHead>
+                      <TableHead className="text-right">Tax</TableHead>
+                      <TableHead className="text-right">Total</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {orderedSessionSales.map((order) => {
+                      const buyerDetails = resolveBuyerDetails(order);
+                      const buyerName = buyerDetails.name || 'Walk-in';
+                      const eisStatus = resolveEisStatus(order);
+                      const isEisPending = eisStatus === 'PENDING' || (!eisStatus && Boolean((order as any)?._dirty));
+
+                      return (
+                        <TableRow 
+                          key={order.id}
+                          className={`cursor-pointer hover:bg-muted/50 ${order.status === 'Voided' ? 'opacity-60' : ''}`}
+                          onClick={() => setSelectedOrder(order)}
+                        >
+                          <TableCell className="font-medium">#{order.orderNumber}</TableCell>
+                          <TableCell className="text-sm">{format(new Date(order.createdAt), 'HH:mm:ss')}</TableCell>
+                          <TableCell className="text-sm">
+                            <div className="font-medium">{buyerName}</div>
+                            {buyerDetails.phone && (
+                              <div className="text-xs text-muted-foreground">{buyerDetails.phone}</div>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-sm">{order.items.length} item{order.items.length !== 1 ? 's' : ''}</TableCell>
+                          <TableCell className="text-sm">{order.paymentMethod}</TableCell>
+                          <TableCell>
+                            <div className="flex flex-col items-start gap-1">
+                              <Badge variant={orderStatusBadge[order.status]}>
+                                {order.status}
+                              </Badge>
+                              {isEisPending && (
+                                <Badge variant="outline" className="border-amber-300 text-amber-700">
+                                  EIS Pending
+                                </Badge>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right text-sm">{formatCurrency(order.subtotal)}</TableCell>
+                          <TableCell className="text-right text-sm">{formatCurrency(order.tax)}</TableCell>
+                          <TableCell className="text-right font-medium text-sm">{formatCurrency(order.total)}</TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
+          ) : (
+            <div className="rounded-lg border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
+              No sales recorded in this session.
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -327,10 +432,36 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
         () => db.orders.where({ sessionId: session.id }).toArray(),
         [session.id]
     ) || [];
+    const sessionInventory = useLiveQuery(
+        async () => {
+            const normalizedSessionBranchId = normalizeStockBranchId(session.branchId);
+            const inventoryItems = await db.inventory.toArray();
+            return inventoryItems.filter(
+                (item) => normalizeStockBranchId(item.branchId) === normalizedSessionBranchId
+            );
+        },
+        [session.branchId]
+    ) || [];
 
     const { paymentBreakdown, financialSummary, eisSummary } = useMemo(
         () => calculateZReportSummary(sessionOrders as any),
         [sessionOrders]
+    );
+    const productMixSummary = useMemo(
+        () => summarizeSessionOrderProductMix(sessionOrders as any, sessionInventory as any),
+        [sessionInventory, sessionOrders]
+    );
+    const productMixRows = useMemo(
+        () => toProductCategorySummaryRows(productMixSummary),
+        [productMixSummary]
+    );
+    const resolvedFinancialSummary = useMemo(
+        () => resolveSessionFinancialSummary(session, financialSummary),
+        [financialSummary, session]
+    );
+    const resolvedPaymentBreakdown = useMemo(
+        () => resolveSessionPaymentBreakdown(session, paymentBreakdown, financialSummary),
+        [financialSummary, paymentBreakdown, session]
     );
 
     const isSessionClosed = isSessionClosedForZReport(session);
@@ -362,6 +493,15 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
             }
 
             const reportSummary = calculateZReportSummary(reportOrders as any);
+            const reportFinancialSummary = resolveSessionFinancialSummary(
+                session,
+                reportSummary.financialSummary
+            );
+            const reportPaymentBreakdown = resolveSessionPaymentBreakdown(
+                session,
+                reportSummary.paymentBreakdown,
+                reportSummary.financialSummary
+            );
             const activeBranchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH) || 'main';
             const [{ printerService }, { silentPrintService }] = await Promise.all([
                 import('@/lib/services/printer-service'),
@@ -387,9 +527,10 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
 
             const htmlContent = buildZReportPrintHtml({
                 session,
-                paymentBreakdown: reportSummary.paymentBreakdown,
-                financialSummary: reportSummary.financialSummary,
+                paymentBreakdown: reportPaymentBreakdown,
+                financialSummary: reportFinancialSummary,
                 eisSummary: reportSummary.eisSummary,
+                productMixSummary,
                 formatCurrency,
             });
 
@@ -428,7 +569,7 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
         } finally {
             setIsPrintingZReport(false);
         }
-    }, [formatCurrency, isSessionClosed, session, sessionOrders]);
+    }, [formatCurrency, isSessionClosed, productMixSummary, session, sessionOrders]);
 
     return (
         <Card>
@@ -459,7 +600,7 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
                 )}
             </CardHeader>
             <CardContent className="space-y-6">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-4">
                     <Card>
                         <CardHeader>
                             <CardTitle className="text-base">Sales & Tax Summary</CardTitle>
@@ -467,51 +608,68 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
                         <CardContent className="space-y-3 text-sm">
                             <div className="flex justify-between">
                                 <span className="text-muted-foreground">Orders:</span>
-                                <span className="font-semibold">{financialSummary.orderCount}</span>
+                                <span className="font-semibold">{resolvedFinancialSummary.orderCount}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">Session Total Sales:</span>
-                                <span className="font-semibold">{formatCurrency(session.totalSales || 0)}</span>
-                            </div>
-                            <Separator />
-                            <div className="flex justify-between">
-                                <span className="text-muted-foreground">Net Sales:</span>
-                                <span>{formatCurrency(financialSummary.netSales)}</span>
+                                <span className="text-muted-foreground">Revenue:</span>
+                                <span>{formatCurrency(resolvedFinancialSummary.netSales)}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">Total Tax:</span>
-                                <span>{formatCurrency(financialSummary.totalTax)}</span>
+                                <span className="text-muted-foreground">Tax Collected:</span>
+                                <span>{formatCurrency(resolvedFinancialSummary.totalTax)}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">Gross Sales:</span>
-                                <span>{formatCurrency(financialSummary.grossSales)}</span>
+                                <span className="text-muted-foreground">Total Sales:</span>
+                                <span>{formatCurrency(resolvedFinancialSummary.grossSales)}</span>
                             </div>
                             <Separator />
                             <div className="flex justify-between">
                                 <span className="text-muted-foreground">Cash Sales:</span>
-                                <span>{formatCurrency(paymentBreakdown.cash)}</span>
+                                <span>{formatCurrency(resolvedPaymentBreakdown.cash)}</span>
                             </div>
                             <div className="flex justify-between">
                                 <span className="text-muted-foreground">Card Sales:</span>
-                                <span>{formatCurrency(paymentBreakdown.card)}</span>
+                                <span>{formatCurrency(resolvedPaymentBreakdown.card)}</span>
                             </div>
                             <div className="flex justify-between">
                                 <span className="text-muted-foreground">Mobile Money:</span>
-                                <span>{formatCurrency(paymentBreakdown.mobileMoney)}</span>
+                                <span>{formatCurrency(resolvedPaymentBreakdown.mobileMoney)}</span>
                             </div>
                             <div className="flex justify-between">
                                 <span className="text-muted-foreground">On Account:</span>
-                                <span>{formatCurrency(paymentBreakdown.onAccount)}</span>
+                                <span>{formatCurrency(resolvedPaymentBreakdown.onAccount)}</span>
                             </div>
                             <div className="flex justify-between">
                                 <span className="text-muted-foreground">Other:</span>
-                                <span>{formatCurrency(paymentBreakdown.other)}</span>
+                                <span>{formatCurrency(resolvedPaymentBreakdown.other)}</span>
                             </div>
-                            <Separator />
-                            <div className="flex justify-between font-semibold">
-                                <span>Total Payable:</span>
-                                <span>{formatCurrency(financialSummary.totalPayable)}</span>
-                            </div>
+                        </CardContent>
+                    </Card>
+
+                    <Card>
+                        <CardHeader>
+                            <CardTitle className="text-base">Product Mix</CardTitle>
+                        </CardHeader>
+                        <CardContent className="space-y-3 text-sm">
+                            {productMixRows.map((row) => {
+                                const meta = getProductReportingCategoryMeta(row.category);
+                                return (
+                                    <div key={row.category} className="rounded-md border border-dashed p-3">
+                                        <div className="flex items-center justify-between gap-3">
+                                            <span className="text-muted-foreground">{meta.label}</span>
+                                            <Badge variant="outline" className={meta.badgeClassName}>
+                                                {row.itemCount} item{row.itemCount === 1 ? '' : 's'}
+                                            </Badge>
+                                        </div>
+                                        <div className="mt-2 flex items-center justify-between gap-3">
+                                            <span className="text-xs text-muted-foreground">
+                                                {formatQuantityDisplay(row.quantity)} qty
+                                            </span>
+                                            <span className="font-semibold">{formatCurrency(row.amount)}</span>
+                                        </div>
+                                    </div>
+                                );
+                            })}
                         </CardContent>
                     </Card>
                     
@@ -526,12 +684,12 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
                             </div>
                             <div className="flex justify-between">
                                 <span className="text-muted-foreground">+ Cash Sales:</span>
-                                <span className="text-green-600">{formatCurrency(paymentBreakdown.cash)}</span>
+                                <span className="text-green-600">{formatCurrency(resolvedPaymentBreakdown.cash)}</span>
                             </div>
                             <Separator />
                             <div className="flex justify-between font-semibold">
                                 <span>Expected in Drawer:</span>
-                                <span>{formatCurrency((session.openingFloat || 0) + paymentBreakdown.cash)}</span>
+                                <span>{formatCurrency((session.openingFloat || 0) + resolvedPaymentBreakdown.cash)}</span>
                             </div>
                             <div className="flex justify-between">
                                 <span className="text-muted-foreground">Actual Cash:</span>
@@ -621,6 +779,16 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
     const sessionOrders = useLiveQuery(
         () => db.orders.where({ sessionId: session.id }).toArray(),
         [session.id]
+    ) || [];
+    const sessionInventory = useLiveQuery(
+        async () => {
+            const normalizedSessionBranchId = normalizeStockBranchId(session.branchId);
+            const inventoryItems = await db.inventory.toArray();
+            return inventoryItems.filter(
+                (item) => normalizeStockBranchId(item.branchId) === normalizedSessionBranchId
+            );
+        },
+        [session.branchId]
     ) || [];
 
     const sessionPurchases = useLiveQuery(
@@ -776,8 +944,28 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
         return { nameToId, idToName };
     }, [session.openingStock, sessionOrders, sessionPurchases, sessionWaste]);
 
+    const resolveProductCategory = useMemo(
+        () => createInventoryProductCategoryResolver(sessionInventory as any),
+        [sessionInventory]
+    );
+
+    const renderProductCategoryBadge = useCallback((category: ProductReportingCategory) => {
+        const meta = getProductReportingCategoryMeta(category);
+        return (
+            <Badge variant="outline" className={meta.badgeClassName}>
+                {meta.shortLabel}
+            </Badge>
+        );
+    }, []);
+
     const productSalesData = useMemo(() => {
-        const productMap = new Map<string, { key: string; name: string; quantity: number; totalCash: number }>();
+        const productMap = new Map<string, {
+            key: string;
+            name: string;
+            quantity: number;
+            totalCash: number;
+            category: ProductReportingCategory;
+        }>();
 
         const activeOrders = sessionOrders.filter(order => 
             order.status !== 'Voided' && order.status !== 'Cancelled'
@@ -795,6 +983,10 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                         name: resolveDisplayProductName(itemInventoryId, item.name, productIdentity.idToName),
                         quantity: 0,
                         totalCash: 0,
+                        category: resolveProductCategory({
+                            inventoryItemId: itemInventoryId,
+                            name: item.name,
+                        }),
                     });
                 }
                 const product = productMap.get(key)!;
@@ -816,7 +1008,7 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
         });
 
         return Array.from(productMap.values()).sort((a, b) => a.name.localeCompare(b.name));
-    }, [sessionOrders, productIdentity]);
+    }, [productIdentity, resolveProductCategory, sessionOrders]);
 
     const purchasesData = useMemo(() => {
         const purchaseMap = new Map<string, { 
@@ -828,6 +1020,7 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
             vatAmount: number;
             vatMethod: 'inclusive' | 'exclusive' | 'mixed';
             supplier: string;
+            category: ProductReportingCategory;
             batchNumber?: string;
             expiryDate?: string;
         }>();
@@ -867,6 +1060,10 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                     vatAmount: 0,
                     vatMethod: method,
                     supplier: purchase.supplierName || 'Unknown Supplier',
+                    category: resolveProductCategory({
+                        inventoryItemId: purchase.productId,
+                        name: purchase.productName,
+                    }),
                     batchNumber: purchase.batchNumber,
                     expiryDate: purchase.expiryDate,
                 });
@@ -885,23 +1082,25 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
         });
 
         return Array.from(purchaseMap.values()).sort((a, b) => a.name.localeCompare(b.name));
-    }, [sessionPurchases, productIdentity]);
+    }, [productIdentity, resolveProductCategory, sessionPurchases]);
 
     const comprehensiveStockData = useMemo(() => {
         const productMap = new Map<string, {
             key: string;
             name: string;
+            category: ProductReportingCategory;
             opening: number;
             received: number;
             sold: number;
             waste: number;
         }>();
 
-        const ensureProduct = (key: string, name?: string) => {
+        const ensureProduct = (key: string, category: ProductReportingCategory, name?: string) => {
             if (!productMap.has(key)) {
                 productMap.set(key, {
                     key,
                     name: name || 'Unknown Item',
+                    category,
                     opening: 0,
                     received: 0,
                     sold: 0,
@@ -923,7 +1122,11 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
             const key = resolveCanonicalProductKey(item.itemId, item.name, productIdentity.nameToId);
             if (!key) return;
             const resolvedName = resolveDisplayProductName(item.itemId, item.name, productIdentity.idToName);
-            const row = ensureProduct(key, resolvedName);
+            const row = ensureProduct(
+                key,
+                resolveProductCategory({ inventoryItemId: item.itemId, name: item.name }),
+                resolvedName
+            );
             row.opening += parseFloat(String(item.quantity || 0));
         });
 
@@ -931,7 +1134,14 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
             const key = resolveCanonicalProductKey(purchase.productId, purchase.productName, productIdentity.nameToId);
             if (!key) return;
             const resolvedName = resolveDisplayProductName(purchase.productId, purchase.productName, productIdentity.idToName);
-            const row = ensureProduct(key, resolvedName);
+            const row = ensureProduct(
+                key,
+                resolveProductCategory({
+                    inventoryItemId: purchase.productId,
+                    name: purchase.productName,
+                }),
+                resolvedName
+            );
             row.received += parseFloat(String(purchase.quantityReceived || 0));
         });
 
@@ -941,7 +1151,11 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                 const key = resolveCanonicalProductKey(itemInventoryId, item.name, productIdentity.nameToId);
                 if (!key) return;
                 const resolvedName = resolveDisplayProductName(itemInventoryId, item.name, productIdentity.idToName);
-                const row = ensureProduct(key, resolvedName);
+                const row = ensureProduct(
+                    key,
+                    resolveProductCategory({ inventoryItemId: itemInventoryId, name: item.name }),
+                    resolvedName
+                );
                 row.sold += parseFloat(String(item.quantity || 0));
             });
         });
@@ -950,7 +1164,11 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
             const key = resolveCanonicalProductKey(waste.itemId, waste.itemName, productIdentity.nameToId);
             if (!key) return;
             const resolvedName = resolveDisplayProductName(waste.itemId, waste.itemName, productIdentity.idToName);
-            const row = ensureProduct(key, resolvedName);
+            const row = ensureProduct(
+                key,
+                resolveProductCategory({ inventoryItemId: waste.itemId, name: waste.itemName }),
+                resolvedName
+            );
             row.waste += parseFloat(String(waste.quantity || 0));
         });
 
@@ -958,6 +1176,7 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
             .map((row) => ({
                 key: row.key,
                 name: row.name,
+                category: row.category,
                 opening: row.opening,
                 received: row.received,
                 sold: row.sold,
@@ -965,7 +1184,37 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                 remaining: Math.max(0, row.opening + row.received - row.sold - row.waste),
             }))
             .sort((a, b) => a.name.localeCompare(b.name));
-    }, [session.openingStock, sessionOrders, sessionPurchases, sessionWaste, productIdentity]);
+    }, [productIdentity, resolveProductCategory, session.openingStock, sessionOrders, sessionPurchases, sessionWaste]);
+
+    const soldCategorySummaryRows = useMemo(
+        () =>
+            toProductCategorySummaryRows(
+                summarizeProductCategoryRows(
+                    productSalesData.map((product) => ({
+                        category: product.category,
+                        key: product.key,
+                        quantity: product.quantity,
+                        amount: product.totalCash,
+                    }))
+                )
+            ),
+        [productSalesData]
+    );
+
+    const receivedCategorySummaryRows = useMemo(
+        () =>
+            toProductCategorySummaryRows(
+                summarizeProductCategoryRows(
+                    purchasesData.map((purchase) => ({
+                        category: purchase.category,
+                        key: purchase.key,
+                        quantity: purchase.quantity,
+                        amount: purchase.totalCost,
+                    }))
+                )
+            ),
+        [purchasesData]
+    );
 
     return (
         <Card>
@@ -975,32 +1224,93 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
             </CardHeader>
             <CardContent className="space-y-6">
                 <div>
+                    <h3 className="font-semibold mb-3">Product Type Summary</h3>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                        {soldCategorySummaryRows.map((row) => (
+                            <div key={row.category} className="rounded-lg border bg-card p-4">
+                                <div className="flex items-center justify-between gap-3">
+                                    <p className="font-medium">{row.label}</p>
+                                    {renderProductCategoryBadge(row.category)}
+                                </div>
+                                <div className="mt-3 space-y-2 text-sm">
+                                    <MobileInfoRow
+                                        label="Sold Qty"
+                                        value={formatQuantityDisplay(row.quantity)}
+                                    />
+                                    <MobileInfoRow
+                                        label="Sales Value"
+                                        value={formatCurrency(row.amount)}
+                                        valueClassName="font-medium"
+                                    />
+                                    <MobileInfoRow
+                                        label="Received Qty"
+                                        value={formatQuantityDisplay(
+                                            receivedCategorySummaryRows.find(
+                                                (entry) => entry.category === row.category
+                                            )?.quantity ?? 0
+                                        )}
+                                    />
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                <Separator />
+
+                <div>
                     <h3 className="font-semibold mb-3">Products Sold</h3>
                     {productSalesData.length > 0 ? (
-                        <ScrollArea className="h-64 w-full rounded-md border">
-                            <Table className="min-w-[640px]">
-                                <TableHeader className="sticky top-0 bg-muted">
-                                    <TableRow>
-                                        <TableHead>Product</TableHead>
-                                        <TableHead className="text-right">Quantity Sold</TableHead>
-                                        <TableHead className="text-right">Total Cash</TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {productSalesData.map((product) => (
-                                        <TableRow key={product.key}>
-                                            <TableCell className="font-medium">{product.name}</TableCell>
-                                            <TableCell className="text-right">
-                                                {Math.abs(product.quantity - Math.round(product.quantity)) < 1e-9
-                                                    ? product.quantity.toFixed(2)
-                                                    : product.quantity.toFixed(3)}
-                                            </TableCell>
-                                            <TableCell className="text-right font-semibold">{formatCurrency(product.totalCash)}</TableCell>
-                                        </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
-                        </ScrollArea>
+                        <>
+                            <div className="space-y-3 md:hidden">
+                                {productSalesData.map((product) => (
+                                    <div key={product.key} className="rounded-lg border bg-card p-4">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <p className="font-medium">{product.name}</p>
+                                            <p className="font-semibold">{formatCurrency(product.totalCash)}</p>
+                                        </div>
+                                        <div className="mt-3">
+                                            <MobileInfoRow
+                                                label="Type"
+                                                value={renderProductCategoryBadge(product.category)}
+                                            />
+                                            <MobileInfoRow
+                                                label="Quantity sold"
+                                                value={formatQuantityDisplay(product.quantity)}
+                                                valueClassName="font-medium"
+                                            />
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className="hidden md:block">
+                                <ScrollArea className="h-64 w-full rounded-md border">
+                                    <Table className="min-w-[640px]">
+                                        <TableHeader className="sticky top-0 bg-muted">
+                                            <TableRow>
+                                                <TableHead>Product</TableHead>
+                                                <TableHead>Type</TableHead>
+                                                <TableHead className="text-right">Quantity Sold</TableHead>
+                                                <TableHead className="text-right">Total Cash</TableHead>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {productSalesData.map((product) => (
+                                                <TableRow key={product.key}>
+                                                    <TableCell className="font-medium">{product.name}</TableCell>
+                                                    <TableCell>{renderProductCategoryBadge(product.category)}</TableCell>
+                                                    <TableCell className="text-right">
+                                                        {formatQuantityDisplay(product.quantity)}
+                                                    </TableCell>
+                                                    <TableCell className="text-right font-semibold">{formatCurrency(product.totalCash)}</TableCell>
+                                                </TableRow>
+                                            ))}
+                                        </TableBody>
+                                    </Table>
+                                </ScrollArea>
+                            </div>
+                        </>
                     ) : (
                         <p className="text-muted-foreground text-center py-4">No products sold in this session.</p>
                     )}
@@ -1014,38 +1324,77 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                         Stock Received in Session
                     </h3>
                     {purchasesData.length > 0 ? (
-                        <ScrollArea className="h-64 w-full rounded-md border">
-                            <Table className="min-w-[980px]">
-                                <TableHeader className="sticky top-0 bg-muted">
-                                    <TableRow>
-                                        <TableHead>Product</TableHead>
-                                        <TableHead className="text-right">Quantity</TableHead>
-                                        <TableHead className="text-right">Unit Cost</TableHead>
-                                        <TableHead className="text-right">Total Cost</TableHead>
-                                        <TableHead className="text-right">VAT (Incl/Excl)</TableHead>
-                                        <TableHead>Supplier</TableHead>
-                                        <TableHead>Batch #</TableHead>
-                                        <TableHead>Expiry Date</TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {purchasesData.map((purchase) => (
-                                        <TableRow key={purchase.key}>
-                                            <TableCell className="font-medium">{purchase.name}</TableCell>
-                                            <TableCell className="text-right text-blue-600 font-medium">{purchase.quantity.toFixed(2)}</TableCell>
-                                            <TableCell className="text-right">{formatCurrency(purchase.unitCost)}</TableCell>
-                                            <TableCell className="text-right font-semibold">{formatCurrency(purchase.totalCost)}</TableCell>
-                                            <TableCell className="text-right">
-                                                {formatCurrency(purchase.vatAmount)} ({purchase.vatMethod === 'mixed' ? 'Mixed' : purchase.vatMethod === 'inclusive' ? 'Incl' : 'Excl'})
-                                            </TableCell>
-                                            <TableCell className="text-sm">{purchase.supplier}</TableCell>
-                                            <TableCell className="text-sm">{purchase.batchNumber || '-'}</TableCell>
-                                            <TableCell className="text-sm">{purchase.expiryDate ? format(new Date(purchase.expiryDate), 'MMM dd, yyyy') : '-'}</TableCell>
-                                        </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
-                        </ScrollArea>
+                        <>
+                            <div className="space-y-3 md:hidden">
+                                {purchasesData.map((purchase) => (
+                                    <div key={purchase.key} className="rounded-lg border bg-card p-4">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <p className="font-medium">{purchase.name}</p>
+                                            <p className="font-semibold">{formatCurrency(purchase.totalCost)}</p>
+                                        </div>
+                                        <div className="mt-3 space-y-2">
+                                            <MobileInfoRow
+                                                label="Type"
+                                                value={renderProductCategoryBadge(purchase.category)}
+                                            />
+                                            <MobileInfoRow
+                                                label="Quantity"
+                                                value={purchase.quantity.toFixed(2)}
+                                                valueClassName="font-medium text-blue-600"
+                                            />
+                                            <MobileInfoRow label="Unit cost" value={formatCurrency(purchase.unitCost)} />
+                                            <MobileInfoRow
+                                                label="VAT"
+                                                value={`${formatCurrency(purchase.vatAmount)} (${purchase.vatMethod === 'mixed' ? 'Mixed' : purchase.vatMethod === 'inclusive' ? 'Incl' : 'Excl'})`}
+                                            />
+                                            <MobileInfoRow label="Supplier" value={purchase.supplier} />
+                                            <MobileInfoRow label="Batch" value={purchase.batchNumber || '-'} />
+                                            <MobileInfoRow
+                                                label="Expiry"
+                                                value={purchase.expiryDate ? format(new Date(purchase.expiryDate), 'MMM dd, yyyy') : '-'}
+                                            />
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className="hidden md:block">
+                                <ScrollArea className="h-64 w-full rounded-md border">
+                                    <Table className="min-w-[980px]">
+                                        <TableHeader className="sticky top-0 bg-muted">
+                                            <TableRow>
+                                                <TableHead>Product</TableHead>
+                                                <TableHead>Type</TableHead>
+                                                <TableHead className="text-right">Quantity</TableHead>
+                                                <TableHead className="text-right">Unit Cost</TableHead>
+                                                <TableHead className="text-right">Total Cost</TableHead>
+                                                <TableHead className="text-right">VAT (Incl/Excl)</TableHead>
+                                                <TableHead>Supplier</TableHead>
+                                                <TableHead>Batch #</TableHead>
+                                                <TableHead>Expiry Date</TableHead>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {purchasesData.map((purchase) => (
+                                                <TableRow key={purchase.key}>
+                                                    <TableCell className="font-medium">{purchase.name}</TableCell>
+                                                    <TableCell>{renderProductCategoryBadge(purchase.category)}</TableCell>
+                                                    <TableCell className="text-right text-blue-600 font-medium">{purchase.quantity.toFixed(2)}</TableCell>
+                                                    <TableCell className="text-right">{formatCurrency(purchase.unitCost)}</TableCell>
+                                                    <TableCell className="text-right font-semibold">{formatCurrency(purchase.totalCost)}</TableCell>
+                                                    <TableCell className="text-right">
+                                                        {formatCurrency(purchase.vatAmount)} ({purchase.vatMethod === 'mixed' ? 'Mixed' : purchase.vatMethod === 'inclusive' ? 'Incl' : 'Excl'})
+                                                    </TableCell>
+                                                    <TableCell className="text-sm">{purchase.supplier}</TableCell>
+                                                    <TableCell className="text-sm">{purchase.batchNumber || '-'}</TableCell>
+                                                    <TableCell className="text-sm">{purchase.expiryDate ? format(new Date(purchase.expiryDate), 'MMM dd, yyyy') : '-'}</TableCell>
+                                                </TableRow>
+                                            ))}
+                                        </TableBody>
+                                    </Table>
+                                </ScrollArea>
+                            </div>
+                        </>
                     ) : (
                         <p className="text-muted-foreground text-center py-4">No stock received in this session.</p>
                     )}
@@ -1059,34 +1408,59 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                         Waste Recorded in Session
                     </h3>
                     {sessionWaste.length > 0 ? (
-                        <ScrollArea className="h-64 w-full rounded-md border">
-                            <Table className="min-w-[980px]">
-                                <TableHeader className="sticky top-0 bg-muted">
-                                    <TableRow>
-                                        <TableHead>Product</TableHead>
-                                        <TableHead className="text-right">Quantity</TableHead>
-                                        <TableHead>Unit</TableHead>
-                                        <TableHead className="text-right">Cost</TableHead>
-                                        <TableHead>Reason</TableHead>
-                                        <TableHead>Recorded By</TableHead>
-                                        <TableHead>Notes</TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {sessionWaste.map((waste) => (
-                                        <TableRow key={waste.id}>
-                                            <TableCell className="font-medium">{waste.itemName}</TableCell>
-                                            <TableCell className="text-right text-red-600 font-medium">{waste.quantity.toFixed(2)}</TableCell>
-                                            <TableCell className="text-sm">{waste.unit || '-'}</TableCell>
-                                            <TableCell className="text-right">{formatCurrency(waste.cost)}</TableCell>
-                                            <TableCell className="text-sm">{waste.reason}</TableCell>
-                                            <TableCell className="text-sm">{waste.recordedBy}</TableCell>
-                                            <TableCell className="text-sm">{waste.notes || '-'}</TableCell>
-                                        </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
-                        </ScrollArea>
+                        <>
+                            <div className="space-y-3 md:hidden">
+                                {sessionWaste.map((waste) => (
+                                    <div key={waste.id} className="rounded-lg border bg-card p-4">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <p className="font-medium">{waste.itemName}</p>
+                                            <p className="font-semibold">{formatCurrency(waste.cost)}</p>
+                                        </div>
+                                        <div className="mt-3 space-y-2">
+                                            <MobileInfoRow
+                                                label="Quantity"
+                                                value={`${waste.quantity.toFixed(2)} ${waste.unit || ''}`.trim() || '-'}
+                                                valueClassName="font-medium text-red-600"
+                                            />
+                                            <MobileInfoRow label="Reason" value={waste.reason} />
+                                            <MobileInfoRow label="Recorded by" value={waste.recordedBy} />
+                                            <MobileInfoRow label="Notes" value={waste.notes || '-'} />
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className="hidden md:block">
+                                <ScrollArea className="h-64 w-full rounded-md border">
+                                    <Table className="min-w-[980px]">
+                                        <TableHeader className="sticky top-0 bg-muted">
+                                            <TableRow>
+                                                <TableHead>Product</TableHead>
+                                                <TableHead className="text-right">Quantity</TableHead>
+                                                <TableHead>Unit</TableHead>
+                                                <TableHead className="text-right">Cost</TableHead>
+                                                <TableHead>Reason</TableHead>
+                                                <TableHead>Recorded By</TableHead>
+                                                <TableHead>Notes</TableHead>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {sessionWaste.map((waste) => (
+                                                <TableRow key={waste.id}>
+                                                    <TableCell className="font-medium">{waste.itemName}</TableCell>
+                                                    <TableCell className="text-right text-red-600 font-medium">{waste.quantity.toFixed(2)}</TableCell>
+                                                    <TableCell className="text-sm">{waste.unit || '-'}</TableCell>
+                                                    <TableCell className="text-right">{formatCurrency(waste.cost)}</TableCell>
+                                                    <TableCell className="text-sm">{waste.reason}</TableCell>
+                                                    <TableCell className="text-sm">{waste.recordedBy}</TableCell>
+                                                    <TableCell className="text-sm">{waste.notes || '-'}</TableCell>
+                                                </TableRow>
+                                            ))}
+                                        </TableBody>
+                                    </Table>
+                                </ScrollArea>
+                            </div>
+                        </>
                     ) : (
                         <p className="text-muted-foreground text-center py-4">No waste recorded in this session.</p>
                     )}
@@ -1097,32 +1471,68 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                 <div>
                     <h3 className="font-semibold mb-3">Complete Stock Tracking (Opening + Received - Sold - Waste = Closing)</h3>
                     {comprehensiveStockData.length > 0 ? (
-                        <ScrollArea className="h-64 w-full rounded-md border">
-                            <Table className="min-w-[760px]">
-                                <TableHeader className="sticky top-0 bg-muted">
-                                    <TableRow>
-                                        <TableHead>Item</TableHead>
-                                        <TableHead className="text-right">Opening</TableHead>
-                                        <TableHead className="text-right">Received</TableHead>
-                                        <TableHead className="text-right">Sold</TableHead>
-                                        <TableHead className="text-right">Waste</TableHead>
-                                        <TableHead className="text-right">Closing</TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {comprehensiveStockData.map((item) => (
-                                        <TableRow key={item.key}>
-                                            <TableCell className="font-medium">{item.name}</TableCell>
-                                            <TableCell className="text-right">{item.opening}</TableCell>
-                                            <TableCell className="text-right text-blue-600 font-medium">{item.received}</TableCell>
-                                            <TableCell className="text-right text-red-600 font-medium">{item.sold}</TableCell>
-                                            <TableCell className="text-right text-orange-600 font-medium">{item.waste}</TableCell>
-                                            <TableCell className="text-right text-green-600 font-medium">{item.remaining}</TableCell>
-                                        </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
-                        </ScrollArea>
+                        <>
+                            <div className="space-y-3 md:hidden">
+                                {comprehensiveStockData.map((item) => (
+                                    <div key={item.key} className="rounded-lg border bg-card p-4">
+                                        <p className="font-medium">{item.name}</p>
+                                        <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                                            <div className="rounded-md bg-muted/50 p-3">
+                                                <p className="text-xs text-muted-foreground">Opening</p>
+                                                <p className="font-medium">{item.opening}</p>
+                                            </div>
+                                            <div className="rounded-md bg-muted/50 p-3">
+                                                <p className="text-xs text-muted-foreground">Received</p>
+                                                <p className="font-medium text-blue-600">{item.received}</p>
+                                            </div>
+                                            <div className="rounded-md bg-muted/50 p-3">
+                                                <p className="text-xs text-muted-foreground">Sold</p>
+                                                <p className="font-medium text-red-600">{item.sold}</p>
+                                            </div>
+                                            <div className="rounded-md bg-muted/50 p-3">
+                                                <p className="text-xs text-muted-foreground">Waste</p>
+                                                <p className="font-medium text-orange-600">{item.waste}</p>
+                                            </div>
+                                            <div className="col-span-2 rounded-md bg-muted/50 p-3">
+                                                <p className="text-xs text-muted-foreground">Closing</p>
+                                                <p className="font-semibold text-green-600">{item.remaining}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className="hidden md:block">
+                                <ScrollArea className="h-64 w-full rounded-md border">
+                                    <Table className="min-w-[760px]">
+                                        <TableHeader className="sticky top-0 bg-muted">
+                                            <TableRow>
+                                                <TableHead>Item</TableHead>
+                                                <TableHead>Type</TableHead>
+                                                <TableHead className="text-right">Opening</TableHead>
+                                                <TableHead className="text-right">Received</TableHead>
+                                                <TableHead className="text-right">Sold</TableHead>
+                                                <TableHead className="text-right">Waste</TableHead>
+                                                <TableHead className="text-right">Closing</TableHead>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {comprehensiveStockData.map((item) => (
+                                                <TableRow key={item.key}>
+                                                    <TableCell className="font-medium">{item.name}</TableCell>
+                                                    <TableCell>{renderProductCategoryBadge(item.category)}</TableCell>
+                                                    <TableCell className="text-right">{item.opening}</TableCell>
+                                                    <TableCell className="text-right text-blue-600 font-medium">{item.received}</TableCell>
+                                                    <TableCell className="text-right text-red-600 font-medium">{item.sold}</TableCell>
+                                                    <TableCell className="text-right text-orange-600 font-medium">{item.waste}</TableCell>
+                                                    <TableCell className="text-right text-green-600 font-medium">{item.remaining}</TableCell>
+                                                </TableRow>
+                                            ))}
+                                        </TableBody>
+                                    </Table>
+                                </ScrollArea>
+                            </div>
+                        </>
                     ) : (
                         <p className="text-muted-foreground text-center py-4">No stock data available for this session.</p>
                     )}

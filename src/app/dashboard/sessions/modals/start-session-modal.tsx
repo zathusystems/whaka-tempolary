@@ -519,13 +519,41 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
 	                           <CardTitle className="text-base flex items-center gap-2"><Package/> Opening Inventory</CardTitle>
 	                        </CardHeader>
 	                        <CardContent className="p-0">
-                            <ScrollArea className="h-64">
-                                <Table>
-                                    <TableHeader className="sticky top-0 bg-muted">
-                                        <TableRow>
-                                            <TableHead>Item</TableHead>
-                                            <TableHead className="text-right">Quantity</TableHead>
-                                        </TableRow>
+                            <div className="md:hidden">
+                                {openingInventory.length > 0 ? (
+                                    <div className="space-y-3 p-4">
+                                        {openingInventory.map(item => {
+                                            const quantity = Number(item.stockUnits ?? item.stock_units ?? 0);
+                                            const unitType = item.unitType || item.unit_type || 'unit';
+
+                                            return (
+                                                <div key={item.id} className="rounded-lg border bg-card p-4">
+                                                    <div className="flex items-start justify-between gap-3">
+                                                        <p className="font-medium">{item.name}</p>
+                                                        <div className="text-right text-sm">
+                                                            <p className="text-muted-foreground">Quantity</p>
+                                                            <p className="font-semibold">{quantity} {unitType}</p>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                ) : (
+                                    <div className="px-4 py-10 text-center text-sm text-muted-foreground">
+                                        {isFetchingInventory ? 'Loading inventory...' : 'No inventory items found for this branch'}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="hidden md:block">
+                                <ScrollArea className="h-64">
+                                    <Table>
+                                        <TableHeader className="sticky top-0 bg-muted">
+                                            <TableRow>
+                                                <TableHead>Item</TableHead>
+                                                <TableHead className="text-right">Quantity</TableHead>
+                                            </TableRow>
 	                                    </TableHeader>
 	                                    <TableBody>
 	                                        {openingInventory.length > 0 ? (
@@ -556,6 +584,7 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                                     </TableBody>
                                 </Table>
                             </ScrollArea>
+                            </div>
                         </CardContent>
 	                    </Card>
 	                </div>

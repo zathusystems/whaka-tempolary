@@ -65,6 +65,8 @@ const getErrorMessage = (error: unknown, fallback: string): string =>
 const getErrorTitle = (error: unknown, fallback: string): string =>
   (error as any)?.isNetworkError ? 'Connection Problem' : fallback;
 
+const LOGIN_BOOTSTRAP_TIMEOUT_MS = 15000;
+
 export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [businesses, setBusinesses] = useState<Business[]>([]);
@@ -304,7 +306,9 @@ export default function LoginPage() {
       let isStaff = Boolean(response?.is_staff_user);
 
       try {
-        staffProfile = await authFetch.fetch<any>('/staff/me/');
+        staffProfile = await authFetch.fetch<any>('/staff/me/', {
+          timeoutMs: LOGIN_BOOTSTRAP_TIMEOUT_MS,
+        });
         if (staffProfile) {
           isStaff = true;
           userRole = normalizeRole(staffProfile.role, { fallback: 'Cashier' });
@@ -322,7 +326,9 @@ export default function LoginPage() {
         console.log('[DEBUG LOGIN] User is not staff member, fetching user profile');
         // Try to get user profile for business owners
         try {
-          userProfile = await authFetch.fetch<any>('/accounts/me/');
+          userProfile = await authFetch.fetch<any>('/accounts/me/', {
+            timeoutMs: LOGIN_BOOTSTRAP_TIMEOUT_MS,
+          });
           if (userProfile) {
             userRole = normalizeRole(userProfile.role, {
               fallback: 'Admin',
@@ -349,7 +355,9 @@ export default function LoginPage() {
         // Staff member - use their assigned business
         console.log('[DEBUG LOGIN] Fetching staff assigned business:', businessId);
         try {
-          const businessResponse = await authFetch.fetch<any>(`/business/businesses/${businessId}/`);
+          const businessResponse = await authFetch.fetch<any>(`/business/businesses/${businessId}/`, {
+            timeoutMs: LOGIN_BOOTSTRAP_TIMEOUT_MS,
+          });
           selectedBiz = normalizeBusiness(businessResponse);
           if (selectedBiz) {
             console.log('[DEBUG LOGIN] Staff business loaded:', selectedBiz.name);
@@ -367,7 +375,9 @@ export default function LoginPage() {
 
           // Fallback: use first accessible business from listing endpoint
           try {
-            const accessibleBusinesses = await authFetch.fetch<any>('/business/businesses/');
+            const accessibleBusinesses = await authFetch.fetch<any>('/business/businesses/', {
+              timeoutMs: LOGIN_BOOTSTRAP_TIMEOUT_MS,
+            });
             const list = Array.isArray(accessibleBusinesses)
               ? accessibleBusinesses
               : accessibleBusinesses?.results || [];
@@ -389,7 +399,9 @@ export default function LoginPage() {
       } else if (isStaff && !businessId) {
         // Staff member but no explicit business ID; try accessible business list
         console.warn('[DEBUG LOGIN] Staff member has no direct business ID, attempting accessible business lookup');
-        const businessesResponse = await authFetch.fetch<any>('/business/businesses/');
+        const businessesResponse = await authFetch.fetch<any>('/business/businesses/', {
+          timeoutMs: LOGIN_BOOTSTRAP_TIMEOUT_MS,
+        });
         const businessesList = Array.isArray(businessesResponse)
           ? businessesResponse
           : businessesResponse?.results || [];
@@ -401,7 +413,9 @@ export default function LoginPage() {
       } else {
         // Business owner - fetch their businesses
         console.log('[DEBUG LOGIN] Fetching owner businesses');
-        const businessesResponse = await authFetch.fetch<any>('/business/businesses/');
+        const businessesResponse = await authFetch.fetch<any>('/business/businesses/', {
+          timeoutMs: LOGIN_BOOTSTRAP_TIMEOUT_MS,
+        });
         const businessesList = Array.isArray(businessesResponse) 
           ? businessesResponse 
           : businessesResponse?.results || [];
@@ -493,7 +507,8 @@ export default function LoginPage() {
         let fuelPumps: string[] = [];
         try {
           const settingsResponse = await authFetch.fetch<any>(
-            `/business/businesses/${selectedBiz.id}/business_settings/`
+            `/business/businesses/${selectedBiz.id}/business_settings/`,
+            { timeoutMs: LOGIN_BOOTSTRAP_TIMEOUT_MS }
           );
           
           if (settingsResponse) {
@@ -532,7 +547,9 @@ export default function LoginPage() {
         // Fetch and sync all branches
         try {
           const { businessResponse, rawBranches, branches, activeBranchId: syncedActiveBranchId } =
-            await syncBusinessBranchesFromServer(selectedBiz.id, activeBranchId);
+            await syncBusinessBranchesFromServer(selectedBiz.id, activeBranchId, {
+              timeoutMs: LOGIN_BOOTSTRAP_TIMEOUT_MS,
+            });
 
           fetchedBranches = rawBranches;
           branchesData = branches;
@@ -820,7 +837,9 @@ export default function LoginPage() {
 
       let staffProfile: any = null;
       try {
-        const staffResponse = await authFetch.fetch<any>('/staff/me/');
+        const staffResponse = await authFetch.fetch<any>('/staff/me/', {
+          timeoutMs: LOGIN_BOOTSTRAP_TIMEOUT_MS,
+        });
         if (staffResponse) {
           staffProfile = staffResponse;
           userRole = normalizeRole(staffResponse.role, { fallback: userRole });
@@ -883,7 +902,9 @@ export default function LoginPage() {
 
       let staffProfile: any = null;
       try {
-        const staffResponse = await authFetch.fetch<any>('/staff/me/');
+        const staffResponse = await authFetch.fetch<any>('/staff/me/', {
+          timeoutMs: LOGIN_BOOTSTRAP_TIMEOUT_MS,
+        });
         if (staffResponse) {
           staffProfile = staffResponse;
           userRole = normalizeRole(staffResponse.role, { fallback: userRole });

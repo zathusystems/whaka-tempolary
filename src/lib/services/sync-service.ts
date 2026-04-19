@@ -2270,6 +2270,11 @@ class SyncService {
                 (convertedPo as any).reference_number ??
                 (po as any).reference_number ??
                 existingPo?.referenceNumber,
+              receivedDate:
+                convertedPo.receivedDate ??
+                (convertedPo as any).received_date ??
+                (po as any).received_date ??
+                existingPo?.receivedDate,
               vatAmount,
               status:
                 convertedPo.status ??
@@ -2477,8 +2482,18 @@ class SyncService {
                 expiryDate: item?.expiryDate ?? rawItem?.expiry_date ?? undefined,
                 batchNumber: item?.batchNumber ?? rawItem?.batch_number ?? undefined,
                 sessionId,
-                createdAt: item?.createdAt ?? rawItem?.created_at ?? convertedPo.createdAt,
-                updatedAt: item?.updatedAt ?? rawItem?.updated_at ?? convertedPo.updatedAt,
+                createdAt:
+                  convertedPo.createdAt ??
+                  (convertedPo as any).created_at ??
+                  item?.createdAt ??
+                  rawItem?.created_at ??
+                  existingRecord?.createdAt,
+                updatedAt:
+                  convertedPo.updatedAt ??
+                  (convertedPo as any).updated_at ??
+                  item?.updatedAt ??
+                  rawItem?.updated_at ??
+                  existingRecord?.updatedAt,
                 _dirty: false,
                 _operation: undefined,
                 _synced_at: new Date().toISOString()

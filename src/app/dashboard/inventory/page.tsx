@@ -401,7 +401,10 @@ export default function InventoryPage() {
             }
           }
 
-          const receivedDate = purchase.received_date;
+          const receivedDate =
+            purchase.received_date ||
+            purchase.created_at ||
+            new Date().toISOString();
           const items = Array.isArray(purchase.items) ? purchase.items : [];
 
           if (items.length === 0) {
@@ -500,8 +503,8 @@ export default function InventoryPage() {
               expiryDate: poItem.expiry_date,
               batchNumber: poItem.batch_number,
               sessionId,
-              createdAt: poItem.created_at || purchase.created_at,
-              updatedAt: poItem.updated_at || purchase.updated_at,
+              createdAt: purchase.created_at || poItem.created_at || existingRecord?.createdAt,
+              updatedAt: purchase.updated_at || poItem.updated_at || existingRecord?.updatedAt,
             });
           }
         }

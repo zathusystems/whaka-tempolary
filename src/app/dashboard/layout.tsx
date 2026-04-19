@@ -12,11 +12,8 @@ import {
   Settings,
   ShoppingBag,
   Users,
-  PlusCircle,
   Download,
-  MoreHorizontal,
   ChevronDown,
-  Search,
   Bell,
   Plus,
   FileText,
@@ -1168,25 +1165,6 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
               </DialogContent>
             </Dialog>
 
-            <div className="sm:hidden">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon">
-                    <MoreHorizontal />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem>
-                    <PlusCircle className="mr-2" />
-                    New Sale
-                  </DropdownMenuItem>
-                  <DropdownMenuItem>
-                    <Search className="mr-2" />
-                    Search
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
           </div>
 
           <DropdownMenu>

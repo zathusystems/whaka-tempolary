@@ -136,6 +136,7 @@ export const AddProductForm = ({
           reorderLevel: DEFAULT_REORDER_LEVEL,
           isVariablePrice: false,
           isFuel: false,
+          isOil: false,
       }
     });
 
@@ -221,6 +222,7 @@ export const AddProductForm = ({
                 reorderLevel: normalizeReorderLevelForForm(defaultValues.reorderLevel),
                 isVariablePrice: defaultValues.isVariablePrice ?? false,
                 isFuel: defaultValues.isFuel ?? false,
+                isOil: defaultValues.isOil ?? false,
                 isProduced: defaultValues.isProduced ?? false,
                 isSoldInPortions: defaultValues.isSoldInPortions ?? false,
                 recipe: defaultValues.recipe ?? [],
@@ -241,6 +243,7 @@ export const AddProductForm = ({
                 reorderLevel: DEFAULT_REORDER_LEVEL,
                 isVariablePrice: false,
                 isFuel: false,
+                isOil: false,
                 isProduced: false,
                 isSoldInPortions: false,
             });
@@ -330,6 +333,7 @@ export const AddProductForm = ({
                 recipe: normalizedRecipe,
                 isVariablePrice: data.isVariablePrice || false,
                 isFuel: data.isFuel || false,
+                isOil: data.isOil || false,
                 isProduced: normalizedIsProduced,
                 isSoldInPortions: normalizedIsSoldInPortions,
                 portionName: normalizedPortionName || undefined,
@@ -597,26 +601,48 @@ export const AddProductForm = ({
                 )}
 
                 {!isRestaurantOrBar && itemType === 'sellable' && (
-                     <FormField
-                        control={form.control}
-                        name="isFuel"
-                        render={({ field }) => (
-                        <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4">
-                            <div className="space-y-0.5">
-                            <FormLabel>Fuel Item</FormLabel>
-                            <FormDescription>
-                                Enable for fuel products so only fuel attendants can sell them.
-                            </FormDescription>
-                            </div>
-                            <FormControl>
-                            <Switch
-                                checked={field.value}
-                                onCheckedChange={field.onChange}
-                            />
-                            </FormControl>
-                        </FormItem>
-                        )}
-                    />
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <FormField
+                            control={form.control}
+                            name="isFuel"
+                            render={({ field }) => (
+                            <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4">
+                                <div className="space-y-0.5">
+                                <FormLabel>Fuel Item</FormLabel>
+                                <FormDescription>
+                                    Enable for fuel products so only fuel attendants can sell them.
+                                </FormDescription>
+                                </div>
+                                <FormControl>
+                                <Switch
+                                    checked={field.value}
+                                    onCheckedChange={field.onChange}
+                                />
+                                </FormControl>
+                            </FormItem>
+                            )}
+                        />
+                        <FormField
+                            control={form.control}
+                            name="isOil"
+                            render={({ field }) => (
+                            <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4">
+                                <div className="space-y-0.5">
+                                <FormLabel>Oil Item</FormLabel>
+                                <FormDescription>
+                                    Enable for oils/lubricants so we can separate them in sales reporting.
+                                </FormDescription>
+                                </div>
+                                <FormControl>
+                                <Switch
+                                    checked={field.value}
+                                    onCheckedChange={field.onChange}
+                                />
+                                </FormControl>
+                            </FormItem>
+                            )}
+                        />
+                    </div>
                 )}
 
                 {(itemType === 'ingredient' || !isRestaurantOrBar) && (

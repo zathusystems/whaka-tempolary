@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 #[cfg(not(target_os = "android"))]
 use std::thread;
 #[cfg(not(target_os = "android"))]
@@ -8,6 +10,66 @@ use tauri::{AppHandle, Listener, PhysicalSize, Size, WebviewWindow};
 
 mod printer;
 mod backend;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PersistedSessionSnapshot {
+    entries: BTreeMap<String, String>,
+}
+
+fn session_snapshot_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let base_dir = app
+        .path()
+        .app_data_dir()
+        .or_else(|_| app.path().data_dir())
+        .map_err(|error| format!("Could not resolve app data directory: {}", error))?;
+
+    std::fs::create_dir_all(&base_dir)
+        .map_err(|error| format!("Could not create app data directory: {}", error))?;
+
+    Ok(base_dir.join("session-snapshot.json"))
+}
+
+#[tauri::command]
+fn save_session_snapshot(
+    app: tauri::AppHandle,
+    entries: BTreeMap<String, String>,
+) -> Result<(), String> {
+    let snapshot_path = session_snapshot_path(&app)?;
+    let payload = PersistedSessionSnapshot { entries };
+    let serialized = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("Could not serialize session snapshot: {}", error))?;
+
+    std::fs::write(&snapshot_path, serialized.as_bytes())
+        .map_err(|error| format!("Could not write session snapshot: {}", error))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn load_session_snapshot(app: tauri::AppHandle) -> Result<BTreeMap<String, String>, String> {
+    let snapshot_path = session_snapshot_path(&app)?;
+    if !snapshot_path.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let raw = std::fs::read_to_string(&snapshot_path)
+        .map_err(|error| format!("Could not read session snapshot: {}", error))?;
+    let parsed: PersistedSessionSnapshot = serde_json::from_str(&raw)
+        .map_err(|error| format!("Could not parse session snapshot: {}", error))?;
+
+    Ok(parsed.entries)
+}
+
+#[tauri::command]
+fn clear_session_snapshot(app: tauri::AppHandle) -> Result<(), String> {
+    let snapshot_path = session_snapshot_path(&app)?;
+    if snapshot_path.exists() {
+        std::fs::remove_file(&snapshot_path)
+            .map_err(|error| format!("Could not remove session snapshot: {}", error))?;
+    }
+
+    Ok(())
+}
 
 #[tauri::command]
 fn save_inventory_template_csv(
@@ -127,6 +189,9 @@ pub fn run() {
     let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
         printer::get_printers,
         printer::print_receipt,
+        save_session_snapshot,
+        load_session_snapshot,
+        clear_session_snapshot,
         save_inventory_template_csv,
     ]);
 

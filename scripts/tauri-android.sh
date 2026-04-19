@@ -8,6 +8,7 @@ PREFERRED_NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-${NDK_HOME:-}}}"
 ANDROID_TAURI_CONFIG="$ROOT_DIR/src-tauri/tauri.android.conf.json"
 ANDROID_GEN_DIR="$ROOT_DIR/src-tauri/gen/android"
 ANDROID_MANIFEST_FILE="$ANDROID_GEN_DIR/app/src/main/AndroidManifest.xml"
+ANDROID_ICON_SYNC_SCRIPT="$ROOT_DIR/scripts/sync-tauri-android-icons.sh"
 ANDROID_COMMAND_ALREADY_EXECUTED=0
 
 copy_if_exists() {
@@ -43,6 +44,12 @@ restore_android_signing_artifacts() {
   while IFS= read -r artifact; do
     cp -f "$artifact" "$ANDROID_GEN_DIR/$(basename "$artifact")"
   done < <(find "$backup_dir" -maxdepth 1 -type f)
+}
+
+sync_android_icons() {
+  if [[ -f "$ANDROID_ICON_SYNC_SCRIPT" ]]; then
+    bash "$ANDROID_ICON_SYNC_SCRIPT"
+  fi
 }
 
 recreate_android_project_if_broken() {
@@ -266,6 +273,7 @@ trap 'rm -f "$BUILD_MARKER_FILE"' EXIT
 TAURI_ARGS=("$@")
 ANDROID_SUBCOMMAND="${1:-}"
 recreate_android_project_if_broken "$ANDROID_SUBCOMMAND"
+sync_android_icons
 
 if [[ "$ANDROID_SUBCOMMAND" =~ ^(build|dev|run)$ ]] && [[ -f "$ANDROID_TAURI_CONFIG" ]] && ! has_tauri_config_arg "${TAURI_ARGS[@]}"; then
   TAURI_ARGS+=(--config "$ANDROID_TAURI_CONFIG")
@@ -276,6 +284,10 @@ if [[ "$ANDROID_COMMAND_ALREADY_EXECUTED" == "1" ]]; then
   echo "Android init completed during repair."
 else
   npx tauri android "${TAURI_ARGS[@]}"
+
+  if [[ "$ANDROID_SUBCOMMAND" == "init" ]]; then
+    sync_android_icons
+  fi
 fi
 
 if should_sign_release_apks "${TAURI_ARGS[@]}"; then

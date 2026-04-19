@@ -22,6 +22,7 @@ export const getInventoryTemplateColumnsForBusinessType = (businessType: Busines
       'mraUnitMeasure',
       'unitType',
       'reorderLevel',
+      'isOil',
       'supplier',
     ];
   }

@@ -7,6 +7,7 @@ import { useCurrency } from '@/hooks/use-currency';
 import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/auth-fetch';
 import { useAuth } from '@/hooks/use-auth';
+import { getSessionTotalSales } from '@/lib/session-financials';
 import {
   Dialog,
   DialogContent,
@@ -97,6 +98,21 @@ const hasPumpName = (session: Session) => {
   const pumpName = String(session.pumpName ?? '').trim();
   return pumpName !== '';
 };
+
+const MobileInfoRow = ({
+  label,
+  value,
+  valueClassName = '',
+}: {
+  label: string;
+  value: React.ReactNode;
+  valueClassName?: string;
+}) => (
+  <div className="flex items-start justify-between gap-3 text-sm">
+    <span className="text-muted-foreground">{label}</span>
+    <div className={`text-right ${valueClassName}`}>{value}</div>
+  </div>
+);
 
 export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = null }: SessionHistoryModalProps) {
     const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
@@ -250,52 +266,100 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
     const nonFuelSessions = closedSessions.filter((session) => !hasPumpName(session));
 
     const renderSessionsTable = (sessions: Session[], emptyMessage: string, showPump: boolean) => (
-        <Table>
-            <TableHeader>
-                <TableRow>
-                    <TableHead>Date</TableHead>
-                    <TableHead>Started By</TableHead>
-                    {showPump && <TableHead>Pump</TableHead>}
-                    <TableHead>Status</TableHead>
-                    <TableHead className="text-right">Total Sales</TableHead>
-                    <TableHead className="text-right">Cash Difference</TableHead>
-                    <TableHead className="w-auto text-right">
-                        <span className="sr-only">Actions</span>
-                    </TableHead>
-                </TableRow>
-            </TableHeader>
-            <TableBody>
+        <>
+            <div className="space-y-3 md:hidden">
                 {sessions.length > 0 ? (
                     sessions.map((session) => (
-                        <TableRow key={session.id}>
-                            <TableCell>{formatSessionDate(session.startedAt)}</TableCell>
-                            <TableCell>{session.userName}</TableCell>
-                            {showPump && <TableCell>{session.pumpName || '-'}</TableCell>}
-                            <TableCell><Badge variant="secondary">Closed</Badge></TableCell>
-                            <TableCell className="text-right font-medium">{formatCurrency(session.totalSales || 0)}</TableCell>
-                            <TableCell className={`text-right font-medium ${(session.difference || 0) !== 0 ? 'text-destructive' : ''}`}>
-                                {formatCurrency(session.difference || 0)}
-                            </TableCell>
-                            <TableCell>
-                                <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    onClick={() => setViewingSession(session)}
-                                >
-                                    <MoreHorizontal className="h-4 w-4" />
-                                </Button>
-                            </TableCell>
-                        </TableRow>
+                        <div key={session.id} className="rounded-lg border bg-card p-4">
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="space-y-1">
+                                    <p className="font-semibold">{session.userName}</p>
+                                    <p className="text-xs text-muted-foreground">{formatSessionDate(session.startedAt)}</p>
+                                </div>
+                                <Badge variant="secondary">Closed</Badge>
+                            </div>
+
+                            <div className="mt-3 space-y-2">
+                                {showPump && (
+                                    <MobileInfoRow label="Pump" value={session.pumpName || '-'} />
+                                )}
+                                <MobileInfoRow
+                                    label="Total Sales"
+                                    value={formatCurrency(getSessionTotalSales(session))}
+                                    valueClassName="font-medium"
+                                />
+                                <MobileInfoRow
+                                    label="Cash diff."
+                                    value={formatCurrency(session.difference || 0)}
+                                    valueClassName={`font-medium ${(session.difference || 0) !== 0 ? 'text-destructive' : ''}`}
+                                />
+                            </div>
+
+                            <Button
+                                variant="outline"
+                                className="mt-4 w-full"
+                                onClick={() => setViewingSession(session)}
+                            >
+                                View Details
+                            </Button>
+                        </div>
                     ))
                 ) : (
-                    <TableRow>
-                        <TableCell colSpan={showPump ? 7 : 6} className="h-24 text-center">
-                            {emptyMessage}
-                        </TableCell>
-                    </TableRow>
+                    <div className="rounded-lg border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
+                        {emptyMessage}
+                    </div>
                 )}
-            </TableBody>
-        </Table>
+            </div>
+
+            <div className="hidden md:block">
+                <Table className={showPump ? 'min-w-[860px]' : 'min-w-[760px]'}>
+                    <TableHeader>
+                        <TableRow>
+                            <TableHead>Date</TableHead>
+                            <TableHead>Started By</TableHead>
+                            {showPump && <TableHead>Pump</TableHead>}
+                            <TableHead>Status</TableHead>
+                            <TableHead className="text-right">Total Sales</TableHead>
+                            <TableHead className="text-right">Cash Difference</TableHead>
+                            <TableHead className="w-auto text-right">
+                                <span className="sr-only">Actions</span>
+                            </TableHead>
+                        </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                        {sessions.length > 0 ? (
+                            sessions.map((session) => (
+                                <TableRow key={session.id}>
+                                    <TableCell>{formatSessionDate(session.startedAt)}</TableCell>
+                                    <TableCell>{session.userName}</TableCell>
+                                    {showPump && <TableCell>{session.pumpName || '-'}</TableCell>}
+                                    <TableCell><Badge variant="secondary">Closed</Badge></TableCell>
+                                    <TableCell className="text-right font-medium">{formatCurrency(getSessionTotalSales(session))}</TableCell>
+                                    <TableCell className={`text-right font-medium ${(session.difference || 0) !== 0 ? 'text-destructive' : ''}`}>
+                                        {formatCurrency(session.difference || 0)}
+                                    </TableCell>
+                                    <TableCell>
+                                        <Button
+                                            variant="ghost"
+                                            size="icon"
+                                            onClick={() => setViewingSession(session)}
+                                        >
+                                            <MoreHorizontal className="h-4 w-4" />
+                                        </Button>
+                                    </TableCell>
+                                </TableRow>
+                            ))
+                        ) : (
+                            <TableRow>
+                                <TableCell colSpan={showPump ? 7 : 6} className="h-24 text-center">
+                                    {emptyMessage}
+                                </TableCell>
+                            </TableRow>
+                        )}
+                    </TableBody>
+                </Table>
+            </div>
+        </>
     );
 
     return (
@@ -312,9 +376,9 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                         </div>
                     ) : (
                         <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'fuel' | 'nonFuel')}>
-                            <TabsList className="mb-4">
-                                <TabsTrigger value="fuel">Fuel Sessions</TabsTrigger>
-                                <TabsTrigger value="nonFuel">Non-Pump Sessions</TabsTrigger>
+                            <TabsList className="mb-4 grid h-auto w-full grid-cols-1 sm:grid-cols-2">
+                                <TabsTrigger value="fuel" className="text-xs sm:text-sm">Fuel Sessions</TabsTrigger>
+                                <TabsTrigger value="nonFuel" className="text-xs sm:text-sm">Non-Pump Sessions</TabsTrigger>
                             </TabsList>
                             <TabsContent value="fuel">
                                 {renderSessionsTable(

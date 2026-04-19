@@ -11,10 +11,17 @@ import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
 import { syncSessionOrdersToLocalDb } from '@/lib/session-order-sync';
 import {
+  getSessionTaxCollected,
+  getSessionTotalSales,
+  resolveSessionFinancialSummary,
+  resolveSessionPaymentBreakdown,
+} from '@/lib/session-financials';
+import {
   buildZReportPrintHtml,
   calculateZReportSummary,
   SESSION_END_REPORT_TITLE,
 } from '@/lib/z-report-print';
+import { summarizeSessionOrderProductMix } from '@/lib/session-product-report';
 import {
   Card,
   CardContent,
@@ -78,6 +85,20 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
     () => calculateZReportSummary(sessionOrders as any),
     [sessionOrders]
   );
+  const productMixSummary = useMemo(
+    () => summarizeSessionOrderProductMix(sessionOrders as any, currentInventory as any),
+    [currentInventory, sessionOrders]
+  );
+  const resolvedFinancialSummary = useMemo(
+    () => resolveSessionFinancialSummary(session, financialSummary),
+    [financialSummary, session]
+  );
+  const resolvedPaymentBreakdown = useMemo(
+    () => resolveSessionPaymentBreakdown(session, paymentBreakdown, financialSummary),
+    [financialSummary, paymentBreakdown, session]
+  );
+  const sessionTaxCollected = useMemo(() => getSessionTaxCollected(session), [session]);
+  const sessionTotalSales = useMemo(() => getSessionTotalSales(session), [session]);
 
   const actualCash = watch('actualCash', session.expectedCash);
   const difference = actualCash - session.expectedCash;
@@ -108,6 +129,15 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
       }
 
       const reportSummary = calculateZReportSummary(reportOrders as any);
+      const reportFinancialSummary = resolveSessionFinancialSummary(
+        closedSession,
+        reportSummary.financialSummary
+      );
+      const reportPaymentBreakdown = resolveSessionPaymentBreakdown(
+        closedSession,
+        reportSummary.paymentBreakdown,
+        reportSummary.financialSummary
+      );
       const [{ printerService }, { silentPrintService }] = await Promise.all([
         import('@/lib/services/printer-service'),
         import('@/lib/services/silent-print-service'),
@@ -132,9 +162,10 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
 
       const htmlContent = buildZReportPrintHtml({
         session: closedSession,
-        paymentBreakdown: reportSummary.paymentBreakdown,
-        financialSummary: reportSummary.financialSummary,
+        paymentBreakdown: reportPaymentBreakdown,
+        financialSummary: reportFinancialSummary,
         eisSummary: reportSummary.eisSummary,
+        productMixSummary,
         formatCurrency,
       });
 
@@ -173,7 +204,7 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
     } finally {
       setIsPrintingZReport(false);
     }
-  }, [activeBranchId, closedSession, formatCurrency, sessionOrders]);
+  }, [activeBranchId, closedSession, formatCurrency, productMixSummary, sessionOrders]);
 
   const onSubmit = async (data: { actualCash: number }) => {
     if (!user || !activeBranchId) {
@@ -309,16 +340,16 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
                   <span className="font-medium">{closedSession.closedAt ? new Date(closedSession.closedAt).toLocaleString() : 'N/A'}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Net Sales:</span>
-                  <span className="font-medium">{formatCurrency(financialSummary.netSales)}</span>
+                  <span className="text-muted-foreground">Revenue:</span>
+                  <span className="font-medium">{formatCurrency(resolvedFinancialSummary.netSales)}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Total Tax:</span>
-                  <span className="font-medium">{formatCurrency(financialSummary.totalTax)}</span>
+                  <span className="text-muted-foreground">Tax Collected:</span>
+                  <span className="font-medium">{formatCurrency(resolvedFinancialSummary.totalTax)}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Gross Sales:</span>
-                  <span className="font-medium">{formatCurrency(financialSummary.grossSales)}</span>
+                  <span className="text-muted-foreground">Total Sales:</span>
+                  <span className="font-medium">{formatCurrency(resolvedFinancialSummary.grossSales)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Difference:</span>
@@ -386,8 +417,16 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
             <div className="flex justify-between font-semibold">
-                <span>Total Sales (Subtotal):</span> 
+                <span>Revenue (Excl. Tax):</span>
                 <span className="text-xs">{formatCurrency(session.totalSales || 0)}</span>
+            </div>
+            <div className="flex justify-between">
+                <span>Tax Collected:</span>
+                <span className="font-medium text-xs">{formatCurrency(sessionTaxCollected)}</span>
+            </div>
+            <div className="flex justify-between">
+                <span>Total Sales (Incl. Tax):</span>
+                <span className="font-medium text-xs">{formatCurrency(sessionTotalSales)}</span>
             </div>
             <Separator />
             {sessionPaymentBreakdown.map(item => (
@@ -404,7 +443,7 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
             </CardHeader>
             <CardContent className="space-y-4">
                 <div className="flex justify-between items-center text-sm border-b pb-2"><span>Opening Float:</span> <span className="font-medium text-xs">{formatCurrency(session.openingFloat || 0)}</span></div>
-                <div className="flex justify-between items-center text-sm border-b pb-2"><span>+ Cash Sales:</span> <span className="font-medium text-green-600 text-xs">{formatCurrency(session.totalCashSales || 0)}</span></div>
+                <div className="flex justify-between items-center text-sm border-b pb-2"><span>+ Cash Sales:</span> <span className="font-medium text-green-600 text-xs">{formatCurrency(resolvedPaymentBreakdown.cash)}</span></div>
                 <div className="flex justify-between items-center font-semibold text-base border-b pb-2"><span>Expected in Drawer:</span> <span className="text-xs">{formatCurrency(session.expectedCash || 0)}</span></div>
             
                 <div className="grid gap-2">

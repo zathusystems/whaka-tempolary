@@ -1,6 +1,11 @@
 import { format } from 'date-fns';
 
 import type { Session } from '@/lib/db';
+import {
+  PRODUCT_REPORTING_CATEGORIES,
+  type SessionProductMixSummary,
+  getProductReportingCategoryMeta,
+} from '@/lib/session-product-report';
 
 export const SESSION_END_REPORT_TITLE = 'Session End Report';
 
@@ -92,6 +97,7 @@ type BuildZReportPrintHtmlInput = {
   paymentBreakdown: ZReportPaymentBreakdown;
   financialSummary?: ZReportFinancialSummary;
   eisSummary?: ZReportEisSummary;
+  productMixSummary?: SessionProductMixSummary;
   formatCurrency: (amount: number) => string;
   generatedAt?: Date;
 };
@@ -141,6 +147,11 @@ const DEFAULT_EIS_SUMMARY: ZReportEisSummary = {
   eisStatusCounts: DEFAULT_EIS_STATUS_COUNTS,
   ordersWithQr: 0,
   ordersWithSignature: 0,
+};
+
+const formatQuantity = (value: unknown): string => {
+  const quantity = toFiniteNumber(value);
+  return quantity.toFixed(Math.abs(quantity - Math.round(quantity)) < 1e-9 ? 2 : 3);
 };
 
 export const calculateZReportSummary = (
@@ -308,16 +319,16 @@ export const buildZReportPrintHtml = ({
   paymentBreakdown,
   financialSummary = DEFAULT_FINANCIAL_SUMMARY,
   eisSummary = DEFAULT_EIS_SUMMARY,
+  productMixSummary,
   formatCurrency,
   generatedAt = new Date(),
 }: BuildZReportPrintHtmlInput): string => {
   const openingFloat = toFiniteNumber(session.openingFloat);
-  const sessionTotalSales = toFiniteNumber(session.totalSales);
   const netSales = toFiniteNumber(financialSummary.netSales);
   const totalTax = toFiniteNumber(financialSummary.totalTax);
-  const grossSales = toFiniteNumber(financialSummary.grossSales);
+  const totalSales = toFiniteNumber(financialSummary.grossSales);
   const totalTips = toFiniteNumber(financialSummary.totalTips);
-  const totalPayable = toFiniteNumber(financialSummary.totalPayable);
+  const totalCollected = toFiniteNumber(financialSummary.totalPayable);
   const actualCash = toFiniteNumber(session.actualCash);
   const difference = toFiniteNumber(session.difference);
   const cashSales = toFiniteNumber(paymentBreakdown.cash);
@@ -326,6 +337,14 @@ export const buildZReportPrintHtml = ({
   const fiscalPending = toFiniteNumber(eisSummary.pendingFiscalNumber);
   const ordersWithQr = toFiniteNumber(eisSummary.ordersWithQr);
   const ordersWithSignature = toFiniteNumber(eisSummary.ordersWithSignature);
+  const hasProductMixSummary = PRODUCT_REPORTING_CATEGORIES.some((category) => {
+    const entry = productMixSummary?.[category];
+    return (
+      toFiniteNumber(entry?.amount) > 0 ||
+      toFiniteNumber(entry?.quantity) > 0 ||
+      toFiniteNumber(entry?.itemCount) > 0
+    );
+  });
 
   const lines: string[] = [
     SESSION_END_REPORT_TITLE.toUpperCase(),
@@ -337,12 +356,9 @@ export const buildZReportPrintHtml = ({
     '--------------------------------',
     'FINANCIAL SUMMARY',
     `Orders: ${Math.max(0, Math.floor(toFiniteNumber(financialSummary.orderCount)))}`,
-    `Net Sales: ${formatCurrency(netSales)}`,
-    `Tax: ${formatCurrency(totalTax)}`,
-    `Gross Sales: ${formatCurrency(grossSales)}`,
-    // `Tips: ${formatCurrency(totalTips)}`,
-    `Total Payable: ${formatCurrency(totalPayable)}`,
-    `Session Total Sales: ${formatCurrency(sessionTotalSales)}`,
+    `Revenue: ${formatCurrency(netSales)}`,
+    `Tax Collected: ${formatCurrency(totalTax)}`,
+    `Total Sales: ${formatCurrency(totalSales)}`,
     '--------------------------------',
     'PAYMENT BREAKDOWN',
     `Cash Sales: ${formatCurrency(cashSales)}`,
@@ -351,6 +367,30 @@ export const buildZReportPrintHtml = ({
     `On Account: ${formatCurrency(toFiniteNumber(paymentBreakdown.onAccount))}`,
     `Other: ${formatCurrency(toFiniteNumber(paymentBreakdown.other))}`,
     '--------------------------------',
+    ...(totalTips > 0
+      ? [
+          `Tips: ${formatCurrency(totalTips)}`,
+          `Total Collected: ${formatCurrency(totalCollected)}`,
+          '--------------------------------',
+        ]
+      : []),
+    ...(hasProductMixSummary
+      ? [
+          'PRODUCT MIX',
+          ...PRODUCT_REPORTING_CATEGORIES.flatMap((category) => {
+            const entry = productMixSummary?.[category];
+            const meta = getProductReportingCategoryMeta(category);
+            return [
+              `${meta.label}: ${formatCurrency(toFiniteNumber(entry?.amount))}`,
+              `  Qty: ${formatQuantity(entry?.quantity)} | Items: ${Math.max(
+                0,
+                Math.floor(toFiniteNumber(entry?.itemCount))
+              )}`,
+            ];
+          }),
+          '--------------------------------',
+        ]
+      : []),
     'CASH RECONCILIATION',
     `Opening Float: ${formatCurrency(openingFloat)}`,
     `Expected in Drawer: ${formatCurrency(expectedDrawer)}`,

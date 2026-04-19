@@ -39,6 +39,7 @@ import type { EditablePurchaseGroup } from './purchase-editor-types';
 
 type ReceiveStockFormValues = {
   supplierId?: string;
+  purchaseDate?: Date;
   referenceNumber?: string;
   vatAmount?: number;
   paymentStatus?: 'Paid' | 'Unpaid';
@@ -60,6 +61,7 @@ type ReceiveStockFormValues = {
 
 type ReceiveStockDraft = {
     supplierId?: string;
+    purchaseDate?: string;
     referenceNumber?: string;
     paymentStatus?: 'Paid' | 'Unpaid';
     isFuelMode?: boolean;
@@ -130,6 +132,24 @@ const parseOptionalDate = (value: unknown): Date | undefined => {
     return Number.isNaN(parsed.getTime()) ? undefined : parsed;
 };
 
+const createDefaultPurchaseDate = (): Date => new Date();
+
+const resolvePurchaseDate = (value: unknown): Date => {
+    return parseOptionalDate(value) ?? createDefaultPurchaseDate();
+};
+
+const buildPurchaseTimestampBase = (value: unknown, timeSource: Date = new Date()): Date => {
+    const parsedDate = resolvePurchaseDate(value);
+    const normalized = new Date(parsedDate);
+    normalized.setHours(
+        timeSource.getHours(),
+        timeSource.getMinutes(),
+        timeSource.getSeconds(),
+        timeSource.getMilliseconds()
+    );
+    return normalized;
+};
+
 const createEmptyReceiveStockItem = (): ReceiveStockFormValues['items'][number] => ({
     productId: '',
     quantity: 1,
@@ -142,6 +162,7 @@ const createEmptyReceiveStockItem = (): ReceiveStockFormValues['items'][number] 
 
 const createDefaultReceiveStockValues = (): ReceiveStockFormValues => ({
     supplierId: '',
+    purchaseDate: createDefaultPurchaseDate(),
     referenceNumber: '',
     vatAmount: undefined,
     paymentStatus: 'Paid',
@@ -172,6 +193,7 @@ const serializeDraftItem = (item: ReceiveStockFormValues['items'][number] | unde
 
 const normalizeReceiveStockDraft = (draft: ReceiveStockDraft | null | undefined): ReceiveStockFormValues => ({
     supplierId: typeof draft?.supplierId === 'string' ? draft.supplierId : '',
+    purchaseDate: resolvePurchaseDate(draft?.purchaseDate),
     referenceNumber: typeof draft?.referenceNumber === 'string' ? draft.referenceNumber : '',
     vatAmount: undefined,
     paymentStatus: draft?.paymentStatus === 'Unpaid' ? 'Unpaid' : 'Paid',
@@ -274,6 +296,7 @@ const buildReceiveStockValuesFromPurchase = (
 
     return {
         supplierId: resolvedSupplierId,
+        purchaseDate: resolvePurchaseDate(purchase.receivedDate),
         referenceNumber: purchase.referenceNumber || '',
         vatAmount: toOptionalNumber(purchase.vatAmount),
         paymentStatus,
@@ -729,6 +752,7 @@ export const ReceiveStockForm = ({
         [branchId, businessType]
     );
     const referenceNumberValue = useWatch({ control, name: "referenceNumber" });
+    const purchaseDateValue = useWatch({ control, name: "purchaseDate" });
     const paymentStatusValue = useWatch({ control, name: "paymentStatus" });
     const supplierOptions = React.useMemo(() => {
         if (!editingPurchase) {
@@ -808,6 +832,7 @@ export const ReceiveStockForm = ({
                 : [serializeDraftItem(createEmptyReceiveStockItem())];
             const draftPayload: ReceiveStockDraft = {
                 supplierId: typeof values.supplierId === 'string' ? values.supplierId : '',
+                purchaseDate: values.purchaseDate ? values.purchaseDate.toISOString() : undefined,
                 referenceNumber: typeof values.referenceNumber === 'string' ? values.referenceNumber : '',
                 paymentStatus: values.paymentStatus === 'Unpaid' ? 'Unpaid' : 'Paid',
                 isFuelMode,
@@ -902,7 +927,7 @@ export const ReceiveStockForm = ({
         return () => {
             window.clearTimeout(timeoutId);
         };
-    }, [supplierId, referenceNumberValue, paymentStatusValue, watchedItems, isFuelMode, isSubmitting, saveDraft, isEditMode]);
+    }, [supplierId, purchaseDateValue, referenceNumberValue, paymentStatusValue, watchedItems, isFuelMode, isSubmitting, saveDraft, isEditMode]);
 
     const canToggleFuelModeInForm = canToggleFuelMode && !isEditMode;
 
@@ -1258,6 +1283,8 @@ export const ReceiveStockForm = ({
             || editingPurchaseSupplierName
             || 'No Supplier';
         const paymentStatus: 'Paid' | 'Unpaid' = data.paymentStatus === 'Unpaid' ? 'Unpaid' : 'Paid';
+        const purchaseTimestampBase = buildPurchaseTimestampBase(data.purchaseDate);
+        const purchaseDateIso = purchaseTimestampBase.toISOString();
         const referenceNumber = data.referenceNumber?.trim() || undefined;
 
         try {
@@ -1289,7 +1316,7 @@ export const ReceiveStockForm = ({
             const amountDue = paymentStatus === 'Paid' ? 0 : totalWithVat;
             const nowIso = new Date().toISOString();
             const poId = editingPurchase?.purchaseOrderId || editingPurchase?.groupId || uuidv4();
-            const baseReceivedAt = Date.now();
+            const baseReceivedAt = purchaseTimestampBase.getTime();
             const deletedLineWarnings: string[] = [];
             let purchaseOrderSyncOperation: 'create' | 'update' = isEditMode ? 'update' : 'create';
             
@@ -1451,8 +1478,9 @@ export const ReceiveStockForm = ({
                             amountDue: paymentStatus === 'Paid' ? 0 : itemGross,
                             batchNumber: item.batchNumber,
                             expiryDate: item.expiryDate ? format(item.expiryDate, 'yyyy-MM-dd') : undefined,
-                            receivedDate: existingRecord.receivedDate || receivedDate,
+                            receivedDate: receivedDate,
                             purchaseOrderId: poId,
+                            createdAt: existingRecord.createdAt || currentOrder?.createdAt || nowIso,
                             updatedAt: nowIso,
                             allowQuantityDecrease: nextQuantityRemaining < currentQuantityRemaining ? true : undefined,
                             _dirty: true,
@@ -1508,6 +1536,8 @@ export const ReceiveStockForm = ({
                         expiryDate: item.expiryDate ? format(item.expiryDate, 'yyyy-MM-dd') : undefined,
                         receivedDate: receivedDate,
                         purchaseOrderId: poId,  // Link to the PO
+                        createdAt: currentOrder?.createdAt || nowIso,
+                        updatedAt: nowIso,
                         _dirty: true,
                         _operation: 'create'
                     };
@@ -1589,6 +1619,7 @@ export const ReceiveStockForm = ({
                     orderNumber: currentOrder?.orderNumber || poId,
                     supplierId: selectedSupplierId,
                     supplierName: selectedSupplierName,
+                    receivedDate: purchaseDateIso,
                     status: 'Received',
                     totalItems: validItems.length,
                     totalCost: totalCost,
@@ -1644,6 +1675,7 @@ export const ReceiveStockForm = ({
                     referenceNumber: referenceNumber,
                     vatAmount: vatAmount,
                     paymentStatus: paymentStatus,
+                    purchaseDate: purchaseDateIso,
                     purchaseOrderId: poId,
                     deletedLineWarnings,
                 },
@@ -1707,6 +1739,46 @@ export const ReceiveStockForm = ({
                         )}
                     />
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <FormField
+                            control={control}
+                            name="purchaseDate"
+                            render={({ field }) => {
+                                const selectedDate = parseOptionalDate(field.value);
+
+                                return (
+                                    <FormItem className="flex flex-col">
+                                        <FormLabel>Purchase Date</FormLabel>
+                                        <Popover>
+                                            <PopoverTrigger asChild>
+                                                <FormControl>
+                                                    <Button
+                                                        type="button"
+                                                        variant="outline"
+                                                        disabled={isSubmitting}
+                                                        className={cn(
+                                                            'w-full justify-start text-left font-normal',
+                                                            !selectedDate && 'text-muted-foreground'
+                                                        )}
+                                                    >
+                                                        <CalendarIcon className="mr-2 h-4 w-4" />
+                                                        {selectedDate ? format(selectedDate, 'PPP') : 'Select purchase date'}
+                                                    </Button>
+                                                </FormControl>
+                                            </PopoverTrigger>
+                                            <PopoverContent className="w-auto p-0" align="start">
+                                                <Calendar
+                                                    mode="single"
+                                                    selected={selectedDate}
+                                                    onSelect={(date) => field.onChange(date)}
+                                                    initialFocus
+                                                />
+                                            </PopoverContent>
+                                        </Popover>
+                                        <FormMessage />
+                                    </FormItem>
+                                );
+                            }}
+                        />
                         <FormField
                             control={control}
                             name="referenceNumber"

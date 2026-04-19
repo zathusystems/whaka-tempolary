@@ -127,18 +127,23 @@ export const persistBranchesToStorage = (
 
 export async function syncBusinessBranchesFromServer(
   businessId: string,
-  preferredBranchId?: string | null
+  preferredBranchId?: string | null,
+  options: { timeoutMs?: number } = {}
 ): Promise<{
   businessResponse: any;
   rawBranches: any[];
   branches: StoredBranch[];
   activeBranchId: string | null;
 }> {
-  const businessResponse = await authFetch.fetch<any>(`/business/businesses/${businessId}/`);
+  const businessResponse = await authFetch.fetch<any>(`/business/businesses/${businessId}/`, {
+    timeoutMs: options.timeoutMs,
+  });
   let rawBranches = extractBranchesFromBusinessResponse(businessResponse);
 
   if (rawBranches.length === 0) {
-    const branchesResponse = await authFetch.fetch<any>(`/business/businesses/${businessId}/branches/`);
+    const branchesResponse = await authFetch.fetch<any>(`/business/businesses/${businessId}/branches/`, {
+      timeoutMs: options.timeoutMs,
+    });
     rawBranches = extractBranchList(branchesResponse);
   }
 

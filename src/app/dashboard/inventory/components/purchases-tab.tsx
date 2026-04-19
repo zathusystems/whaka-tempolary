@@ -51,6 +51,8 @@ interface PurchaseGroup {
     receivedDate: string;
     displayDate: string;
     dateSortValue: number;
+    createdDateDisplay: string;
+    createdDateSortValue: number;
     supplierId: string;
     supplierName: string;
     paymentStatus: string;
@@ -284,6 +286,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                 (record as any).createdAt,
                 (record as any).updatedAt
             );
+            const recordCreatedDate = formatPurchaseDate((record as any).createdAt);
+            const recordCreatedSortDate = purchaseDateSortValue((record as any).createdAt);
             
             if (!groups[key]) {
                 groups[key] = {
@@ -291,6 +295,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                     receivedDate: record.receivedDate,
                     displayDate: recordDisplayDate,
                     dateSortValue: recordSortDate,
+                    createdDateDisplay: recordCreatedDate,
+                    createdDateSortValue: recordCreatedSortDate,
                     supplierId: record.supplierId,
                     supplierName: record.supplierName,
                     paymentStatus: record.paymentStatus,
@@ -305,6 +311,14 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                 groups[key].receivedDate = record.receivedDate;
                 groups[key].displayDate = recordDisplayDate;
                 groups[key].dateSortValue = recordSortDate;
+            }
+
+            if (
+                recordCreatedSortDate > 0 &&
+                (groups[key].createdDateSortValue === 0 || recordCreatedSortDate < groups[key].createdDateSortValue)
+            ) {
+                groups[key].createdDateDisplay = recordCreatedDate;
+                groups[key].createdDateSortValue = recordCreatedSortDate;
             }
 
             groups[key].items.push(normalizedRecord);
@@ -338,6 +352,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                 purchase.supplierName,
                 purchase.paymentStatus,
                 purchase.displayDate,
+                purchase.createdDateDisplay,
                 purchase.groupId,
             ].some((value) => String(value || '').toLowerCase().includes(normalizedSearchTerm));
 
@@ -607,7 +622,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                     <div className="flex items-center justify-between">
                         <div className="flex-1">
                             <CardTitle className="text-base">{purchase.supplierName}</CardTitle>
-                            <CardDescription>{purchase.displayDate}</CardDescription>
+                            <CardDescription>Purchase: {purchase.displayDate}</CardDescription>
+                            <p className="mt-1 text-xs text-muted-foreground">Created: {purchase.createdDateDisplay}</p>
                         </div>
                         <div className="text-right">
                             <p className="font-semibold text-lg">{currencySymbol} {resolvedTotalWithVat.toFixed(2)}</p>
@@ -659,7 +675,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                         <Table>
                             <TableHeader>
                                 <TableRow>
-                                    <TableHead>Date</TableHead>
+                                    <TableHead>Purchase Date</TableHead>
+                                    <TableHead>Created Date</TableHead>
                                     <TableHead>Supplier</TableHead>
                                     <TableHead className="text-right">Items</TableHead>
                                     <TableHead className="text-right">Total Qty</TableHead>
@@ -682,6 +699,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                                     return (
                                         <TableRow key={purchase.groupId} className="cursor-pointer hover:bg-muted/50">
                                             <TableCell>{purchase.displayDate}</TableCell>
+                                            <TableCell>{purchase.createdDateDisplay}</TableCell>
                                             <TableCell className="font-medium">{purchase.supplierName}</TableCell>
                                             <TableCell className="text-right">{purchase.items.length}</TableCell>
                                             <TableCell className="text-right">{totalQuantity}</TableCell>
@@ -715,7 +733,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                                     );
                                 }) : (
                                     <TableRow>
-                                        <TableCell colSpan={10} className="h-24 text-center text-muted-foreground">
+                                        <TableCell colSpan={11} className="h-24 text-center text-muted-foreground">
                                             {normalizedSearchTerm ? `No purchases match "${searchTerm.trim()}".` : 'No purchases have been recorded.'}
                                         </TableCell>
                                     </TableRow>
@@ -791,7 +809,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                                 return (
                             <>
                             {/* Purchase Summary */}
-                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6 p-4 bg-muted rounded-lg">
+                            <div className="grid grid-cols-2 gap-4 mb-6 rounded-lg bg-muted p-4 sm:grid-cols-3 xl:grid-cols-5">
                                 <div>
                                     <p className="text-xs text-muted-foreground">Supplier</p>
                                     <p className="font-semibold">{selectedPurchase.supplierName}</p>
@@ -801,8 +819,12 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                                     <p className="font-semibold break-all">{selectedPurchase.groupId}</p>
                                 </div>
                                 <div>
-                                    <p className="text-xs text-muted-foreground">Date Received</p>
+                                    <p className="text-xs text-muted-foreground">Purchase Date</p>
                                     <p className="font-semibold">{selectedPurchase.displayDate}</p>
+                                </div>
+                                <div>
+                                    <p className="text-xs text-muted-foreground">Created Date</p>
+                                    <p className="font-semibold">{selectedPurchase.createdDateDisplay}</p>
                                 </div>
                                 <div>
                                     <p className="text-xs text-muted-foreground">Payment Status</p>

@@ -7,10 +7,17 @@ import { db, type Order, type Expense, type InventoryItem } from '@/lib/db';
 import type { DateRange } from 'react-day-picker';
 import { differenceInCalendarDays, endOfDay, startOfDay } from 'date-fns';
 import { useActiveBranch } from '@/hooks/use-active-branch';
+import {
+  resolveInventoryProductReportingCategory,
+  summarizeProductCategoryRows,
+  toProductCategorySummaryRows,
+  type ProductCategorySummaryRow,
+  type ProductReportingCategory,
+} from '@/lib/session-product-report';
 
 export interface ReportData {
+  totalSales: number;
   totalRevenue: number;
-  totalSubtotal: number;
   totalTax: number;
   totalCogs: number;
   grossProfit: number;
@@ -18,27 +25,36 @@ export interface ReportData {
   netProfit: number;
   profitMargin: number;
   totalTransactions: number;
-  averageOrderValue: number;
-  averageOrderValueWithTax: number;
-  topProducts: { name: string; quantity: number; revenue: number; revenueWithTax: number }[];
+  averageSaleValue: number;
+  averageRevenuePerOrder: number;
+  topProducts: {
+    name: string;
+    quantity: number;
+    revenue: number;
+    totalSales: number;
+    productType: ProductReportingCategory;
+  }[];
   fastMovingProducts: {
     name: string;
     quantity: number;
-    revenueWithTax: number;
+    totalSales: number;
     averagePerDay: number;
     currentStock: number;
     unitType: string;
+    productType: ProductReportingCategory;
   }[];
   slowMovingProducts: {
     name: string;
     quantity: number;
-    revenueWithTax: number;
+    totalSales: number;
     averagePerDay: number;
     currentStock: number;
     unitType: string;
+    productType: ProductReportingCategory;
   }[];
-  salesByCategory: { name: string; revenue: number; revenueWithTax: number }[];
-  salesByStaff: { name: string; sales: number; salesWithTax: number; transactions: number }[];
+  salesByProductType: ProductCategorySummaryRow[];
+  salesByCategory: { name: string; revenue: number; totalSales: number }[];
+  salesByStaff: { name: string; revenue: number; totalSales: number; transactions: number }[];
 }
 
 export const useReports = (dateRange?: DateRange) => {
@@ -123,8 +139,8 @@ export const useReports = (dateRange?: DateRange) => {
   };
 
   const [data, setData] = useState<ReportData>({
+    totalSales: 0,
     totalRevenue: 0,
-    totalSubtotal: 0,
     totalTax: 0,
     totalCogs: 0,
     grossProfit: 0,
@@ -132,11 +148,12 @@ export const useReports = (dateRange?: DateRange) => {
     netProfit: 0,
     profitMargin: 0,
     totalTransactions: 0,
-    averageOrderValue: 0,
-    averageOrderValueWithTax: 0,
+    averageSaleValue: 0,
+    averageRevenuePerOrder: 0,
     topProducts: [],
     fastMovingProducts: [],
     slowMovingProducts: [],
+    salesByProductType: [],
     salesByCategory: [],
     salesByStaff: [],
   });
@@ -149,8 +166,8 @@ export const useReports = (dateRange?: DateRange) => {
       setLoading(false);
       setError(null);
       setData({
+        totalSales: 0,
         totalRevenue: 0,
-        totalSubtotal: 0,
         totalTax: 0,
         totalCogs: 0,
         grossProfit: 0,
@@ -158,11 +175,12 @@ export const useReports = (dateRange?: DateRange) => {
         netProfit: 0,
         profitMargin: 0,
         totalTransactions: 0,
-        averageOrderValue: 0,
-        averageOrderValueWithTax: 0,
+        averageSaleValue: 0,
+        averageRevenuePerOrder: 0,
         topProducts: [],
         fastMovingProducts: [],
         slowMovingProducts: [],
+        salesByProductType: [],
         salesByCategory: [],
         salesByStaff: [],
       });
@@ -304,34 +322,35 @@ export const useReports = (dateRange?: DateRange) => {
           inventory.map((item) => [normalizeName(item.name), item])
         );
         
-        // FINANCIAL CALCULATIONS - INCLUDING TAX BREAKDOWN
-        const totalSubtotal = normalizedOrders.reduce((acc, order) => acc + order.subtotal, 0);
+        // FINANCIAL CALCULATIONS
+        const totalRevenue = normalizedOrders.reduce((acc, order) => acc + order.subtotal, 0);
         const totalTax = normalizedOrders.reduce((acc, order) => acc + order.tax, 0);
-        const totalRevenue = normalizedOrders.reduce((acc, order) => acc + order.total, 0);
+        const totalSales = normalizedOrders.reduce((acc, order) => acc + order.total, 0);
         const totalCogs = normalizedOrders.reduce((acc, order) => acc + order.cogs, 0);
         const totalExpenses = normalizedExpenses.reduce((acc, expense) => acc + toFiniteNumber(expense.amount, 0), 0);
-        
-        // Gross Profit = Revenue - COGS (before tax consideration)
-        const grossProfit = totalSubtotal - totalCogs;
-        
-        // Net Profit = Gross Profit - Operating Expenses
+
+        // Gross Profit = Revenue - COGS, excluding tax because tax is not business revenue.
+        const grossProfit = totalRevenue - totalCogs;
         const netProfit = grossProfit - totalExpenses;
-        
-        // Profit Margin based on subtotal (before tax)
-        const profitMargin = totalSubtotal > 0 ? (netProfit / totalSubtotal) * 100 : 0;
 
-        // SALES KPI CALCULATIONS - RESPECTING TAX
+        // Profit Margin based on revenue (before tax)
+        const profitMargin = totalRevenue > 0 ? (netProfit / totalRevenue) * 100 : 0;
+
+        // SALES KPI CALCULATIONS
         const totalTransactions = normalizedOrders.length;
-        // Average Order Value based on subtotal (pre-tax)
-        const averageOrderValue = totalTransactions > 0 ? totalSubtotal / totalTransactions : 0;
-        // Average Order Value including tax
-        const averageOrderValueWithTax = totalTransactions > 0 ? totalRevenue / totalTransactions : 0;
+        const averageRevenuePerOrder = totalTransactions > 0 ? totalRevenue / totalTransactions : 0;
+        const averageSaleValue = totalTransactions > 0 ? totalSales / totalTransactions : 0;
 
-        // PRODUCT & CATEGORY CALCULATIONS - RESPECTING TAX
-        // Note: Product prices already include VAT, so:
-        // - revenueWithTax = actual price paid (includes VAT)
-        // - revenue = price without VAT (calculated by removing tax)
-        const productMap = new Map<string, { name: string; category: string; quantity: number; revenue: number; revenueWithTax: number }>();
+        // PRODUCT & CATEGORY CALCULATIONS
+        const productMap = new Map<string, {
+          id: string;
+          name: string;
+          category: string;
+          productType: ProductReportingCategory;
+          quantity: number;
+          revenue: number;
+          totalSales: number;
+        }>();
         normalizedOrders.forEach(order => {
             const totalItemQuantity = order.items.reduce((sum, i) => sum + Math.max(0, toFiniteNumber(i.quantity, 0)), 0);
             if (totalItemQuantity <= 0) return;
@@ -347,20 +366,24 @@ export const useReports = (dateRange?: DateRange) => {
                 if (quantity <= 0) return;
 
                 const productKey = String(product.id);
-                const existing = productMap.get(productKey) || { name: product.name, category: product.category, quantity: 0, revenue: 0, revenueWithTax: 0 };
+                const existing = productMap.get(productKey) || {
+                  id: productKey,
+                  name: product.name,
+                  category: product.category,
+                  productType: resolveInventoryProductReportingCategory(product),
+                  quantity: 0,
+                  revenue: 0,
+                  totalSales: 0,
+                };
                 existing.quantity += quantity;
-                
-                // Calculate item revenue WITH tax (actual price paid - includes VAT)
-                const itemRevenueWithTax = getItemRevenueWithTax(item, quantity, order.total, totalItemQuantity);
-                existing.revenueWithTax += itemRevenueWithTax;
-                
-                // Calculate item revenue WITHOUT tax (remove VAT from price)
-                // Revenue before tax = Revenue with tax / (1 + tax rate)
+
+                const itemTotalSales = getItemRevenueWithTax(item, quantity, order.total, totalItemQuantity);
+                existing.totalSales += itemTotalSales;
                 const taxRate = order.subtotal > 0 ? order.tax / order.subtotal : 0;
                 const divisor = 1 + taxRate;
-                const itemRevenueBeforeTax = divisor > 0 ? itemRevenueWithTax / divisor : itemRevenueWithTax;
+                const itemRevenueBeforeTax = divisor > 0 ? itemTotalSales / divisor : itemTotalSales;
                 existing.revenue += itemRevenueBeforeTax;
-                
+
                 productMap.set(productKey, existing);
             });
         });
@@ -372,16 +395,29 @@ export const useReports = (dateRange?: DateRange) => {
                 name: p.name,
                 quantity: p.quantity,
                 revenue: p.revenue,
-                revenueWithTax: p.revenueWithTax
+                totalSales: p.totalSales,
+                productType: p.productType,
             }));
+
+        const salesByProductType = toProductCategorySummaryRows(
+          summarizeProductCategoryRows(
+            Array.from(productMap.values()).map((product) => ({
+              category: product.productType,
+              key: product.id,
+              quantity: product.quantity,
+              amount: product.totalSales,
+            }))
+          )
+        );
 
         // Movement analytics for sellable products (fast-moving / slow-moving)
         const movementMap = new Map<string, {
           name: string;
           quantity: number;
-          revenueWithTax: number;
+          totalSales: number;
           currentStock: number;
           unitType: string;
+          productType: ProductReportingCategory;
         }>();
 
         inventory
@@ -391,9 +427,10 @@ export const useReports = (dateRange?: DateRange) => {
             movementMap.set(key, {
               name: item.name,
               quantity: 0,
-              revenueWithTax: 0,
+              totalSales: 0,
               currentStock: toFiniteNumber(item.stockUnits, 0),
               unitType: String(item.unitType || 'unit'),
+              productType: resolveInventoryProductReportingCategory(item),
             });
           });
 
@@ -415,13 +452,14 @@ export const useReports = (dateRange?: DateRange) => {
             const existing = movementMap.get(key) || {
               name: product.name,
               quantity: 0,
-              revenueWithTax: 0,
+              totalSales: 0,
               currentStock: toFiniteNumber(product.stockUnits, 0),
               unitType: String(product.unitType || 'unit'),
+              productType: resolveInventoryProductReportingCategory(product),
             };
 
             existing.quantity += quantity;
-            existing.revenueWithTax += getItemRevenueWithTax(item, quantity, order.total, totalItemQuantity);
+            existing.totalSales += getItemRevenueWithTax(item, quantity, order.total, totalItemQuantity);
             movementMap.set(key, existing);
           });
         });
@@ -433,19 +471,19 @@ export const useReports = (dateRange?: DateRange) => {
 
         const fastMovingProducts = movementRows
           .filter((row) => row.quantity > 0)
-          .sort((a, b) => (b.quantity - a.quantity) || (b.revenueWithTax - a.revenueWithTax))
+          .sort((a, b) => (b.quantity - a.quantity) || (b.totalSales - a.totalSales))
           .slice(0, 10);
 
         const slowMovingProducts = movementRows
-          .sort((a, b) => (a.quantity - b.quantity) || (a.revenueWithTax - b.revenueWithTax))
+          .sort((a, b) => (a.quantity - b.quantity) || (a.totalSales - b.totalSales))
           .slice(0, 10);
-        
-        const categoryMap = new Map<string, { name: string; revenue: number; revenueWithTax: number }>();
+
+        const categoryMap = new Map<string, { name: string; revenue: number; totalSales: number }>();
         for (const product of productMap.values()) {
             const category = product.category || 'Uncategorized';
-            const existing = categoryMap.get(category) || { name: category, revenue: 0, revenueWithTax: 0 };
+            const existing = categoryMap.get(category) || { name: category, revenue: 0, totalSales: 0 };
             existing.revenue += product.revenue;
-            existing.revenueWithTax += product.revenueWithTax;
+            existing.totalSales += product.totalSales;
             categoryMap.set(category, existing);
         }
         const salesByCategory = Array.from(categoryMap.values())
@@ -453,11 +491,10 @@ export const useReports = (dateRange?: DateRange) => {
             .map(c => ({
                 name: c.name,
                 revenue: c.revenue,
-                revenueWithTax: c.revenueWithTax
+                totalSales: c.totalSales
             }));
 
-        // STAFF CALCULATIONS - RESPECTING TAX
-        const staffMap = new Map<string, { name: string; sales: number; salesWithTax: number; transactions: number }>();
+        const staffMap = new Map<string, { name: string; revenue: number; totalSales: number; transactions: number }>();
         await Promise.all(normalizedOrders.map(async order => {
             const session = order.sessionId ? await db.sessions.get(order.sessionId) : null;
             if (!session) return;
@@ -465,25 +502,25 @@ export const useReports = (dateRange?: DateRange) => {
             const staffMember = staff.find(s => s.id === session.userId);
             const staffName = staffMember?.name || session.userName || 'Unknown';
 
-            const existing = staffMap.get(session.userId) || { name: staffName, sales: 0, salesWithTax: 0, transactions: 0 };
-            existing.sales += order.subtotal;  // Pre-tax sales
-            existing.salesWithTax += order.total;  // Total with tax
+            const existing = staffMap.get(session.userId) || { name: staffName, revenue: 0, totalSales: 0, transactions: 0 };
+            existing.revenue += order.subtotal;
+            existing.totalSales += order.total;
             existing.transactions += 1;
             staffMap.set(session.userId, existing);
         }));
 
         const salesByStaff = Array.from(staffMap.values())
-            .sort((a,b) => b.salesWithTax - a.salesWithTax)
+            .sort((a,b) => b.totalSales - a.totalSales)
             .map(s => ({
                 name: s.name,
-                sales: s.sales,
-                salesWithTax: s.salesWithTax,
+                revenue: s.revenue,
+                totalSales: s.totalSales,
                 transactions: s.transactions
             }));
 
         setData({
+            totalSales: toFiniteNumber(totalSales, 0),
             totalRevenue: toFiniteNumber(totalRevenue, 0),
-            totalSubtotal: toFiniteNumber(totalSubtotal, 0),
             totalTax: toFiniteNumber(totalTax, 0),
             totalCogs: toFiniteNumber(totalCogs, 0),
             grossProfit: toFiniteNumber(grossProfit, 0),
@@ -491,11 +528,12 @@ export const useReports = (dateRange?: DateRange) => {
             netProfit: toFiniteNumber(netProfit, 0),
             profitMargin: toFiniteNumber(profitMargin, 0),
             totalTransactions,
-            averageOrderValue: toFiniteNumber(averageOrderValue, 0),
-            averageOrderValueWithTax: toFiniteNumber(averageOrderValueWithTax, 0),
+            averageSaleValue: toFiniteNumber(averageSaleValue, 0),
+            averageRevenuePerOrder: toFiniteNumber(averageRevenuePerOrder, 0),
             topProducts,
             fastMovingProducts,
             slowMovingProducts,
+            salesByProductType,
             salesByCategory,
             salesByStaff,
         });

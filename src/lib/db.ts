@@ -141,6 +141,7 @@ export interface InventoryItem {
     recipe?: RecipeIngredient[];
     isVariablePrice?: boolean; // For items sold by weight/volume
     isFuel?: boolean; // Fuel items for fuel attendants
+    isOil?: boolean; // Oil/lubricant items for separate sales reporting
     isProduced?: boolean; // For restaurant/bar: true if made in-house, false if purchased
     onMenu?: boolean;
     image?: string; // Base64 encoded image or image URL
@@ -362,7 +363,7 @@ export interface Session {
     expectedCash: number; // openingFloat + cashSales
     actualCash?: number;
     difference?: number; // actualCash - expectedCash
-    totalSales: number; // Sum of all order subtotals
+    totalSales: number; // Sum of all order subtotals (tax exclusive / net sales)
     totalCashSales: number;
     totalCardSales: number;
     totalMobileMoneySales: number;
@@ -565,6 +566,7 @@ export interface PurchaseOrder {
     order_number?: string;
     supplierId?: string;
     supplierName?: string;
+    receivedDate?: string; // ISO string for the selected purchase date
     referenceNumber?: string; // Supplier reference / invoice number
     vatAmount?: number; // VAT amount for the purchase
     status: 'Draft' | 'Pending' | 'Approved' | 'Received' | 'Completed' | 'Cancelled';

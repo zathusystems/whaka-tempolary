@@ -1,4 +1,5 @@
 import { db } from './db';
+import { syncSessionSnapshotToDesktopStore } from './desktop-session-store';
 
 export interface AuthTokens {
   access: string;
@@ -40,12 +41,16 @@ const AUTH_TOKENS_KEY = 'handypos-auth-tokens';
 const MAX_RETRIES = 3;
 const SYNC_INTERVAL = 30000; // 30 seconds
 const TRANSIENT_NETWORK_RETRY_DELAY_MS = 800;
+const LOGIN_REQUEST_TIMEOUT_MS = 15000;
+const TOKEN_REFRESH_REQUEST_TIMEOUT_MS = 10000;
 
 class AuthenticatedFetch {
   private tokens: AuthTokens | null = null;
   private syncQueue: SyncQueueItem[] = [];
   private isOnline: boolean = typeof navigator !== 'undefined' ? navigator.onLine : true;
   private syncIntervalId: NodeJS.Timeout | null = null;
+  private refreshPromise: Promise<boolean> | null = null;
+  private authStateVersion = 0;
 
   constructor() {
     // Only initialize on client side
@@ -78,8 +83,10 @@ class AuthenticatedFetch {
    */
   private saveTokens(tokens: AuthTokens): void {
     if (typeof window === 'undefined') return;
+    this.authStateVersion += 1;
     this.tokens = tokens;
     localStorage.setItem(AUTH_TOKENS_KEY, JSON.stringify(tokens));
+    void syncSessionSnapshotToDesktopStore();
     console.log('[DEBUG AUTH] Tokens saved to localStorage:', { access: tokens.access?.substring(0, 20) + '...', refresh: tokens.refresh?.substring(0, 20) + '...' });
   }
 
@@ -88,8 +95,10 @@ class AuthenticatedFetch {
    */
   private clearTokens(): void {
     if (typeof window === 'undefined') return;
+    this.authStateVersion += 1;
     this.tokens = null;
     localStorage.removeItem(AUTH_TOKENS_KEY);
+    void syncSessionSnapshotToDesktopStore();
   }
 
   /**
@@ -146,6 +155,52 @@ class AuthenticatedFetch {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  private async fetchWithTimeout(
+    input: string,
+    init: RequestInit,
+    timeoutMs?: number
+  ): Promise<Response> {
+    if (!timeoutMs || timeoutMs <= 0) {
+      return fetch(input, init);
+    }
+
+    const controller = new AbortController();
+    const existingSignal = init.signal;
+    let timedOut = false;
+    let abortListener: (() => void) | null = null;
+
+    if (existingSignal) {
+      if (existingSignal.aborted) {
+        controller.abort();
+      } else {
+        abortListener = () => controller.abort();
+        existingSignal.addEventListener('abort', abortListener, { once: true });
+      }
+    }
+
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      return await fetch(input, {
+        ...init,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (timedOut) {
+        throw new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+      if (existingSignal && abortListener) {
+        existingSignal.removeEventListener('abort', abortListener);
+      }
+    }
+  }
+
   private shouldRetryTransientNetworkError(
     error: unknown,
     attempt: number,
@@ -168,6 +223,7 @@ class AuthenticatedFetch {
     options: {
       maxAttempts?: number;
       label?: string;
+      timeoutMs?: number;
     } = {}
   ): Promise<Response> {
     const maxAttempts = Math.max(1, options.maxAttempts ?? 1);
@@ -176,7 +232,7 @@ class AuthenticatedFetch {
 
     while (true) {
       try {
-        return await fetch(input, init);
+        return await this.fetchWithTimeout(input, init, options.timeoutMs);
       } catch (error) {
         if (!this.shouldRetryTransientNetworkError(error, attempt, maxAttempts)) {
           throw error;
@@ -204,14 +260,18 @@ class AuthenticatedFetch {
       requestHost = requestUrl;
     }
 
+    const originalMessage = error instanceof Error ? error.message : String(error ?? '');
+    const isTimeout = originalMessage.trim().toLowerCase().includes('timed out');
+
     const userMessage = options.queued
       ? options.offline
         ? 'Offline - request queued for retry'
         : `Could not reach ${requestHost} - request queued for retry`
       : options.offline
         ? 'No internet connection.'
+        : isTimeout
+          ? `Timed out while contacting ${requestHost}. Power or internet may be back, but the server connection is not ready yet. Please try again.`
         : `Could not reach ${requestHost}. Your internet may still be connected, but the app could not contact the server. Check hotspot/VPN/DNS/server availability and try again.`;
-    const originalMessage = error instanceof Error ? error.message : String(error ?? '');
 
     const wrapped = new Error(userMessage);
     (wrapped as any).isNetworkError = true;
@@ -392,33 +452,75 @@ class AuthenticatedFetch {
    * Refresh access token using refresh token
    */
   private async refreshAccessToken(): Promise<boolean> {
-    if (!this.tokens?.refresh) {
+    const currentRefreshToken = this.tokens?.refresh?.trim();
+    if (!currentRefreshToken) {
       this.clearTokens();
       return false;
     }
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/auth/token/refresh/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh: this.tokens.refresh }),
-      });
-
-      if (!response.ok) {
-        this.clearTokens();
-        return false;
-      }
-
-      const data = await response.json();
-      this.saveTokens({
-        access: data.access,
-        refresh: this.tokens.refresh,
-      });
-      return true;
-    } catch (error) {
-      console.error('Token refresh failed:', error);
-      return false;
+    if (this.refreshPromise) {
+      return this.refreshPromise;
     }
+
+    const refreshStateVersion = this.authStateVersion;
+
+    this.refreshPromise = (async () => {
+      try {
+        const response = await this.fetchWithTimeout(`${API_BASE_URL}/auth/token/refresh/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh: currentRefreshToken }),
+        }, TOKEN_REFRESH_REQUEST_TIMEOUT_MS);
+
+        if (!response.ok) {
+          if (
+            this.authStateVersion === refreshStateVersion &&
+            this.tokens?.refresh === currentRefreshToken
+          ) {
+            this.clearTokens();
+          }
+          return false;
+        }
+
+        const data = await response.json();
+        if (!data?.access) {
+          if (
+            this.authStateVersion === refreshStateVersion &&
+            this.tokens?.refresh === currentRefreshToken
+          ) {
+            this.clearTokens();
+          }
+          return false;
+        }
+
+        // If auth state changed while the refresh was in flight (for example,
+        // the user logged out or signed in again), do not overwrite newer tokens.
+        if (this.authStateVersion !== refreshStateVersion) {
+          return Boolean(this.tokens?.access);
+        }
+
+        // The backend rotates refresh tokens, so we must persist the newest one
+        // whenever it is returned. Keeping the old token will trigger a forced
+        // logout on the next refresh attempt after the old token is blacklisted.
+        const nextRefreshToken =
+          typeof data?.refresh === 'string' && data.refresh.trim().length > 0
+            ? data.refresh
+            : this.tokens?.refresh || currentRefreshToken;
+
+        this.saveTokens({
+          access: data.access,
+          refresh: nextRefreshToken,
+        });
+        return true;
+      } catch (error) {
+        console.error('Token refresh failed:', error);
+        return false;
+      } finally {
+        this.refreshPromise = null;
+      }
+    })();
+
+    return this.refreshPromise;
   }
 
   /**
@@ -553,9 +655,9 @@ class AuthenticatedFetch {
    */
   async fetch<T = any>(
     url: string,
-    options: RequestInit & { offline?: boolean; meta?: { domain?: QueueDomain; entityType?: string; entityId?: string; metadata?: Record<string, any> } } = {}
+    options: RequestInit & { offline?: boolean; timeoutMs?: number; meta?: { domain?: QueueDomain; entityType?: string; entityId?: string; metadata?: Record<string, any> } } = {}
   ): Promise<T> {
-    const { offline = false, meta, ...fetchOptions } = options;
+    const { offline = false, timeoutMs, meta, ...fetchOptions } = options;
     const method = (fetchOptions.method || 'GET') as 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
     const fullUrl = url.startsWith('http') ? url : `${API_BASE_URL}${url}`;
 
@@ -570,6 +672,7 @@ class AuthenticatedFetch {
       const response = await this.executeFetchWithRetry(fullUrl, fetchOptions, {
         maxAttempts: method === 'GET' ? 2 : 1,
         label: `${method} ${fullUrl}`,
+        timeoutMs,
       });
 
       // Handle token expiration (but not for login/register endpoints)
@@ -680,6 +783,7 @@ class AuthenticatedFetch {
       }, {
         maxAttempts: 2,
         label: `LOGIN ${fullUrl}`,
+        timeoutMs: LOGIN_REQUEST_TIMEOUT_MS,
       });
 
       console.log('[DEBUG LOGIN] Response status:', response.status);

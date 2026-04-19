@@ -168,6 +168,8 @@ type SupplierPurchaseGroup = {
     supplierName: string;
     displayDate: string;
     dateSortValue: number;
+    createdDateDisplay: string;
+    createdDateSortValue: number;
     paymentStatus: string;
     totalCost: number;
     totalQuantity: number;
@@ -460,6 +462,8 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
                         (record as any).updatedAt
                     ),
                     dateSortValue: sortValue,
+                    createdDateDisplay: formatDisplayDate((record as any).createdAt),
+                    createdDateSortValue: dateSortValue((record as any).createdAt),
                     paymentStatus: record.paymentStatus,
                     totalCost: 0,
                     totalQuantity: 0,
@@ -499,6 +503,15 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
                     (record as any).createdAt,
                     (record as any).updatedAt
                 );
+            }
+
+            const createdSortValue = dateSortValue((record as any).createdAt);
+            if (
+                createdSortValue > 0 &&
+                (groups[groupId].createdDateSortValue === 0 || createdSortValue < groups[groupId].createdDateSortValue)
+            ) {
+                groups[groupId].createdDateSortValue = createdSortValue;
+                groups[groupId].createdDateDisplay = formatDisplayDate((record as any).createdAt);
             }
         });
 
@@ -780,7 +793,8 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
                                             <Table>
                                                 <TableHeader>
                                                     <TableRow>
-                                                        <TableHead>Date</TableHead>
+                                                        <TableHead>Purchase Date</TableHead>
+                                                        <TableHead>Created Date</TableHead>
                                                         <TableHead>Reference</TableHead>
                                                         <TableHead>Payment</TableHead>
                                                         <TableHead className="text-right">Subtotal (Excl VAT)</TableHead>
@@ -801,6 +815,7 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
                                                         return (
                                                             <TableRow key={group.groupId}>
                                                                 <TableCell>{group.displayDate}</TableCell>
+                                                                <TableCell>{group.createdDateDisplay}</TableCell>
                                                                 <TableCell>{group.referenceNumber || 'N/A'}</TableCell>
                                                                 <TableCell>
                                                                     <Badge
@@ -963,7 +978,15 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
 
                             return (
                                 <div className="flex-1 overflow-y-auto -mx-6 px-6">
-                                    <div className="grid grid-cols-2 sm:grid-cols-6 gap-4 mb-6 p-4 bg-muted rounded-lg">
+                                    <div className="grid grid-cols-2 gap-4 mb-6 rounded-lg bg-muted p-4 sm:grid-cols-4">
+                                        <div>
+                                            <p className="text-xs text-muted-foreground">Purchase Date</p>
+                                            <p className="font-semibold">{selectedPurchase.displayDate}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-muted-foreground">Created Date</p>
+                                            <p className="font-semibold">{selectedPurchase.createdDateDisplay}</p>
+                                        </div>
                                         <div>
                                             <p className="text-xs text-muted-foreground">Reference</p>
                                             <p className="font-semibold">{selectedPurchase.referenceNumber || 'N/A'}</p>

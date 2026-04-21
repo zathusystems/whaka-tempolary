@@ -340,6 +340,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
       try {
         await hydrateSessionSnapshotFromDesktopStore();
 
+        const authFetchClient = require('@/lib/auth-fetch').authFetch as typeof import('@/lib/auth-fetch').authFetch;
+        authFetchClient.hydrateTokensFromStorage();
+
         const tokens = readValidAuthTokens();
         const hasValidTokens = Boolean(tokens);
         const fallbackUserFromToken = tokens ? buildUserFromToken(tokens.access) : null;
@@ -385,7 +388,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
         if (hasValidTokens && !restoredUser) {
           try {
-            const authFetch = require('@/lib/auth-fetch').authFetch as typeof import('@/lib/auth-fetch').authFetch;
+            const authFetch = authFetchClient;
             let staffProfile: any = null;
             let profile: any = null;
             let staffProfileError: unknown = null;

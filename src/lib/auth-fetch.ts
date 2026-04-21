@@ -38,6 +38,7 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://pos.express-tra
 const SYNC_QUEUE_KEY = 'handypos-sync-queue';
 const SYNC_QUEUE_MIGRATION_KEY = 'handypos-sync-queue-migrated-v1';
 const AUTH_TOKENS_KEY = 'handypos-auth-tokens';
+const LEGACY_AUTH_TOKENS_KEY = 'handy-pos-auth-tokens';
 const MAX_RETRIES = 3;
 const SYNC_INTERVAL = 30000; // 30 seconds
 const TRANSIENT_NETWORK_RETRY_DELAY_MS = 800;
@@ -66,16 +67,66 @@ class AuthenticatedFetch {
   /**
    * Load tokens from localStorage
    */
-  private loadTokens(): void {
+  private readStoredTokens(): AuthTokens | null {
+    if (typeof window === 'undefined') return null;
+    const primary = localStorage.getItem(AUTH_TOKENS_KEY);
+    const legacy = localStorage.getItem(LEGACY_AUTH_TOKENS_KEY);
+    const stored = primary ?? legacy;
+
+    if (!stored) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(stored);
+      const access = typeof parsed?.access === 'string' ? parsed.access.trim() : '';
+      const refresh = typeof parsed?.refresh === 'string' ? parsed.refresh.trim() : '';
+
+      if (!access || !refresh) {
+        throw new Error('Invalid token payload');
+      }
+
+      if (!primary && legacy) {
+        localStorage.setItem(
+          AUTH_TOKENS_KEY,
+          JSON.stringify({ access, refresh })
+        );
+      }
+      localStorage.removeItem(LEGACY_AUTH_TOKENS_KEY);
+
+      return { access, refresh };
+    } catch (e) {
+      console.error('Failed to parse stored tokens:', e);
+      localStorage.removeItem(AUTH_TOKENS_KEY);
+      localStorage.removeItem(LEGACY_AUTH_TOKENS_KEY);
+      return null;
+    }
+  }
+
+  private loadTokens(force = false): void {
     if (typeof window === 'undefined') return;
-    const stored = localStorage.getItem(AUTH_TOKENS_KEY);
-    if (stored) {
-      try {
-        this.tokens = JSON.parse(stored);
-      } catch (e) {
-        console.error('Failed to parse stored tokens:', e);
+    if (!force && this.tokens?.access && this.tokens?.refresh) {
+      return;
+    }
+
+    const storedTokens = this.readStoredTokens();
+    const hasChanged =
+      this.tokens?.access !== storedTokens?.access ||
+      this.tokens?.refresh !== storedTokens?.refresh;
+
+    if (hasChanged) {
+      this.authStateVersion += 1;
+      if (storedTokens) {
+        console.log('[DEBUG AUTH] Reloaded tokens from localStorage');
       }
     }
+
+    this.tokens = storedTokens;
+  }
+
+  hydrateTokensFromStorage(): AuthTokens | null {
+    this.loadTokens(true);
+    return this.tokens;
   }
 
   /**
@@ -98,6 +149,7 @@ class AuthenticatedFetch {
     this.authStateVersion += 1;
     this.tokens = null;
     localStorage.removeItem(AUTH_TOKENS_KEY);
+    localStorage.removeItem(LEGACY_AUTH_TOKENS_KEY);
     void syncSessionSnapshotToDesktopStore();
   }
 
@@ -452,6 +504,10 @@ class AuthenticatedFetch {
    * Refresh access token using refresh token
    */
   private async refreshAccessToken(): Promise<boolean> {
+    if (!this.tokens?.refresh) {
+      this.loadTokens(true);
+    }
+
     const currentRefreshToken = this.tokens?.refresh?.trim();
     if (!currentRefreshToken) {
       this.clearTokens();
@@ -527,6 +583,10 @@ class AuthenticatedFetch {
    * Get authorization headers
    */
   private getAuthHeaders(): Record<string, string> {
+    if (!this.tokens?.access) {
+      this.loadTokens();
+    }
+
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -907,6 +967,9 @@ class AuthenticatedFetch {
    * Check if user is authenticated
    */
   isAuthenticated(): boolean {
+    if (!this.tokens?.access) {
+      this.loadTokens();
+    }
     return !!this.tokens?.access;
   }
 
@@ -914,6 +977,9 @@ class AuthenticatedFetch {
    * Get current tokens
    */
   getTokens(): AuthTokens | null {
+    if (!this.tokens) {
+      this.loadTokens();
+    }
     return this.tokens;
   }
 

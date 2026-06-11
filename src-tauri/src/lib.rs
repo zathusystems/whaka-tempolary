@@ -16,6 +16,11 @@ struct PersistedSessionSnapshot {
     entries: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PersistedDeviceIdentity {
+    device_serial: String,
+}
+
 fn session_snapshot_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let base_dir = app
         .path()
@@ -27,6 +32,127 @@ fn session_snapshot_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, S
         .map_err(|error| format!("Could not create app data directory: {}", error))?;
 
     Ok(base_dir.join("session-snapshot.json"))
+}
+
+fn device_identity_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let base_dir = app
+        .path()
+        .app_data_dir()
+        .or_else(|_| app.path().data_dir())
+        .map_err(|error| format!("Could not resolve app data directory: {}", error))?;
+
+    std::fs::create_dir_all(&base_dir)
+        .map_err(|error| format!("Could not create app data directory: {}", error))?;
+
+    Ok(base_dir.join("device-identity.json"))
+}
+
+fn sanitize_device_serial(value: Option<String>) -> Option<String> {
+    let trimmed = value?.trim().to_string();
+    if trimmed.len() < 8 || trimmed.len() > 100 {
+        return None;
+    }
+
+    let valid = trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'));
+    if valid {
+        Some(trimmed)
+    } else {
+        None
+    }
+}
+
+fn normalize_mac_address(value: &str) -> Option<String> {
+    let hex = value
+        .chars()
+        .filter(|ch| ch.is_ascii_hexdigit())
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect::<String>();
+
+    if hex.len() != 12 || hex == "000000000000" {
+        return None;
+    }
+
+    let pairs = (0..hex.len())
+        .step_by(2)
+        .map(|index| hex[index..index + 2].to_string())
+        .collect::<Vec<String>>();
+
+    Some(pairs.join("-"))
+}
+
+fn os_serial_code() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "WIN"
+    } else if cfg!(target_os = "macos") {
+        "MAC"
+    } else if cfg!(target_os = "linux") {
+        "LIN"
+    } else if cfg!(target_os = "android") {
+        "AND"
+    } else if cfg!(target_os = "ios") {
+        "IOS"
+    } else {
+        "DSK"
+    }
+}
+
+fn generate_device_serial() -> String {
+    let uuid = uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .to_uppercase();
+    format!("HANDY-{}-{}", os_serial_code(), &uuid[..16])
+}
+
+#[tauri::command]
+fn get_device_identity(
+    app: tauri::AppHandle,
+    preferred_serial: Option<String>,
+) -> Result<String, String> {
+    let identity_path = device_identity_path(&app)?;
+
+    if identity_path.exists() {
+        let raw = std::fs::read_to_string(&identity_path)
+            .map_err(|error| format!("Could not read device identity: {}", error))?;
+        let parsed: PersistedDeviceIdentity = serde_json::from_str(&raw)
+            .map_err(|error| format!("Could not parse device identity: {}", error))?;
+        if let Some(device_serial) = sanitize_device_serial(Some(parsed.device_serial)) {
+            return Ok(device_serial);
+        }
+    }
+
+    let device_serial = sanitize_device_serial(preferred_serial).unwrap_or_else(generate_device_serial);
+    let payload = PersistedDeviceIdentity {
+        device_serial: device_serial.clone(),
+    };
+    let serialized = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("Could not serialize device identity: {}", error))?;
+
+    std::fs::write(&identity_path, serialized.as_bytes())
+        .map_err(|error| format!("Could not write device identity: {}", error))?;
+
+    Ok(device_serial)
+}
+
+#[tauri::command]
+fn get_device_mac_address() -> Result<Option<String>, String> {
+    read_device_mac_address()
+}
+
+#[cfg(not(target_os = "android"))]
+fn read_device_mac_address() -> Result<Option<String>, String> {
+    mac_address::get_mac_address()
+        .map_err(|error| format!("Could not read device MAC address: {}", error))
+        .map(|mac_address| {
+            mac_address.and_then(|address| normalize_mac_address(&address.to_string()))
+        })
+}
+
+#[cfg(target_os = "android")]
+fn read_device_mac_address() -> Result<Option<String>, String> {
+    Ok(None)
 }
 
 #[tauri::command]
@@ -192,6 +318,8 @@ pub fn run() {
         save_session_snapshot,
         load_session_snapshot,
         clear_session_snapshot,
+        get_device_identity,
+        get_device_mac_address,
         save_inventory_template_csv,
     ]);
 

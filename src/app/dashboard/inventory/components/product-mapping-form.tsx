@@ -49,7 +49,7 @@ import {
 
 const productMappingSchema = z.object({
   mra_unit_measure: z.string().min(1, 'Unit of measure is required'),
-  mra_tax_id: z.string().min(1, 'Tax rate is required'),
+  mra_tax_id: z.string().optional(),
   tax_calculation_method: z.enum(['inclusive', 'exclusive'], {
     errorMap: () => ({ message: 'Tax calculation method is required' }),
   }),
@@ -425,11 +425,11 @@ export function ProductMappingForm({
       return;
     }
 
-    if (!selectedTax) {
+    if (!selectedTax && !selectedMraProduct) {
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: 'Please select a tax rate for this mapping',
+        description: 'Please select an MRA product or a tax rate for this mapping',
       });
       return;
     }
@@ -455,25 +455,33 @@ export function ProductMappingForm({
       return;
     }
 
-    const normalizedTaxType = normalizeTaxType(selectedTax.taxType);
+    const mraTaxType = selectedMraProduct
+      ? normalizeTaxType(selectedMraProduct.default_tax_type)
+      : normalizeTaxType(selectedTax?.taxType);
+    const mraTaxRate = selectedMraProduct
+      ? Number(selectedMraProduct.default_tax_rate || 0)
+      : Number(selectedTax?.rate || 0);
     const selectedUnitMeasure = String(form.getValues('mra_unit_measure') || 'unit').trim() || 'unit';
     const selectedTaxCalculationMethod = (form.getValues('tax_calculation_method') || 'inclusive') as 'inclusive' | 'exclusive';
-    const zeroOrExemptForRow = isZeroOrExemptTax(selectedTax);
+    const zeroOrExemptForRow = mraTaxType === 'zero' || mraTaxType === 'exempt' || mraTaxRate === 0;
     const effectiveTaxCalculationMethod: 'inclusive' | 'exclusive' = zeroOrExemptForRow
       ? 'inclusive'
       : selectedTaxCalculationMethod;
-    const effectiveTaxRate = zeroOrExemptForRow ? 0 : parseFloat(String(selectedTax.rate || 0));
+    const effectiveTaxRate = zeroOrExemptForRow ? 0 : parseFloat(String(mraTaxRate || 0));
+    const taxRateLabel = selectedMraProduct
+      ? `MRA ${mraTaxType} (${effectiveTaxRate}%)`
+      : `${selectedTax?.name || 'Tax'} (${effectiveTaxRate}%)`;
 
     const newMappings: ProductMapping[] = selectedProducts.map((product) => ({
       productId: product.id,
       productName: product.name,
       mraCode: selectedMraCode,
       mraName: selectedMraProduct?.name?.trim() || product.name,
-      mraTaxType: normalizedTaxType,
+      mraTaxType,
       mraTaxRate: effectiveTaxRate,
       mraUnitMeasure: selectedUnitMeasure,
       taxCalculationMethod: effectiveTaxCalculationMethod,
-      taxRateLabel: `${selectedTax.name} (${effectiveTaxRate}%)`,
+      taxRateLabel,
     }));
 
     setMappings((current) => [...current, ...newMappings]);
@@ -527,7 +535,9 @@ export function ProductMappingForm({
                         ))}
                       </SelectContent>
                     </Select>
-                    <FormDescription>From Settings → Taxes</FormDescription>
+                    <FormDescription>
+                      Used only when no synced MRA product code is selected.
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -717,7 +727,7 @@ export function ProductMappingForm({
               onClick={handleAddMapping}
               variant="outline"
               className="w-full"
-              disabled={selectedProducts.length === 0 || !selectedTax}
+              disabled={selectedProducts.length === 0 || (!selectedTax && !selectedMraProduct)}
             >
               <Plus className="mr-2 h-4 w-4" />
               Add {selectedProducts.length || 0} Mapping{selectedProducts.length === 1 ? '' : 's'}

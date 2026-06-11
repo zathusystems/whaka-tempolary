@@ -1,4 +1,4 @@
-import type { PurchaseRecord } from '@/lib/db';
+import type { EisStockReceiptSource, PurchaseRecord } from '@/lib/db';
 
 export interface EditablePurchaseGroup {
     groupId: string;
@@ -7,6 +7,7 @@ export interface EditablePurchaseGroup {
     supplierId?: string;
     supplierName: string;
     paymentStatus: PurchaseRecord['paymentStatus'];
+    eisStockReceiptSource?: EisStockReceiptSource;
     referenceNumber?: string;
     vatAmount?: number;
     items: PurchaseRecord[];

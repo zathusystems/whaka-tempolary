@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { format } from 'date-fns';
 import { Truck, Loader2, ChevronDown, Cloud, CloudOff, Download, Pencil, Trash2 } from 'lucide-react';
 
-import { db, type Business as BusinessRecord, type InventoryItem, type PurchaseRecord } from '@/lib/db';
+import { db, type Business as BusinessRecord, type EisStockReceiptSource, type InventoryItem, type PurchaseRecord } from '@/lib/db';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -62,6 +62,7 @@ interface PurchaseGroup {
     totalVat: number;
     totalWithVat: number;
     vatAmount?: number;
+    eisStockReceiptSource?: EisStockReceiptSource;
 }
 
 const parseDateCandidate = (...values: unknown[]): Date | null => {
@@ -190,6 +191,27 @@ const isLocalOnlyPurchaseRecord = (record: PurchaseRecord): boolean => {
     return record._operation === 'create' || typeof record.id === 'number' || /^\d+$/.test(recordId);
 };
 
+const normalizeEisStockReceiptSource = (value: unknown): EisStockReceiptSource => {
+    const normalized = String(value || '').trim().toLowerCase();
+    return [
+        'supplier_sale',
+        'supplier-sale',
+        'b2b',
+        'b2b_transfer',
+        'b2b-transfer',
+        'stock_transfer',
+        'stock-transfer',
+        'already_posted',
+        'already-posted',
+    ].includes(normalized)
+        ? 'supplier_sale'
+        : 'pos_goods_receiving';
+};
+
+const isSupplierReportedEisStock = (value: unknown): boolean => (
+    normalizeEisStockReceiptSource(value) === 'supplier_sale'
+);
+
 export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onReceiveStock, onEditPurchase, branchId, currency = 'USD' }: PurchasesTabProps) {
     const { user, business } = useAuth();
     const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
@@ -306,6 +328,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                     totalVat: 0,
                     totalWithVat: 0,
                     vatAmount: record.vatAmount,
+                    eisStockReceiptSource: normalizeEisStockReceiptSource(record.eisStockReceiptSource),
                 };
             } else if (recordSortDate > groups[key].dateSortValue) {
                 groups[key].receivedDate = record.receivedDate;
@@ -402,6 +425,7 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
             supplierId: purchase.supplierId || firstItem?.supplierId,
             supplierName: purchase.supplierName || firstItem?.supplierName || 'No Supplier',
             paymentStatus: (purchase.paymentStatus || 'Paid') as PurchaseRecord['paymentStatus'],
+            eisStockReceiptSource: purchase.eisStockReceiptSource || firstItem?.eisStockReceiptSource,
             referenceNumber: firstItem?.referenceNumber,
             vatAmount: purchase.vatAmount,
             items: purchase.items,
@@ -493,7 +517,8 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                 const purchaseOrderId = purchaseOrderCandidates[0] || fallbackGroupId;
                 const currentOrder = purchaseOrderId ? await db.purchaseOrders.get(purchaseOrderId) : undefined;
                 const allRecordsLocalOnly = currentRecords.every(isLocalOnlyPurchaseRecord);
-                const shouldSyncInventoryDecrease = !currentOrder || currentOrder._operation === 'create';
+                    const shouldSyncInventoryDecrease = !currentOrder || currentOrder._operation === 'create';
+                    const purchaseOrderSource = currentOrder?.eisStockReceiptSource || selectedPurchase.eisStockReceiptSource;
 
                 if (!currentOrder && !allRecordsLocalOnly) {
                     throw new Error('This purchase is missing its order header locally. Please sync first, then try again.');
@@ -506,9 +531,13 @@ export function PurchasesTab({ purchaseHistoryData, isMobile, searchTerm, onRece
                     if (inventoryItem) {
                         const currentStock = Number(inventoryItem.stockUnits || 0);
                         const quantityRemaining = Math.max(0, Number(currentRecord.quantityRemaining || 0));
-                        const safeQuantityToRemove = Math.max(0, Math.min(currentStock, quantityRemaining));
+                        const recordSource = currentRecord.eisStockReceiptSource || purchaseOrderSource;
+                        const isSupplierReportedLine = isSupplierReportedEisStock(recordSource);
+                        const safeQuantityToRemove = isSupplierReportedLine
+                            ? 0
+                            : Math.max(0, Math.min(currentStock, quantityRemaining));
 
-                        if (safeQuantityToRemove < quantityRemaining) {
+                        if (!isSupplierReportedLine && safeQuantityToRemove < quantityRemaining) {
                             clampedRemovalCount += 1;
                         }
 

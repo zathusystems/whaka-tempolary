@@ -3,6 +3,11 @@
 import { db, type InventoryItem } from '@/lib/db';
 import { authFetch } from '@/lib/auth-fetch';
 import { recordMraMappingCacheRefresh } from '@/lib/mra-mapping-cache';
+import {
+  getMraStockReconciliationWarnings,
+  storeMraStockReconciliationWarnings,
+  type StockReconciliationWarning,
+} from '@/lib/services/stock-reconciliation';
 
 function toBackendBranchId(id: string): string {
   const normalized = String(id || '').trim();
@@ -213,6 +218,7 @@ export async function syncInventoryFromBackend(branchId: string): Promise<{
   updated: number;
   created: number;
   mraMappingsSynced?: number;
+  stockReconciliationWarnings?: StockReconciliationWarning[];
   error?: string;
 }> {
   try {
@@ -338,11 +344,15 @@ export async function syncInventoryFromBackend(branchId: string): Promise<{
       console.error('[InventorySync] Failed to fetch MRA mappings:', error);
     }
 
+    const stockReconciliationWarnings = await getMraStockReconciliationWarnings(branchId);
+    storeMraStockReconciliationWarnings(stockReconciliationWarnings);
+
     return {
       synced: products.length,
       updated,
       created,
       mraMappingsSynced,
+      stockReconciliationWarnings,
     };
   } catch (error) {
     console.error('Failed to sync inventory from backend:', error);

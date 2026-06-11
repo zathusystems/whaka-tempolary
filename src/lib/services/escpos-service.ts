@@ -249,6 +249,43 @@ class ESCPOSService {
     return char.repeat(this.config.charPerLine) + this.LF;
   }
 
+  private bytesToCommand(bytes: Uint8Array | number[]): string {
+    return Array.from(bytes, (byte) => String.fromCharCode(byte)).join('');
+  }
+
+  private encodeUtf8Command(value: string): string {
+    if (typeof TextEncoder !== 'undefined') {
+      return this.bytesToCommand(new TextEncoder().encode(value));
+    }
+
+    return Array.from(value, (char) => String.fromCharCode(char.charCodeAt(0) & 0xff)).join('');
+  }
+
+  private qrCommand(payload: number[], data: string = ''): string {
+    const length = payload.length + data.length;
+    const pL = length % 256;
+    const pH = Math.floor(length / 256);
+    return this.GS + '(k' + String.fromCharCode(pL, pH) + this.bytesToCommand(payload) + data;
+  }
+
+  private printQRCode(data: string): string {
+    const qrData = this.encodeUtf8Command(data.trim());
+    if (!qrData) {
+      return '';
+    }
+
+    return (
+      this.setAlignment('center') +
+      this.qrCommand([49, 65, 50, 0]) +
+      this.qrCommand([49, 67, 6]) +
+      this.qrCommand([49, 69, 49]) +
+      this.qrCommand([49, 80, 48], qrData) +
+      this.qrCommand([49, 81, 48]) +
+      this.LF +
+      this.setAlignment('left')
+    );
+  }
+
   /**
    * Cut paper
    */
@@ -306,35 +343,41 @@ class ESCPOSService {
     // Parse HTML and build ESC/POS commands
     // This is a simplified parser - in production, use a proper HTML parser
 
-    // Header
-    escPos += this.setAlignment('center');
-    escPos += this.setTextSize(2, 2);
-    escPos += this.setBold(true);
-    escPos += this.printText('RECEIPT');
-    escPos += this.setBold(false);
-    escPos += this.setTextSize(1, 1);
-
-    // Extract text content from HTML
+    // Extract legal receipt text from HTML and preserve the official receipt shape.
     const tempDiv = typeof document !== 'undefined' ? document.createElement('div') : null;
     if (tempDiv) {
       tempDiv.innerHTML = html;
+      const qrPayload = tempDiv.querySelector('[data-eis-qr-payload]')?.getAttribute('data-eis-qr-payload')?.trim() || '';
       const text = tempDiv.innerText;
-      
-      // Split into lines and process
       const lines = text.split('\n');
-      for (const line of lines) {
-        if (line.trim()) {
-          escPos += this.setAlignment('left');
-          escPos += this.printText(line.substring(0, this.config.charPerLine));
+      let inHeader = true;
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) {
+          continue;
         }
+
+        if (/^Buyers\s+Name:/i.test(line)) {
+          inHeader = false;
+        }
+
+        const shouldCenter =
+          inHeader ||
+          /^\*\*\*/.test(line) ||
+          /^DATE:/i.test(line) ||
+          /^Scan Here/i.test(line) ||
+          /^THANK YOU/i.test(line);
+
+        escPos += this.setAlignment(shouldCenter ? 'center' : 'left');
+        escPos += this.printText(line.substring(0, this.config.charPerLine));
+      }
+
+      if (qrPayload) {
+        escPos += this.setAlignment('center');
+        escPos += this.printQRCode(qrPayload);
       }
     }
-
-    // Footer
-    escPos += this.setAlignment('center');
-    escPos += this.printLine('=');
-    escPos += this.printText('Thank you!');
-    escPos += this.printText('Powered by Mwaka POS');
 
     // Cut paper
     escPos += this.cutPaper();

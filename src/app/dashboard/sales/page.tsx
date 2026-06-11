@@ -592,11 +592,11 @@ export default function ReportsPage() {
 
     const fiscalMetrics = [
         { title: 'Fiscal Assigned', value: `${eisSummary.ordersWithFiscalNumber}`, icon: Landmark },
-        { title: 'Fiscal Pending', value: `${eisSummary.pendingFiscalNumber}`, icon: Circle },
-        { title: 'EIS Pending', value: `${eisSummary.eisStatusCounts.pending}`, icon: Circle },
-        { title: 'EIS Submitted', value: `${eisSummary.eisStatusCounts.submitted}`, icon: MoreHorizontal },
-        { title: 'EIS Accepted', value: `${eisSummary.eisStatusCounts.accepted}`, icon: Check },
-        { title: 'EIS Rejected', value: `${eisSummary.eisStatusCounts.rejected}`, icon: X },
+        { title: 'Fiscal No Pending', value: `${eisSummary.pendingFiscalNumber}`, icon: Circle },
+        { title: 'Receipt Pending', value: `${eisSummary.eisStatusCounts.pending}`, icon: Circle },
+        { title: 'Fiscal Submitted', value: `${eisSummary.eisStatusCounts.submitted}`, icon: MoreHorizontal },
+        { title: 'Fiscal Accepted', value: `${eisSummary.eisStatusCounts.accepted}`, icon: Check },
+        { title: 'Fiscal Rejected', value: `${eisSummary.eisStatusCounts.rejected}`, icon: X },
     ];
 
     const handleExportReport = () => {

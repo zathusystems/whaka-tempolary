@@ -13,7 +13,7 @@ import {
   Loader2,
 } from 'lucide-react';
 
-import { db, type InventoryItem, type PurchaseRecord, type Supplier } from '@/lib/db';
+import { db, type EisStockReceiptSource, type InventoryItem, type PurchaseRecord, type Supplier } from '@/lib/db';
 import { type BusinessType } from '@/lib/inventory/config';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useAuth } from '@/hooks/use-auth';
@@ -22,6 +22,12 @@ import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
 import { normalizePurchaseBatchQuantities } from '@/lib/purchase-quantity';
+import {
+  getMraStockReconciliationWarnings,
+  loadMraStockReconciliationWarnings,
+  storeMraStockReconciliationWarnings,
+  type StockReconciliationWarning,
+} from '@/lib/services/stock-reconciliation';
 
 import { AddProductForm } from './components/product-form';
 import type { EditablePurchaseGroup } from './components/purchase-editor-types';
@@ -48,6 +54,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
+import { ToastAction } from '@/components/ui/toast';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -145,6 +152,16 @@ const normalizeTaxRate = (value: unknown): number => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 };
 
+const readBooleanFlag = (value: unknown): boolean | undefined => {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  const normalized = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) return false;
+  return undefined;
+};
+
 const resolveTaxMethod = (value: unknown): 'inclusive' | 'exclusive' => (
   String(value || '').trim().toLowerCase() === 'inclusive' ? 'inclusive' : 'exclusive'
 );
@@ -203,6 +220,9 @@ export default function InventoryPage() {
   const [restoreInclusiveCostsProgress, setRestoreInclusiveCostsProgress] = useState(0);
   const [restoreInclusiveCostsStage, setRestoreInclusiveCostsStage] = useState('');
   const [mraRefreshKey, setMraRefreshKey] = useState(0);
+  const [receiveStockDefaultSource, setReceiveStockDefaultSource] = useState<EisStockReceiptSource>('pos_goods_receiving');
+  const [receiveStockReconciliationDefaults, setReceiveStockReconciliationDefaults] = useState<StockReconciliationWarning[]>([]);
+  const hasShownReconciliationPromptRef = React.useRef(false);
   
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -465,6 +485,10 @@ export default function InventoryPage() {
               branchId: branchId,
               supplierId: purchase.supplier,  // ✅ Can be null
               supplierName: supplierName,  // ✅ Will be 'No Supplier' if null
+              eisStockReceiptSource:
+                (purchase as any).eis_stock_receipt_source ||
+                (purchase as any).eisStockReceiptSource ||
+                existingRecord?.eisStockReceiptSource,
               productId: poItem.inventory_item,
               productName: productName,
               referenceNumber:
@@ -705,6 +729,54 @@ export default function InventoryPage() {
     }
   }, [searchParams]);
 
+  useEffect(() => {
+    if (searchParams.get('reconcile') !== '1') {
+      return;
+    }
+
+    setActiveTab('purchases');
+    setEditingPurchase(null);
+    setReceiveStockDefaultSource('supplier_sale');
+    setReceiveStockOpen(true);
+
+    if (hasShownReconciliationPromptRef.current) {
+      return;
+    }
+    hasShownReconciliationPromptRef.current = true;
+
+    const showReconciliationToast = (warnings: StockReconciliationWarning[]) => {
+      const totalMissing = warnings.reduce((sum, item) => sum + Number(item.missingBatchQuantity || 0), 0);
+      toast({
+        title: 'Create local batch details',
+        description: warnings.length > 0
+          ? `${warnings.length} product${warnings.length === 1 ? '' : 's'} need batch/expiry details for ${Number(totalMissing.toFixed(3))} synced unit${Math.abs(totalMissing - 1) < 0.0001 ? '' : 's'}. Split purchases by supplier as needed.`
+          : 'Use this receipt mode when EIS already updated stock from a B2B stock transfer and you only need local batch/expiry details.',
+      });
+    };
+
+    const stored = loadMraStockReconciliationWarnings();
+    const storedWarnings = stored?.warnings || [];
+    setReceiveStockReconciliationDefaults(storedWarnings);
+
+    const branchIdForWarnings = activeBranchId || localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH) || '';
+    if (!branchIdForWarnings) {
+      showReconciliationToast(storedWarnings);
+      return;
+    }
+
+    void getMraStockReconciliationWarnings(branchIdForWarnings)
+      .then((freshWarnings) => {
+        const warnings = freshWarnings.length > 0 ? freshWarnings : storedWarnings;
+        setReceiveStockReconciliationDefaults(warnings);
+        storeMraStockReconciliationWarnings(warnings);
+        showReconciliationToast(warnings);
+      })
+      .catch((error) => {
+        console.warn('[InventoryPage] Failed to refresh MRA stock reconciliation defaults:', error);
+        showReconciliationToast(storedWarnings);
+      });
+  }, [activeBranchId, searchParams]);
+
   // Read modal parameter from URL
   useEffect(() => {
     const modalParam = searchParams.get('modal');
@@ -739,6 +811,27 @@ export default function InventoryPage() {
           title: 'Sync Complete',
           description: `Synced ${result.synced} products (${result.created} new, ${result.updated} updated)`,
         });
+        if ((result.stockReconciliationWarnings || []).length > 0) {
+          const warningCount = result.stockReconciliationWarnings?.length || 0;
+          toast({
+            title: 'EIS stock needs batch details',
+            description: `${warningCount} product${warningCount === 1 ? '' : 's'} have EIS stock without matching local batches, usually from B2B stock transfers. Create one or more purchases by supplier to record batch/expiry details.`,
+            action: (
+              <ToastAction
+                altText="Create purchases"
+                onClick={() => {
+                  setActiveTab('purchases');
+                  setEditingPurchase(null);
+                  setReceiveStockDefaultSource('supplier_sale');
+                  setReceiveStockReconciliationDefaults(result.stockReconciliationWarnings || []);
+                  setReceiveStockOpen(true);
+                }}
+              >
+                Create purchases
+              </ToastAction>
+            ),
+          });
+        }
       }
     } catch (error) {
       toast({
@@ -824,6 +917,42 @@ export default function InventoryPage() {
           })
         );
   }, [activeBranchId, inventoryData], []);
+
+  const businessSettingsRecord = useLiveQuery(
+    () => {
+      if (!activeBusinessId) return undefined;
+      return db.businessSettings.get(String(activeBusinessId));
+    },
+    [activeBusinessId],
+    undefined
+  );
+
+  const isEisEnabled = React.useMemo(() => {
+    let cachedSettings: any = {};
+    if (typeof window !== 'undefined') {
+      try {
+        const raw = window.localStorage.getItem(LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS);
+        cachedSettings = raw ? JSON.parse(raw) : {};
+      } catch {
+        cachedSettings = {};
+      }
+    }
+
+    const settingsBelongToBusiness =
+      !cachedSettings?.businessId ||
+      !activeBusinessId ||
+      String(cachedSettings.businessId) === String(activeBusinessId);
+
+    return Boolean(
+      readBooleanFlag(businessSettingsRecord?.enableEis) ??
+      readBooleanFlag((business as any)?.enableEis) ??
+      readBooleanFlag((business as any)?.enable_eis) ??
+      (settingsBelongToBusiness
+        ? readBooleanFlag(cachedSettings?.enableEis ?? cachedSettings?.enable_eis)
+        : undefined) ??
+      false
+    );
+  }, [activeBusinessId, business, businessSettingsRecord]);
 
   const isMobile = useIsMobile();
   
@@ -1450,10 +1579,13 @@ export default function InventoryPage() {
                     searchTerm={searchTerm}
                     onReceiveStock={() => {
                         setEditingPurchase(null);
+                        setReceiveStockDefaultSource('pos_goods_receiving');
+                        setReceiveStockReconciliationDefaults([]);
                         setReceiveStockOpen(true);
                     }}
                     onEditPurchase={(purchase) => {
                         setEditingPurchase(purchase);
+                        setReceiveStockReconciliationDefaults([]);
                         setReceiveStockOpen(true);
                     }}
                     branchId={activeBranchId}
@@ -1485,6 +1617,7 @@ export default function InventoryPage() {
                     branchId={activeBranchId}
                     searchTerm={searchTerm}
                     refreshKey={mraRefreshKey}
+                    isEisEnabled={isEisEnabled}
                 />
             </TabsContent>
         </Tabs>
@@ -1518,15 +1651,19 @@ export default function InventoryPage() {
             setReceiveStockOpen(open);
             if (!open) {
                 setEditingPurchase(null);
+                setReceiveStockDefaultSource('pos_goods_receiving');
+                setReceiveStockReconciliationDefaults([]);
             }
         }}
     >
-        <DialogContent className="sm:max-w-5xl max-h-[92vh] flex flex-col">
+        <DialogContent className="sm:max-w-5xl max-h-[92vh] flex flex-col" onOpenAutoFocus={(event) => event.preventDefault()}>
             <DialogHeader className="sticky top-0 bg-background z-10 pt-6">
             <DialogTitle>{editingPurchase ? 'Edit Purchase' : 'Receive Stock'}</DialogTitle>
             <DialogDescription>
                 {editingPurchase
                     ? 'Update an existing stock receipt without losing its batch purpose or offline sync behavior.'
+                    : receiveStockReconciliationDefaults.length > 0
+                      ? 'Products with missing local batch details are prefilled. Remove lines to split this receipt by supplier.'
                     : 'Record new inventory received from a supplier.'}
             </DialogDescription>
         </DialogHeader>
@@ -1537,9 +1674,13 @@ export default function InventoryPage() {
                 inventoryItems={inventoryData || []} 
                 suppliers={suppliersData || []}
                 editingPurchase={editingPurchase}
+                defaultEisStockReceiptSource={receiveStockDefaultSource}
+                reconciliationDefaults={receiveStockReconciliationDefaults}
                 onFormSubmit={() => {
                     setReceiveStockOpen(false);
                     setEditingPurchase(null);
+                    setReceiveStockDefaultSource('pos_goods_receiving');
+                    setReceiveStockReconciliationDefaults([]);
                 }} 
             />
         </div>

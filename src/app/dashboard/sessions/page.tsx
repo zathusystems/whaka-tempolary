@@ -1,9 +1,10 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import Link from 'next/link';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useForm } from 'react-hook-form';
-import { PlusCircle, Loader2, AlertTriangle, CheckCircle, History, DoorOpen, DoorClosed, MoreHorizontal, Package, ArrowLeft, Printer } from 'lucide-react';
+import { PlusCircle, Loader2, AlertTriangle, CheckCircle, History, DoorOpen, DoorClosed, MoreHorizontal, Package, ArrowLeft, Printer, FileText } from 'lucide-react';
 import { format } from 'date-fns';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -422,7 +423,7 @@ const SessionSalesList = ({ sessionId }: { sessionId: string }) => {
                         </Badge>
                         {isEisPending && (
                           <Badge variant="outline" className="border-amber-300 text-amber-700">
-                            EIS Pending
+                            Fiscal Pending
                           </Badge>
                         )}
                       </div>
@@ -497,7 +498,7 @@ const SessionSalesList = ({ sessionId }: { sessionId: string }) => {
                               </Badge>
                               {isEisPending && (
                                 <Badge variant="outline" className="border-amber-300 text-amber-700">
-                                  EIS Pending
+                                  Fiscal Pending
                                 </Badge>
                               )}
                             </div>
@@ -827,28 +828,28 @@ const ZReportTab = ({ session }: { session: Session }) => {
                                 <span className="font-semibold">{eisSummary.ordersWithFiscalNumber}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">Fiscal Pending:</span>
+                                <span className="text-muted-foreground">Fiscal No Pending:</span>
                                 <span>{eisSummary.pendingFiscalNumber}</span>
                             </div>
                             <Separator />
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">EIS Pending:</span>
+                                <span className="text-muted-foreground">Receipt Pending:</span>
                                 <span>{eisSummary.eisStatusCounts.pending}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">EIS Submitted:</span>
+                                <span className="text-muted-foreground">Fiscal Submitted:</span>
                                 <span>{eisSummary.eisStatusCounts.submitted}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">EIS Accepted:</span>
+                                <span className="text-muted-foreground">Fiscal Accepted:</span>
                                 <span className="text-green-600">{eisSummary.eisStatusCounts.accepted}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">EIS Rejected:</span>
+                                <span className="text-muted-foreground">Fiscal Rejected:</span>
                                 <span className="text-red-600">{eisSummary.eisStatusCounts.rejected}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">EIS Unknown:</span>
+                                <span className="text-muted-foreground">Fiscal Unknown:</span>
                                 <span>{eisSummary.eisStatusCounts.unknown}</span>
                             </div>
                             <Separator />
@@ -2203,6 +2204,11 @@ export default function SessionsPage() {
                     </p>
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <Button asChild variant="outline" className="w-full sm:w-auto">
+                        <Link href="/dashboard/eis-sales">
+                            <FileText className="mr-2 h-4 w-4" /> EIS Sales
+                        </Link>
+                    </Button>
                     <Button variant="outline" className="w-full sm:w-auto" onClick={() => setHistoryModalOpen(true)}>
                         <History className="mr-2 h-4 w-4" /> History
                     </Button>

@@ -33,6 +33,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/use-auth';
+import { useBackendReachability } from '@/hooks/use-backend-reachability';
 import { authFetch } from '@/lib/auth-fetch';
 import { v4 as uuidv4 } from 'uuid';
 import { saveSaleToLocalStorage, addPendingSale, markSaleAsSynced, markSaleAsFailed } from '@/lib/services/sales-service';
@@ -364,6 +365,136 @@ const resolveEnableEis = (source: any): boolean | null => {
   return null;
 };
 
+const resolveTaxpayerVatRegistered = (source: any): boolean | null => {
+  if (!source || typeof source !== 'object') return null;
+
+  const rawVatRegistered = source.vatRegistered ?? source.vat_registered;
+  if (rawVatRegistered !== undefined) {
+    return toBoolean(rawVatRegistered, false);
+  }
+
+  const taxpayerType = String(source.mraTaxpayerType ?? source.mra_taxpayer_type ?? '').trim().toUpperCase();
+  if (taxpayerType === 'VAT') return true;
+  if (taxpayerType === 'NON_VAT') return false;
+
+  return null;
+};
+
+const extractBackendErrorMessage = (errorData: any, fallback: string): string => {
+  const readValue = (value: unknown): string => {
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) return value.map(readValue).filter(Boolean).join(', ');
+    if (value && typeof value === 'object') {
+      return Object.values(value).map(readValue).filter(Boolean).join(', ');
+    }
+    return '';
+  };
+
+  const message =
+    readValue(errorData?.error) ||
+    readValue(errorData?.detail) ||
+    readValue(errorData?.message) ||
+    readValue(errorData?.non_field_errors);
+
+  return message || fallback;
+};
+
+const isRetryBlockedBackendOrderError = (statusCode: number, message: string): boolean => {
+  if (statusCode < 400 || statusCode >= 500) return false;
+
+  const normalized = message.toLowerCase();
+  return [
+    'mra',
+    'eis',
+    'non-vat',
+    'standard vat',
+    'tax mapping',
+    'compliance policy',
+    'cannot submit an empty pos order',
+  ].some((needle) => normalized.includes(needle));
+};
+
+const isReceiptValidationUrl = (value: unknown): boolean => {
+  const raw = String(value ?? '').trim();
+  return /^https?:\/\//i.test(raw) || /receiptvalidation\/validate/i.test(raw);
+};
+
+const findReceiptValidationUrl = (source: unknown): string => {
+  const queue: unknown[] = [source];
+  const seen = new Set<unknown>();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === null || current === undefined) {
+      continue;
+    }
+
+    if (typeof current === 'string') {
+      const raw = current.trim();
+      if (isReceiptValidationUrl(raw)) {
+        return raw;
+      }
+      if (raw.startsWith('{') || raw.startsWith('[')) {
+        try {
+          queue.push(JSON.parse(raw));
+        } catch {
+          // Ignore non-JSON strings.
+        }
+      }
+      continue;
+    }
+
+    if (typeof current !== 'object' || seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+
+    for (const value of Object.values(current as Record<string, unknown>)) {
+      if (isReceiptValidationUrl(value)) {
+        return String(value).trim();
+      }
+      if (value && typeof value === 'object') {
+        queue.push(value);
+      } else if (typeof value === 'string' && (value.trim().startsWith('{') || value.trim().startsWith('['))) {
+        try {
+          queue.push(JSON.parse(value.trim()));
+        } catch {
+          // Ignore non-JSON strings.
+        }
+      }
+    }
+  }
+
+  return '';
+};
+
+const hasFiscalReceiptData = (order: Partial<Order> | Record<string, any> | null | undefined): boolean => {
+  if (!order) {
+    return false;
+  }
+
+  const fiscalNumber = String(
+    (order as any).fiscalInvoiceNumber ??
+    (order as any).fiscal_invoice_number ??
+    ''
+  ).trim();
+  const validationUrl = findReceiptValidationUrl([
+    (order as any).qrCodePayload,
+    (order as any).qr_code_payload,
+    (order as any).eisValidationMetadata,
+    (order as any).eis_validation_metadata,
+    (order as any).mra_submission,
+    (order as any).mraSubmission,
+  ]);
+
+  return Boolean(fiscalNumber && validationUrl);
+};
+
 
 export default function PosPage() {
   const [currentBusinessType, setCurrentBusinessType] = useState<BusinessType>('Restaurant');
@@ -376,6 +507,8 @@ export default function PosPage() {
   const [isAndroidTauri, setIsAndroidTauri] = useState(false);
   const [blockSalesIfTaxMappingMissing, setBlockSalesIfTaxMappingMissing] = useState(false);
   const [eisEnabled, setEisEnabled] = useState(false);
+  const { isReachable: isBrowserOnline, checkNow: checkBackendConnectionNow } = useBackendReachability({ intervalMs: 10000 });
+  const [taxpayerVatRegistered, setTaxpayerVatRegistered] = useState<boolean | null>(null);
   const { toast } = useToast();
   const router = useRouter();
   const { user, business } = useAuth();
@@ -407,6 +540,10 @@ export default function PosPage() {
         if (cachedEisValue !== null) {
           setEisEnabled(cachedEisValue);
         }
+        const cachedVatRegistered = resolveTaxpayerVatRegistered(parsed);
+        if (cachedVatRegistered !== null) {
+          setTaxpayerVatRegistered(cachedVatRegistered);
+        }
       } catch (error) {
         console.warn('[POS Page] Failed to parse cached tax mapping policy:', error);
       }
@@ -423,6 +560,10 @@ export default function PosPage() {
         const backendEisValue = resolveEnableEis(backendBusiness);
         if (backendEisValue !== null) {
           setEisEnabled(backendEisValue);
+        }
+        const backendVatRegistered = resolveTaxpayerVatRegistered(backendBusiness);
+        if (backendVatRegistered !== null) {
+          setTaxpayerVatRegistered(backendVatRegistered);
         }
       } catch (error) {
         console.warn('[POS Page] Failed to fetch tax mapping policy from backend:', error);
@@ -677,7 +818,7 @@ export default function PosPage() {
         }
         
         // If not ready locally, try API to get latest status
-        if (!isReadyForSale && navigator.onLine) {
+        if (!isReadyForSale && isBrowserOnline) {
           try {
             const backendBranchId = normalizeBranchId(activeBranchId);
             let mappings: any[] = [];
@@ -920,6 +1061,17 @@ export default function PosPage() {
       toast({ variant: 'destructive', title: 'Cart is empty' });
       return null;
     }
+    if (eisEnabled) {
+      const reachability = await checkBackendConnectionNow(true);
+      if (!reachability.isReachable) {
+        toast({
+          variant: 'destructive',
+          title: 'Connection required for EIS receipt',
+          description: 'Could not reach the POS server. Connect to working internet before completing the sale so the legal EIS receipt can be submitted to MRA.',
+        });
+        return null;
+      }
+    }
     if (!activeBranchId) {
        toast({ variant: 'destructive', title: 'No active branch', description: 'Could not determine the active branch.' });
        return null;
@@ -933,8 +1085,12 @@ export default function PosPage() {
     const buyerName = buyerDetails?.name?.trim();
     const buyerPhone = buyerDetails?.phone?.trim();
     const buyerTin = buyerDetails?.tin?.trim();
+    const buyerAuthorizationCode = buyerDetails?.authorizationCode?.trim();
+    const vat5ProjectNumber = buyerDetails?.vat5ProjectNumber?.trim();
+    const vat5CertificateNumber = buyerDetails?.vat5CertificateNumber?.trim();
+    const vat5Quantity = Number(buyerDetails?.vat5Quantity);
     const buyerFields: Partial<Order> = {};
-    const buyerPayload: Record<string, string> = {};
+    const buyerPayload: Record<string, string | number | boolean> = {};
 
     if (buyerName) {
       buyerFields.customerName = buyerName;
@@ -949,7 +1105,40 @@ export default function PosPage() {
     if (buyerTin) {
       buyerFields.customerTin = buyerTin;
       buyerFields.customer_tin = buyerTin;
+      buyerFields.buyerTin = buyerTin;
+      buyerFields.buyer_tin = buyerTin;
       buyerPayload.customer_tin = buyerTin;
+      buyerPayload.buyer_tin = buyerTin;
+    }
+    if (buyerAuthorizationCode) {
+      buyerFields.buyerAuthorizationCode = buyerAuthorizationCode;
+      buyerFields.buyer_authorization_code = buyerAuthorizationCode;
+      buyerPayload.buyer_authorization_code = buyerAuthorizationCode;
+    }
+    if (buyerDetails?.isExport) {
+      buyerFields.isExport = true;
+      buyerFields.is_export = true;
+      buyerPayload.is_export = true;
+    }
+    if (buyerDetails?.isReliefSupply) {
+      buyerFields.isReliefSupply = true;
+      buyerFields.is_relief_supply = true;
+      buyerPayload.is_relief_supply = true;
+    }
+    if (vat5ProjectNumber) {
+      buyerFields.vat5ProjectNumber = vat5ProjectNumber;
+      buyerFields.vat5_project_number = vat5ProjectNumber;
+      buyerPayload.vat5_project_number = vat5ProjectNumber;
+    }
+    if (vat5CertificateNumber) {
+      buyerFields.vat5CertificateNumber = vat5CertificateNumber;
+      buyerFields.vat5_certificate_number = vat5CertificateNumber;
+      buyerPayload.vat5_certificate_number = vat5CertificateNumber;
+    }
+    if (Number.isFinite(vat5Quantity) && vat5Quantity > 0) {
+      buyerFields.vat5Quantity = vat5Quantity;
+      buyerFields.vat5_quantity = vat5Quantity;
+      buyerPayload.vat5_quantity = vat5Quantity;
     }
 
     const defaultTaxRateAmount = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
@@ -1393,16 +1582,16 @@ export default function PosPage() {
         addPendingSale(finalOrder);
       }
 
-      // 6. Queue order sync to backend in background to keep checkout responsive
+      // 6. Submit to backend. EIS sales must wait for fiscal receipt data before the success screen.
       if (finalOrder && orderForBackend) {
         const finalOrderId = finalOrder.id;
         const payload = orderForBackend;
 
-        void (async () => {
+        const submitOrderToBackend = async (): Promise<Order | null> => {
           try {
             console.log('[Order] Sending to backend with correct format:', JSON.stringify(payload));
             
-            const fullUrl = `${process.env.NEXT_PUBLIC_API_URL || 'https://pos.zathusystems.com/api'}/sessions/orders/`;
+            const fullUrl = `${process.env.NEXT_PUBLIC_API_URL || 'https://pos3.express-travel-ticketing.online/api'}/sessions/orders/`;
             const headers: Record<string, string> = {
               'Content-Type': 'application/json',
             };
@@ -1424,6 +1613,13 @@ export default function PosPage() {
             if (response.ok) {
               const data = await response.json();
               console.log('[Order] Successfully synced order to backend:', finalOrderId, data);
+              const mraSubmission = data?.mra_submission || data?.eis_validation_metadata?.mra_submission;
+              const mraSubmissionState = String(mraSubmission?.state || '').trim();
+              const mraSubmissionMessage = String(mraSubmission?.message || '').trim();
+              const mraIncomplete = Boolean(
+                mraSubmissionState &&
+                !['accepted', 'offline_queued'].includes(mraSubmissionState)
+              );
 
               await db.orders.update(finalOrderId, {
                 fiscal_invoice_number: data?.fiscal_invoice_number,
@@ -1444,22 +1640,107 @@ export default function PosPage() {
                 vatAmount: data?.vat_amount,
                 gross_amount: data?.gross_amount,
                 grossAmount: data?.gross_amount,
+                eis_validation_metadata: data?.eis_validation_metadata,
+                eisValidationMetadata: data?.eis_validation_metadata,
                 _dirty: false,
                 _operation: undefined,
                 _synced_at: new Date().toISOString(),
+                syncStatus: mraIncomplete ? 'failed' : 'synced',
+                syncError: mraIncomplete ? (mraSubmissionMessage || 'MRA EIS submission is not complete.') : undefined,
+                syncRetryBlocked: mraIncomplete && mraSubmissionState === 'rejected',
+                syncFailedAt: mraIncomplete ? new Date().toISOString() : undefined,
               });
 
-              markSaleAsSynced(finalOrderId);
+              if (mraIncomplete) {
+                markSaleAsFailed(
+                  finalOrderId,
+                  mraSubmissionMessage || 'MRA EIS submission is not complete.',
+                  { retryBlocked: mraSubmissionState === 'rejected' }
+                );
+              } else {
+                markSaleAsSynced(finalOrderId);
+              }
+              if (mraSubmissionState === 'offline_queued') {
+                toast({
+                  title: 'Offline EIS Receipt Queued',
+                  description: mraSubmissionMessage || 'Sale was signed offline and queued for MRA upload.',
+                });
+              } else if (mraSubmissionState && mraSubmissionState !== 'accepted') {
+                toast({
+                  variant: mraSubmissionState === 'rejected' ? 'destructive' : 'default',
+                  title: mraSubmissionState === 'rejected' ? 'MRA Rejected Sale' : 'MRA Submission Pending',
+                  description: mraSubmissionMessage || 'MRA EIS submission is not complete.',
+                });
+              }
+
+              const latestOrder = await db.orders.get(finalOrderId);
+              const orderWithFiscalData = (latestOrder || {
+                ...finalOrder,
+                ...data,
+                fiscalInvoiceNumber: data?.fiscal_invoice_number,
+                fiscal_invoice_number: data?.fiscal_invoice_number,
+                qrCodePayload: data?.qr_code_payload,
+                qr_code_payload: data?.qr_code_payload,
+                digitalSignature: data?.digital_signature,
+                digital_signature: data?.digital_signature,
+                eisStatus: data?.eis_status,
+                eis_status: data?.eis_status,
+              }) as Order;
+
+              if (eisEnabled && (mraIncomplete || !hasFiscalReceiptData(orderWithFiscalData))) {
+                const failureMessage = mraSubmissionMessage || 'MRA EIS did not return fiscal invoice number and validation QR.';
+                markSaleAsFailed(finalOrderId, failureMessage, { retryBlocked: mraSubmissionState === 'rejected' });
+                toast({
+                  variant: 'destructive',
+                  title: 'Legal Receipt Not Ready',
+                  description: failureMessage,
+                });
+                return null;
+              }
+
+              return orderWithFiscalData;
             } else {
               const errorData = await response.json().catch(() => ({}));
+              const errorMessage = extractBackendErrorMessage(
+                errorData,
+                `Backend rejected order with HTTP ${response.status}`
+              );
+              const retryBlocked = isRetryBlockedBackendOrderError(response.status, errorMessage);
               console.warn('[Order] Backend rejected order:', response.status, errorData);
-              markSaleAsFailed(finalOrderId, `HTTP ${response.status}: ${JSON.stringify(errorData)}`);
+              markSaleAsFailed(finalOrderId, errorMessage, { retryBlocked });
+              toast({
+                variant: 'destructive',
+                title: eisEnabled ? 'Legal Receipt Not Issued' : 'Sale Not Synced',
+                description: eisEnabled
+                  ? `${errorMessage}. No EIS receipt was printed because MRA fiscal details are missing.`
+                  : errorMessage,
+              });
+              return null;
             }
           } catch (syncError) {
             console.warn('[Order] Failed to sync order, but local save succeeded:', syncError);
-            markSaleAsFailed(finalOrderId, syncError instanceof Error ? syncError.message : 'Unknown error');
+            const errorMessage = syncError instanceof Error ? syncError.message : 'Unknown error';
+            markSaleAsFailed(finalOrderId, errorMessage);
+            if (eisEnabled) {
+              toast({
+                variant: 'destructive',
+                title: 'Legal Receipt Not Issued',
+                description: `${errorMessage}. Connect to the backend and retry sync before printing an EIS receipt.`,
+              });
+            }
+            return null;
           }
-        })();
+        };
+
+        if (eisEnabled) {
+          const fiscalizedOrder = await submitOrderToBackend();
+          if (!fiscalizedOrder || !hasFiscalReceiptData(fiscalizedOrder)) {
+            return null;
+          }
+          finalOrder = fiscalizedOrder;
+        } else {
+          void submitOrderToBackend();
+        }
       } else {
         console.warn('[Order] Cannot sync - finalOrder or orderForBackend is null', { finalOrder, orderForBackend });
       }
@@ -1549,6 +1830,8 @@ export default function PosPage() {
       defaultTaxRate,
       eisEnabled,
       blockSalesIfTaxMappingMissing,
+      isEisInvoiceSubmissionBlocked: eisEnabled && !isBrowserOnline,
+      eisInvoiceSubmissionBlockedMessage: 'Could not reach the POS server. Connect to working internet before completing the sale so the EIS invoice can be submitted to MRA.',
     };
 
     switch (currentBusinessType) {

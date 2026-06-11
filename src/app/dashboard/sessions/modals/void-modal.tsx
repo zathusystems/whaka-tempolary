@@ -26,8 +26,14 @@ import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
 import { useAuth } from '@/hooks/use-auth';
+import { useCurrency } from '@/hooks/use-currency';
 import type { Order } from '@/lib/db';
 
+
+const toFiniteNumber = (value: unknown, fallback = 0): number => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
 
 interface VoidModalProps {
   order: Order | null;
@@ -45,24 +51,49 @@ export function VoidModal({
   onVoidCreated,
 }: VoidModalProps) {
   const { user } = useAuth();
+  const { format: formatCurrency } = useCurrency();
   const [isLoading, setIsLoading] = useState(false);
-  const { register, handleSubmit, formState: { errors }, reset, watch } = useForm({
+  const { register, handleSubmit, formState: { errors }, reset, watch, setValue } = useForm({
     defaultValues: {
       void_reason: 'customer_request',
       reason_description: '',
+      supporting_documents_text: '',
       refund_method: 'none',
       refund_amount: '0',
     },
   });
 
+  const voidReason = watch('void_reason');
   const refundMethod = watch('refund_method');
-  const refundAmount = parseFloat(watch('refund_amount') || '0');
+  const refundAmount = toFiniteNumber(watch('refund_amount'), 0);
+  const originalTotal = toFiniteNumber((order as any)?.total, 0);
+  const originalVat = toFiniteNumber((order as any)?.vatAmount ?? (order as any)?.vat_amount ?? (order as any)?.tax, 0);
+  const originalNet = toFiniteNumber((order as any)?.netAmount ?? (order as any)?.net_amount ?? (order as any)?.subtotal, Math.max(0, originalTotal - originalVat));
+  const effectiveVatRate = originalNet > 0 ? (originalVat / originalNet) * 100 : 0;
+  const fiscalInvoiceNumber = String((order as any)?.fiscalInvoiceNumber ?? (order as any)?.fiscal_invoice_number ?? '').trim();
+  const paymentMethodDisplay = String((order as any)?.paymentMethod ?? (order as any)?.payment_method ?? '').trim() || 'N/A';
 
   React.useEffect(() => {
     if (!isOpen) {
       setIsLoading(false);
+      return;
     }
-  }, [isOpen]);
+
+      reset({
+        void_reason: 'customer_request',
+        reason_description: '',
+        supporting_documents_text: '',
+        refund_method: 'none',
+        refund_amount: '0',
+      });
+  }, [isOpen, order?.id, reset]);
+
+  React.useEffect(() => {
+    if (!isOpen) return;
+    if (refundMethod === 'none') {
+      setValue('refund_amount', '0', { shouldDirty: false, shouldValidate: true });
+    }
+  }, [isOpen, refundMethod, setValue]);
 
   const onSubmit = async (data: any) => {
     if (!order) return;
@@ -77,23 +108,29 @@ export function VoidModal({
 
     setIsLoading(true);
     try {
+      const supportingDocuments = String(data.supporting_documents_text || '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .trim();
       const response = await authFetch.fetch<any>('/sessions/void-transactions/create_void/', {
         method: 'POST',
         body: JSON.stringify({
           original_order_id: order.id,
           void_reason: data.void_reason,
           reason_description: data.reason_description,
-          voided_amount: order.total - (order.vat_amount || 0),
-          voided_vat: order.vat_amount || 0,
+          supporting_documents: supportingDocuments,
+          voided_amount: originalNet,
+          voided_vat: originalVat,
           refund_method: data.refund_method,
           refund_amount: parseFloat(data.refund_amount),
         }),
       });
 
       if (response) {
+        const eisStatus = String(response.eis_result?.eis_status || response.void_transaction?.eis_status || '').trim();
         toast({
           title: 'Sale Voided',
-          description: `Order #${order.orderNumber} has been voided successfully.`,
+          description: `Order #${order.orderNumber} voided${eisStatus ? ` with EIS status ${eisStatus}` : ''}.`,
         });
 
         reset();
@@ -119,6 +156,7 @@ export function VoidModal({
               void_reason: data.void_reason,
               refund_method: data.refund_method,
               refund_amount: parseFloat(data.refund_amount),
+              supporting_documents_count: supportingDocuments ? 1 : 0,
             },
           });
         } catch (auditError) {
@@ -146,7 +184,7 @@ export function VoidModal({
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: 'Failed to void sale. Please try again.',
+        description: error instanceof Error ? error.message : 'Failed to void sale. Please try again.',
       });
     } finally {
       setIsLoading(false);
@@ -164,38 +202,58 @@ export function VoidModal({
             Void Sale
           </DialogTitle>
           <DialogDescription>
-            Cancel Order #{order.orderNumber} and create a void transaction record for MRA compliance.
+            Cancel the full original sale for Order #{order.orderNumber}. Use a credit note for partial returns or partial refunds.
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           {/* Warning */}
-          <div className="bg-red-50 border border-red-200 p-3 rounded-lg">
-            <p className="text-sm text-red-800">
-              <strong>Warning:</strong> This action will void the entire sale. The original invoice will be marked as voided in your records for MRA compliance.
+          <div className="rounded-lg border border-red-200 bg-red-50 p-3">
+            <p className="text-sm font-medium text-red-900">Void only when the whole receipt must be cancelled.</p>
+            <p className="mt-1 text-xs text-red-800">
+              This reverses the full fiscal sale, restores stock for all items, and records the correcting document with MRA EIS.
             </p>
           </div>
 
           {/* Original Order Info */}
-          <div className="bg-muted p-3 rounded-lg space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Order #:</span>
-              <span className="font-semibold">#{order.orderNumber}</span>
+          <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">Original sale</p>
+                <p className="font-semibold">Order #{order.orderNumber}</p>
+                {fiscalInvoiceNumber && (
+                  <p className="mt-0.5 break-all text-xs text-muted-foreground">Fiscal invoice {fiscalInvoiceNumber}</p>
+                )}
+              </div>
+              <div className="text-right">
+                <p className="text-xs text-muted-foreground">Full sale total</p>
+                <p className="text-base font-bold">{formatCurrency(originalTotal)}</p>
+              </div>
             </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Amount:</span>
-              <span className="font-semibold">{order.total}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Payment Method:</span>
-              <span className="font-semibold">{order.paymentMethod}</span>
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+              <div className="rounded-md bg-background p-2">
+                <p className="text-muted-foreground">Taxable/net</p>
+                <p className="font-medium">{formatCurrency(originalNet)}</p>
+              </div>
+              <div className="rounded-md bg-background p-2">
+                <p className="text-muted-foreground">VAT reversed</p>
+                <p className="font-medium">{formatCurrency(originalVat)}</p>
+                <p className="text-[11px] text-muted-foreground">{effectiveVatRate.toFixed(2)}%</p>
+              </div>
+              <div className="rounded-md bg-background p-2">
+                <p className="text-muted-foreground">Payment</p>
+                <p className="font-medium">{paymentMethodDisplay}</p>
+              </div>
             </div>
           </div>
 
           {/* Void Reason */}
           <div className="space-y-2">
-            <Label htmlFor="void_reason">Reason for Void</Label>
-            <Select defaultValue="customer_request" {...register('void_reason')}>
+            <Label htmlFor="void_reason">Reason</Label>
+            <Select
+              value={voidReason}
+              onValueChange={(value) => setValue('void_reason', value, { shouldValidate: true })}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -213,10 +271,10 @@ export function VoidModal({
 
           {/* Detailed Description */}
           <div className="space-y-2">
-            <Label htmlFor="reason_description">Detailed Description</Label>
+            <Label htmlFor="reason_description">Explanation</Label>
             <Textarea
               id="reason_description"
-              placeholder="Provide detailed explanation for audit trail..."
+              placeholder="Example: duplicate receipt, wrong sale, failed payment, or customer cancelled the whole sale."
               {...register('reason_description', { required: 'Description is required' })}
               className="min-h-20"
             />
@@ -225,10 +283,23 @@ export function VoidModal({
             )}
           </div>
 
+          <div className="space-y-2">
+            <Label htmlFor="supporting_documents_text">Supporting documents</Label>
+            <Textarea
+              id="supporting_documents_text"
+              placeholder="Optional: return slip number, approval reference, or document URL. This is encoded as one MRA supporting document."
+              {...register('supporting_documents_text')}
+              className="min-h-16"
+            />
+          </div>
+
           {/* Refund Method */}
           <div className="space-y-2">
-            <Label htmlFor="refund_method">Refund Method</Label>
-            <Select defaultValue="none" {...register('refund_method')}>
+            <Label htmlFor="refund_method">Refund method</Label>
+            <Select
+              value={refundMethod}
+              onValueChange={(value) => setValue('refund_method', value, { shouldValidate: true })}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -244,7 +315,7 @@ export function VoidModal({
           {/* Refund Amount (if applicable) */}
           {refundMethod !== 'none' && (
             <div className="space-y-2">
-              <Label htmlFor="refund_amount">Refund Amount</Label>
+              <Label htmlFor="refund_amount">Customer refund amount</Label>
               <Input
                 id="refund_amount"
                 type="number"
@@ -253,6 +324,10 @@ export function VoidModal({
                 {...register('refund_amount', {
                   required: 'Refund amount is required',
                   min: { value: 0, message: 'Cannot be negative' },
+                  validate: (value) => {
+                    const amount = toFiniteNumber(value, 0);
+                    return amount <= originalTotal || 'Refund cannot exceed the original sale total';
+                  },
                 })}
               />
               {errors.refund_amount && (
@@ -262,15 +337,18 @@ export function VoidModal({
           )}
 
           {/* Summary */}
-          <div className="bg-orange-50 p-3 rounded-lg space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Amount Voided:</span>
-              <span className="font-semibold">{order.total}</span>
+          <div className="rounded-lg border border-orange-200 bg-orange-50 p-3 text-sm text-orange-950">
+            <div className="flex justify-between gap-3 font-semibold">
+              <span>Full sale value to void</span>
+              <span>{formatCurrency(originalTotal)}</span>
             </div>
+            <p className="mt-1 text-xs text-orange-900/80">
+              Net {formatCurrency(originalNet)} + VAT {formatCurrency(originalVat)} will be reversed.
+            </p>
             {refundMethod !== 'none' && (
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Refund Amount:</span>
-                <span className="font-semibold text-orange-600">{refundAmount.toFixed(2)}</span>
+              <div className="mt-3 flex justify-between gap-3 border-t border-orange-200 pt-2">
+                <span>Customer refund</span>
+                <span className="font-semibold text-orange-700">{formatCurrency(refundAmount)}</span>
               </div>
             )}
           </div>
@@ -292,7 +370,7 @@ export function VoidModal({
               className="flex-1"
             >
               {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Void Sale
+              Confirm Void Sale
             </Button>
           </div>
         </form>

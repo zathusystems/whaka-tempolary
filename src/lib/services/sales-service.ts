@@ -1,6 +1,6 @@
 'use client';
 
-import { type Order } from '@/lib/db';
+import { db, type Order } from '@/lib/db';
 
 const SALES_STORAGE_KEY = 'handypos-sales';
 const PENDING_SALES_KEY = 'handypos-pending-sales';
@@ -8,6 +8,10 @@ const PENDING_SALES_KEY = 'handypos-pending-sales';
 export interface SaleRecord extends Order {
   syncedAt?: string;
   syncError?: string;
+}
+
+interface MarkSaleFailedOptions {
+  retryBlocked?: boolean;
 }
 
 /**
@@ -23,6 +27,8 @@ export function saveSaleToLocalStorage(order: Order, branchId?: string): void {
       branchId: branchId || order.branchId, // Ensure branch is included
       syncedAt: undefined,
       syncError: undefined,
+      syncStatus: 'pending',
+      syncRetryBlocked: false,
     };
 
     sales.push(saleRecord);
@@ -60,6 +66,8 @@ export function addPendingSale(order: Order): void {
       ...order,
       syncedAt: undefined,
       syncError: undefined,
+      syncStatus: 'pending',
+      syncRetryBlocked: false,
     });
 
     localStorage.setItem(PENDING_SALES_KEY, JSON.stringify(pending));
@@ -99,8 +107,18 @@ export function markSaleAsSynced(orderId: string): void {
     const saleIndex = sales.findIndex(s => s.id === orderId);
     if (saleIndex !== -1) {
       sales[saleIndex].syncedAt = new Date().toISOString();
+      sales[saleIndex].syncError = undefined;
+      sales[saleIndex].syncStatus = 'synced';
+      sales[saleIndex].syncRetryBlocked = false;
       localStorage.setItem(SALES_STORAGE_KEY, JSON.stringify(sales));
     }
+
+    void db.orders.update(orderId, {
+      syncStatus: 'synced',
+      syncError: undefined,
+      syncRetryBlocked: false,
+      syncFailedAt: undefined,
+    });
 
     console.log('[Sales Service] Marked sale as synced:', orderId);
   } catch (error) {
@@ -111,16 +129,37 @@ export function markSaleAsSynced(orderId: string): void {
 /**
  * Mark a sale as failed to sync
  */
-export function markSaleAsFailed(orderId: string, error: string): void {
+export function markSaleAsFailed(orderId: string, error: string, options: MarkSaleFailedOptions = {}): void {
   try {
     if (typeof window === 'undefined') return;
 
+    const failedAt = new Date().toISOString();
     const sales = getSalesFromLocalStorage();
     const saleIndex = sales.findIndex(s => s.id === orderId);
     if (saleIndex !== -1) {
       sales[saleIndex].syncError = error;
+      sales[saleIndex].syncStatus = 'failed';
+      sales[saleIndex].syncRetryBlocked = Boolean(options.retryBlocked);
+      sales[saleIndex].syncFailedAt = failedAt;
       localStorage.setItem(SALES_STORAGE_KEY, JSON.stringify(sales));
     }
+
+    const pending = getPendingSales();
+    const pendingIndex = pending.findIndex(s => s.id === orderId);
+    if (pendingIndex !== -1) {
+      pending[pendingIndex].syncError = error;
+      pending[pendingIndex].syncStatus = 'failed';
+      pending[pendingIndex].syncRetryBlocked = Boolean(options.retryBlocked);
+      pending[pendingIndex].syncFailedAt = failedAt;
+      localStorage.setItem(PENDING_SALES_KEY, JSON.stringify(pending));
+    }
+
+    void db.orders.update(orderId, {
+      syncStatus: 'failed',
+      syncError: error,
+      syncRetryBlocked: Boolean(options.retryBlocked),
+      syncFailedAt: failedAt,
+    });
 
     console.log('[Sales Service] Marked sale as failed:', orderId, error);
   } catch (error) {

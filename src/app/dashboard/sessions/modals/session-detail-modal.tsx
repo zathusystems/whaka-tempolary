@@ -311,7 +311,7 @@ const SessionSalesListModal = ({ sessionId }: { sessionId: string }) => {
                         </Badge>
                         {isEisPending && (
                           <Badge variant="outline" className="border-amber-300 text-amber-700">
-                            EIS Pending
+                            Fiscal Pending
                           </Badge>
                         )}
                       </div>
@@ -386,7 +386,7 @@ const SessionSalesListModal = ({ sessionId }: { sessionId: string }) => {
                               </Badge>
                               {isEisPending && (
                                 <Badge variant="outline" className="border-amber-300 text-amber-700">
-                                  EIS Pending
+                                  Fiscal Pending
                                 </Badge>
                               )}
                             </div>
@@ -713,28 +713,28 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
                                 <span className="font-semibold">{eisSummary.ordersWithFiscalNumber}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">Fiscal Pending:</span>
+                                <span className="text-muted-foreground">Fiscal No Pending:</span>
                                 <span>{eisSummary.pendingFiscalNumber}</span>
                             </div>
                             <Separator />
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">EIS Pending:</span>
+                                <span className="text-muted-foreground">Receipt Pending:</span>
                                 <span>{eisSummary.eisStatusCounts.pending}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">EIS Submitted:</span>
+                                <span className="text-muted-foreground">Fiscal Submitted:</span>
                                 <span>{eisSummary.eisStatusCounts.submitted}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">EIS Accepted:</span>
+                                <span className="text-muted-foreground">Fiscal Accepted:</span>
                                 <span className="text-green-600">{eisSummary.eisStatusCounts.accepted}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">EIS Rejected:</span>
+                                <span className="text-muted-foreground">Fiscal Rejected:</span>
                                 <span className="text-red-600">{eisSummary.eisStatusCounts.rejected}</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-muted-foreground">EIS Unknown:</span>
+                                <span className="text-muted-foreground">Fiscal Unknown:</span>
                                 <span>{eisSummary.eisStatusCounts.unknown}</span>
                             </div>
                             <Separator />

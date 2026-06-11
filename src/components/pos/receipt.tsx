@@ -4,6 +4,7 @@
 import React from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { format } from 'date-fns';
+import QRCode from 'react-qr-code';
 import { db, type Order, type Business } from '@/lib/db';
 import { getOfflineBusinessProfile } from '@/lib/business-profile';
 
@@ -18,6 +19,8 @@ interface ReceiptProps {
     showItemDetails?: boolean;
     showTaxBreakdown?: boolean;
     copyNumber?: number; // 1 = Original, 2+ = Copy
+    elementId?: string;
+    enablePrintStyles?: boolean;
 }
 
 export const Receipt = ({ 
@@ -31,6 +34,8 @@ export const Receipt = ({
   showItemDetails = true,
   showTaxBreakdown = true,
   copyNumber = 1,
+  elementId = 'receipt-printable-area',
+  enablePrintStyles = true,
 }: ReceiptProps) => {
   const toFiniteNumber = (value: unknown, fallback: number = 0): number => {
     if (typeof value === 'number') {
@@ -108,32 +113,108 @@ export const Receipt = ({
     return `${value.slice(0, 12)}...${value.slice(-8)}`;
   };
 
-  const resolveQrPayload = (rawValue: unknown): string => {
-    const raw = toTrimmedString(rawValue);
-    if (!raw) {
-      return '';
-    }
+  const normalizeReceiptKey = (value: string): string => value.replace(/[^a-z0-9]/gi, '').toLowerCase();
 
+  const parseJsonCandidate = (value: string): unknown | null => {
     try {
-      const parsed = JSON.parse(raw);
-      if (typeof parsed === 'string') {
-        return parsed.trim();
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  };
+
+  const isValidationUrl = (value: unknown): boolean => {
+    const raw = toTrimmedString(value);
+    return /^https?:\/\//i.test(raw) || /receiptvalidation\/validate/i.test(raw);
+  };
+
+  const findNestedString = (source: unknown, keys: string[]): string => {
+    const wantedKeys = new Set(keys.map(normalizeReceiptKey));
+    const queue: unknown[] = [source];
+    const seen = new Set<unknown>();
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (current === null || current === undefined) {
+        continue;
       }
-      if (parsed && typeof parsed === 'object') {
-        const nestedPayload =
-          parsed.qrCodePayload ||
-          parsed.qr_code_payload ||
-          parsed.qrPayload ||
-          parsed.qr_payload;
-        if (nestedPayload) {
-          return toTrimmedString(nestedPayload);
+
+      if (typeof current === 'string') {
+        const parsed = parseJsonCandidate(current.trim());
+        if (parsed && typeof parsed === 'object') {
+          queue.push(parsed);
+        }
+        continue;
+      }
+
+      if (typeof current !== 'object') {
+        continue;
+      }
+
+      if (seen.has(current)) {
+        continue;
+      }
+      seen.add(current);
+
+      if (Array.isArray(current)) {
+        queue.push(...current);
+        continue;
+      }
+
+      for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
+        const normalizedKey = normalizeReceiptKey(key);
+        if (wantedKeys.has(normalizedKey)) {
+          const resolved = toTrimmedString(value);
+          if (resolved) {
+            return resolved;
+          }
+        }
+        if (value && typeof value === 'object') {
+          queue.push(value);
+        } else if (typeof value === 'string' && value.trim().startsWith('{')) {
+          const parsed = parseJsonCandidate(value.trim());
+          if (parsed && typeof parsed === 'object') {
+            queue.push(parsed);
+          }
         }
       }
-    } catch {
-      // Keep raw value when payload is not JSON.
     }
 
-    return raw;
+    return '';
+  };
+
+  const resolveReceiptValidationPayload = (...candidates: unknown[]): { payload: string; mode: 'online' | 'offline' | 'unknown' } => {
+    const onlineKeys = ['validationURL', 'validationUrl', 'validation_url', 'mraValidationURL', 'mra_validation_url'];
+    const offlineKeys = ['offlineValidationURL', 'offlineValidationUrl', 'offline_validation_url'];
+    const qrKeys = ['qrCodePayload', 'qr_code_payload', 'qrPayload', 'qr_payload'];
+
+    for (const candidate of candidates) {
+      const onlineUrl = findNestedString(candidate, onlineKeys);
+      if (isValidationUrl(onlineUrl)) {
+        return { payload: onlineUrl, mode: 'online' };
+      }
+    }
+
+    for (const candidate of candidates) {
+      const offlineUrl = findNestedString(candidate, offlineKeys);
+      if (isValidationUrl(offlineUrl)) {
+        return { payload: offlineUrl, mode: 'offline' };
+      }
+    }
+
+    for (const candidate of candidates) {
+      const rawCandidate = toTrimmedString(candidate);
+      if (isValidationUrl(rawCandidate)) {
+        return { payload: rawCandidate, mode: 'unknown' };
+      }
+
+      const nestedQrPayload = findNestedString(candidate, qrKeys);
+      if (isValidationUrl(nestedQrPayload)) {
+        return { payload: nestedQrPayload, mode: 'unknown' };
+      }
+    }
+
+    return { payload: '', mode: 'unknown' };
   };
 
   const formatSafeCurrency = (value: unknown): string => currencyFormatter(toFiniteNumber(value, 0));
@@ -158,7 +239,10 @@ export const Receipt = ({
   const businessAddress = resolvedBusiness?.address?.trim();
   const businessPhone = resolvedBusiness?.phone?.trim();
   const businessEmail = resolvedBusiness?.email?.trim();
-  const businessTin = toTrimmedString(
+  const sellerTin = toTrimmedString(
+    (order as any).sellerTIN ??
+    (order as any).sellerTin ??
+    (order as any).seller_tin ??
     (resolvedBusiness as any)?.tin ??
     (resolvedBusiness as any)?.taxPin ??
     (resolvedBusiness as any)?.tax_pin
@@ -188,7 +272,8 @@ export const Receipt = ({
     (order as any).fiscalInvoiceNumber ?? (order as any).fiscal_invoice_number
   );
   const eisUuid = toTrimmedString((order as any).eisUuid ?? (order as any).eis_uuid);
-  const eisStatus = toTrimmedString((order as any).eisStatus ?? (order as any).eis_status).toUpperCase() || 'PENDING';
+  const rawEisStatus = toTrimmedString((order as any).eisStatus ?? (order as any).eis_status);
+  const eisStatus = rawEisStatus.toUpperCase() || 'PENDING';
   const digitalSignature = toTrimmedString(
     (order as any).digitalSignature ?? (order as any).digital_signature
   );
@@ -283,23 +368,38 @@ export const Receipt = ({
   );
   const hasPerItemTax = totalItemVat > 0;
 
-  const resolvedQrPayload = resolveQrPayload(
-    (order as any).qrCodePayload ?? (order as any).qr_code_payload
+  const validationMetadata =
+    (order as any).eisValidationMetadata ??
+    (order as any).eis_validation_metadata ??
+    (order as any).mraResponse ??
+    (order as any).mra_response ??
+    {};
+  const validationPayload = resolveReceiptValidationPayload(
+    (order as any).qrCodePayload,
+    (order as any).qr_code_payload,
+    validationMetadata
   );
-  const fallbackCompliancePayload = [
-    `MRA-EIS`,
-    `FISCAL:${fiscalInvoiceNumber || `ORD-${orderNumberDisplay}`}`,
-    `ORDER:${orderNumberDisplay}`,
-    `STATUS:${eisStatus}`,
-    `UUID:${eisUuid || 'N/A'}`,
-    `TOTAL:${normalizedFinalPayable.toFixed(2)}`,
-    `DATE:${orderDate.toISOString()}`,
-    `SIG:${signaturePreview || 'N/A'}`,
-  ].join('|');
-  const qrPayload = (resolvedQrPayload && resolvedQrPayload.length <= 512)
-    ? resolvedQrPayload
-    : fallbackCompliancePayload;
-  const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&ecc=M&margin=0&data=${encodeURIComponent(qrPayload)}`;
+  const hasSubmittedEisStatus = ['SUBMITTED', 'ACCEPTED'].includes(eisStatus);
+  const hasRejectedEisStatus = eisStatus === 'REJECTED';
+  const isFiscalizedReceipt = Boolean(
+    fiscalInvoiceNumber ||
+    eisUuid ||
+    digitalSignature ||
+    validationPayload.payload ||
+    hasSubmittedEisStatus
+  );
+  const hasEisVerificationData = isFiscalizedReceipt || hasRejectedEisStatus;
+  const qrPayload = validationPayload.payload;
+  const effectiveShowHeader = showHeader || isFiscalizedReceipt;
+  const effectiveShowQRCode = showQRCode || isFiscalizedReceipt;
+  const effectiveShowItemDetails = showItemDetails || isFiscalizedReceipt;
+  const effectiveShowTaxBreakdown = showTaxBreakdown || isFiscalizedReceipt;
+  const effectiveShowFooter = showFooter;
+  const missingFiscalText = hasSubmittedEisStatus ? 'N/A' : 'PENDING';
+  const fiscalInvoiceNumberDisplay = fiscalInvoiceNumber || missingFiscalText;
+  const validationUrlDisplay = qrPayload || missingFiscalText;
+  const fiscalStatusDisplay = eisStatus || (isFiscalizedReceipt ? missingFiscalText : 'N/A');
+  const shouldRenderQr = Boolean(effectiveShowQRCode && qrPayload);
 
   // Calculate tax breakdown by rate for MRA compliance
   const calculateTaxBreakdown = () => {
@@ -360,7 +460,32 @@ export const Receipt = ({
       breakdown[rateKey].count += 1;
     });
     
-    return Object.entries(breakdown)
+    const entries = Object.entries(breakdown);
+    if (entries.length === 0 && (normalizedOrderNet > 0 || normalizedOrderTax > 0 || normalizedOrderTotal > 0)) {
+      const orderTaxRate = toOptionalFiniteNumber(
+        (order as any).taxRateValue ??
+        (order as any).tax_rate_value ??
+        (order as any).taxRate ??
+        (order as any).tax_rate
+      );
+      const inferredTaxRate =
+        orderTaxRate !== null
+          ? orderTaxRate
+          : normalizedOrderTax > 0 && normalizedOrderNet > 0
+          ? Number(((normalizedOrderTax / normalizedOrderNet) * 100).toFixed(2))
+          : 0;
+      return [{
+        rate: inferredTaxRate,
+        method: String(((order as any).taxCalculationMethod ?? (order as any).tax_calculation_method) || 'inclusive') === 'exclusive'
+          ? 'exclusive'
+          : 'inclusive',
+        taxableValue: normalizedOrderNet || Math.max(0, normalizedOrderTotal - normalizedOrderTax),
+        vatAmount: normalizedOrderTax,
+        count: orderItems.length || 1,
+      }];
+    }
+
+    return entries
       .sort(([keyA], [keyB]) => {
         const rateA = parseFloat(keyA.split('-')[0]);
         const rateB = parseFloat(keyB.split('-')[0]);
@@ -376,6 +501,7 @@ export const Receipt = ({
   };
 
   const taxBreakdown = calculateTaxBreakdown();
+  const receiptVatTotal = hasPerItemTax ? totalItemVat : normalizedOrderTax;
   const resolvedPaperWidth: '80mm' | '58mm' = paperWidth === '58mm' ? '58mm' : '80mm';
   const isCompactPaper = resolvedPaperWidth === '58mm';
   const containerWidthClass = isCompactPaper ? 'w-[218px]' : 'w-[300px]';
@@ -391,9 +517,14 @@ export const Receipt = ({
       : 'tracking-[0.08em]';
   const payableTextClass = isCompactPaper ? 'text-[11px]' : 'text-sm';
   const inlineValueMaxWidthClass = isCompactPaper ? 'min-w-0 max-w-[108px]' : 'min-w-0 max-w-[170px]';
-  const qrSizeClass = isCompactPaper ? 'h-10 w-10' : 'h-12 w-12';
+  const qrSizeStyle = {
+    width: isCompactPaper ? '24mm' : '28mm',
+    height: isCompactPaper ? '24mm' : '28mm',
+  };
+  const qrContainerStyle = {
+    minHeight: isCompactPaper ? '26mm' : '30mm',
+  };
   const printContentWidth = resolvedPaperWidth;
-  const receiptVatTotal = hasPerItemTax ? totalItemVat : normalizedOrderTax;
   // Keep divider width aligned with native ESC/POS formatter widths
   // (58mm=28 chars, 80mm=42 chars) to prevent hard-wrap in printed output.
   const receiptLineWidth = isCompactPaper ? 28 : 42;
@@ -426,23 +557,104 @@ export const Receipt = ({
   const isCopyReceipt = copyNumber > 1;
   const receiptTypeLabel = `COPY${copyNumber > 2 ? ` #${copyNumber}` : ''}`;
 
+  const formatReceiptAmount = (value: unknown): string => toFiniteNumber(value, 0).toFixed(2);
+  const formatReceiptQuantity = (value: unknown): string => {
+    const parsed = toFiniteNumber(value, 0);
+    if (Math.abs(parsed - Math.round(parsed)) < 0.0001) {
+      return String(Math.round(parsed));
+    }
+    return parsed.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+  };
+  const compactReceiptText = (value: unknown, maxLength = isCompactPaper ? 22 : 30): string => {
+    const raw = toTrimmedString(value).replace(/\s+/g, ' ');
+    if (!raw) return 'ITEM';
+    if (raw.length <= maxLength) return raw.toUpperCase();
+    return `${raw.slice(0, Math.max(0, maxLength - 3)).trimEnd().toUpperCase()}...`;
+  };
+  const resolveTaxCode = (rate: unknown, taxType?: unknown): string => {
+    const normalizedRate = toFiniteNumber(rate, 0);
+    const normalizedType = toTrimmedString(taxType).toLowerCase();
+    if (normalizedType.includes('exempt')) return 'E';
+    if (normalizedRate <= 0 || normalizedType.includes('zero') || normalizedType.includes('non')) return 'B';
+    return 'A';
+  };
+  const receiptNumberDisplay = fiscalInvoiceNumber || orderNumberDisplay;
+  const sellerAddressLines = (businessAddress || '')
+    .split(/\n|,/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  const taxpayerConfiguration =
+    validationMetadata && typeof validationMetadata === 'object'
+      ? ((validationMetadata as any).taxpayerConfiguration ??
+          (validationMetadata as any).taxpayer_configuration ??
+          (validationMetadata as any).taxpayer)
+      : null;
+  const explicitVatRegistered =
+    (taxpayerConfiguration && typeof taxpayerConfiguration === 'object'
+      ? ((taxpayerConfiguration as any).isVATRegistered ??
+          (taxpayerConfiguration as any).is_vat_registered ??
+          (taxpayerConfiguration as any).vatRegistered)
+      : undefined) ??
+    (order as any).sellerVatRegistered ??
+    (order as any).seller_vat_registered ??
+    (resolvedBusiness as any)?.vatRegistered ??
+    (resolvedBusiness as any)?.vat_registered;
+  const hasExplicitVatRegistration = explicitVatRegistered !== undefined && explicitVatRegistered !== null && explicitVatRegistered !== '';
+  const isSellerVatRegistered = hasExplicitVatRegistration
+    ? explicitVatRegistered === true || String(explicitVatRegistered).toLowerCase() === 'true'
+    : false;
+  const vatRegistrationLabel = toTrimmedString(
+    (order as any).sellerVatStatus ??
+    (order as any).seller_vat_status ??
+    (order as any).vatStatus ??
+    (order as any).vat_status
+  ) || (isSellerVatRegistered ? '*VAT REGISTERED*' : '*NON VAT REGISTERED*');
+  const taxOfficeLabel = toTrimmedString(
+    (order as any).taxOffice ??
+    (order as any).tax_office ??
+    (order as any).mraTaxOffice ??
+    (order as any).mra_tax_office
+  );
+  const legalReceiptTitle = isFiscalizedReceipt ? '*** START OF LEGAL RECEIPT ***' : '*** START OF RECEIPT ***';
+  const legalReceiptEndTitle = isFiscalizedReceipt ? '*** END OF LEGAL RECEIPT ***' : '*** END OF RECEIPT ***';
+  const legalTaxBreakdown = taxBreakdown.map((tax) => {
+    const code = resolveTaxCode(tax.rate);
+    return {
+      code,
+      rate: toFiniteNumber(tax.rate, 0),
+      taxableValue: toFiniteNumber(tax.taxableValue, 0),
+      vatAmount: toFiniteNumber(tax.vatAmount, 0),
+    };
+  });
+  const tenderedAmount = receiptAmountPaid > 0 ? receiptAmountPaid : normalizedFinalPayable;
+  const legalRule = '-'.repeat(isCompactPaper ? 30 : 40);
+  const receiptRootClass = `${containerWidthClass} ${contentPaddingClass} bg-white text-black font-mono ${bodyTextClass} leading-tight`;
+
   return (
-    <div id="receipt-printable-area" className={`${containerWidthClass} ${contentPaddingClass} bg-white text-black font-mono ${bodyTextClass} leading-tight`}>
+    <div
+      id={elementId}
+      className={receiptRootClass}
+      data-eis-qr-payload={qrPayload || undefined}
+      data-eis-validation-mode={validationPayload.mode}
+    >
       <style jsx global>{`
-        #receipt-printable-area,
-        #receipt-printable-area * {
+        #${elementId},
+        #${elementId} * {
           overflow-wrap: anywhere;
           word-break: break-word;
+          letter-spacing: 0;
         }
 
+        ${enablePrintStyles ? `
         @media print {
           body * {
             visibility: hidden;
           }
-          #receipt-printable-area, #receipt-printable-area * {
+          #${elementId}, #${elementId} * {
             visibility: visible;
           }
-          #receipt-printable-area {
+          #${elementId} {
             position: absolute;
             left: 50%;
             top: 0;
@@ -456,222 +668,163 @@ export const Receipt = ({
             size: ${resolvedPaperWidth} auto;
           }
         }
+        ` : ''}
       `}</style>
 
-      {/* Receipt copy indicator (hidden for first/original print) */}
       {isCopyReceipt && (
-        <div className="text-center mb-1">
-          <p className="inline-block rounded-sm border border-red-700 px-1.5 py-[1px] text-[8px] leading-none font-semibold tracking-wide text-red-700">
+        <div className="mb-1 text-center">
+          <p className="inline-block border border-black px-1.5 py-[1px] text-[8px] font-semibold leading-none">
             {receiptTypeLabel}
           </p>
         </div>
       )}
 
-      {/* Business Header */}
-      {showHeader && (
-        <div className={`text-center space-y-0.5 mt-1 mb-3 ${bodyTextClass}`}>
-          <p className={`${businessNameTextClass} font-extrabold leading-tight`}>
-            <span className={`${businessNameWidthClass} break-words`}>{businessNameDisplay}</span>
-          </p>
-          {renderDotRuleLine()}
-          <p className={`text-center ${metaTextClass} leading-snug whitespace-pre-line`}>
-             {businessAddress || 'N/A'}
-          </p>
-          <p className={`${metaTextClass} leading-snug`}>Tel: {businessPhone || 'N/A'}</p>
-          <p className={`${metaTextClass} leading-snug`}>Email: {businessEmail || 'N/A'}</p>
-          <p className={`${metaTextClass} leading-snug`}>TPIN: {businessTin || 'N/A'}</p>
-          {/* <p className={`${metaTextClass} leading-snug`}>Branch: {branchIdDisplay || 'N/A'}</p> */}
-          <p className={`${metaTextClass} leading-snug`}>{cashierReceiptLabel}</p>
-          {pumpName && <p className={`${metaTextClass} leading-snug`}>Pump: {pumpName}</p>}
+      {effectiveShowHeader && (
+        <div className="mt-1 text-center">
+          <div className="mx-auto mb-1 flex h-9 w-9 items-center justify-center rounded-full border-2 border-black text-[9px] font-black leading-none">
+            MRA
+          </div>
+          <p className={`${metaTextClass} leading-none`}>/|\</p>
+          <p className="mt-2 font-bold leading-tight">{legalReceiptTitle}</p>
+          <p className={`${businessNameTextClass} font-bold leading-tight`}>{businessNameDisplay}</p>
+          {sellerAddressLines.length > 0 ? (
+            sellerAddressLines.map((line, index) => (
+              <p key={`${line}-${index}`} className={`${metaTextClass} leading-tight`}>
+                {line.toUpperCase()}
+              </p>
+            ))
+          ) : (
+            <p className={`${metaTextClass} leading-tight`}>ADDRESS: N/A</p>
+          )}
+          <p className={`${metaTextClass} leading-tight`}>CELL: {businessPhone || 'N/A'}</p>
+          <p className={`${metaTextClass} leading-tight`}>EMAIL: {businessEmail || 'N/A'}</p>
+          <p className={`${bodyTextClass} leading-tight`}>TIN: {sellerTin || 'N/A'}</p>
+          <p className={`${bodyTextClass} font-bold leading-tight`}>{vatRegistrationLabel.toUpperCase()}</p>
+          {taxOfficeLabel && <p className={`${metaTextClass} leading-tight`}>{taxOfficeLabel.toUpperCase()}</p>}
+          {pumpName && <p className={`${metaTextClass} leading-tight`}>PUMP: {pumpName.toUpperCase()}</p>}
         </div>
       )}
 
-      {/* Invoice Section */}
-      <div className={`space-y-0.5 ${sectionSpacingClass} ${bodyTextClass}`}>
-        {renderSectionDivider()}
-        <div className="flex justify-between items-start gap-2">
-          <span>Invoice No:</span>
-          <span className="font-semibold text-right min-w-0 flex-1 break-all">
-            {orderNumberDisplay}
-          </span>
+      <div className={`mt-5 space-y-0.5 ${bodyTextClass}`}>
+        <div className="grid grid-cols-[auto_1fr] gap-x-2">
+          <span>Buyers Name:</span>
+          <span className="text-right break-words">{buyerName || 'Walk-in Customer'}</span>
         </div>
-        {/* <div className="flex justify-between items-start gap-2">
-          <span>Fiscal Invoice No:</span>
-          <span className="font-semibold text-right min-w-0 flex-1 break-all">
-            {fiscalInvoiceNumber || 'PENDING ASSIGNMENT'}
-          </span>
+        <div className="grid grid-cols-[auto_1fr] gap-x-2">
+          <span>Buyers Tin:</span>
+          <span className="text-right break-all">{buyerTin || 'N/A'}</span>
         </div>
-        <div className="flex justify-between items-start gap-2">
-          <span>Receipt Type:</span>
-          <span>{receiptType}</span>
+        <div className="grid grid-cols-[auto_1fr] gap-x-2">
+          <span>Receipt Number:</span>
+          <span className="text-right break-all font-semibold">{receiptNumberDisplay}</span>
         </div>
-        <div className="flex justify-between items-start gap-2">
-          <span>Fiscal Day:</span>
-          <span>{fiscalDayNumber}</span>
-        </div> */}
-        <div className="flex justify-between items-start gap-2">
-          <span>Date:</span>
-          <span>{format(orderDate, 'dd/MM/yyyy')}</span>
-        </div>
-        <div className="flex justify-between items-start gap-2">
-          <span>Time:</span>
-          <span>{format(orderDate, 'HH:mm:ss')}</span>
-        </div>
-      </div>
-
-      {/* Buyer Details */}
-      <div className={`space-y-0.5 ${sectionSpacingClass} ${bodyTextClass}`}>
-        {renderSectionDivider()}
-        <div className="flex justify-between items-start gap-2">
-          <span>Buyer&apos;s Name:</span>
-          <span className={`text-right ${inlineValueMaxWidthClass} break-words`}>{buyerName || 'Walk-in Customer'}</span>
-        </div>
-        <div className="flex justify-between items-start gap-2">
-          <span>Buyer TPIN:</span>
-          <span className={`text-right ${inlineValueMaxWidthClass} break-all`}>{buyerTin || 'N/A'}</span>
-        </div>
-      </div>
-
-      {/* Items */}
-      {showItemDetails && (
-        <div className={`${sectionSpacingClass} ${bodyTextClass}`}>
-          {renderSectionDivider()}
-          <div className="flex justify-between items-start gap-2 font-bold py-0.5 mb-1">
-            <span>ITEM</span>
-            <span className="text-right">TOTAL</span>
+        {!isFiscalizedReceipt && (
+          <div className="grid grid-cols-[auto_1fr] gap-x-2">
+            <span>EIS Status:</span>
+            <span className="text-right font-semibold">{fiscalStatusDisplay}</span>
           </div>
+        )}
+      </div>
+
+      {effectiveShowItemDetails && (
+        <div className={`mt-2 ${bodyTextClass}`}>
+          <p className="whitespace-nowrap text-center leading-none">{legalRule}</p>
           {orderItems.map((item, index) => {
             const itemPrice = toFiniteNumber(item.price, 0);
             const itemQuantity = Math.max(1, toFiniteNumber(item.quantity, 1));
             const itemTotal = toFiniteNumber(item.total, itemPrice * itemQuantity);
-            const itemTaxRate = toFiniteNumber(item.tax_rate ?? item.taxRate, 0);
-            
+            const itemSubtotal = toFiniteNumber(item.subtotal, Math.max(0, itemTotal - toFiniteNumber(item.tax_amount ?? item.taxAmount, 0)));
+            const itemVat = toFiniteNumber(item.tax_amount ?? item.taxAmount, Math.max(0, itemTotal - itemSubtotal));
+            const itemTaxRate = toFiniteNumber(item.tax_rate ?? item.taxRate, itemVat > 0 && itemSubtotal > 0 ? (itemVat / itemSubtotal) * 100 : 0);
+            const itemTaxCode = resolveTaxCode(itemTaxRate, item.tax_type ?? item.taxType);
+
             return (
-              <div key={`${item.id}-${index}`} className="mb-1.5">
-                <div className="flex justify-between items-start gap-2">
-                  <span className="pr-2 min-w-0 break-words">{item.name}</span>
-                  <span className="font-semibold">{formatSafeCurrency(itemTotal)}</span>
+              <div key={`${item.id}-${index}`} className="mb-1">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="whitespace-nowrap">{formatReceiptQuantity(itemQuantity)} X {formatReceiptAmount(itemPrice)}</span>
+                  <span className="whitespace-nowrap text-right font-semibold">{formatReceiptAmount(itemTotal)} {itemTaxCode}</span>
                 </div>
-                <div className={`${metaTextClass} text-gray-600 pl-2`}>
-                  {itemQuantity} x {formatSafeCurrency(itemPrice)}
-                  {itemTaxRate && itemTaxRate > 0 && (
-                    <span className="ml-1">@ {itemTaxRate.toFixed(2)}%</span>
-                  )}
-                </div>
+                <p className="leading-tight">{compactReceiptText(item.name)}</p>
               </div>
             );
           })}
         </div>
       )}
 
-      {/* Total Amount */}
-      <div className={`space-y-0.5 ${sectionSpacingClass} ${bodyTextClass}`}>
-        {renderSectionDivider()}
-        <div className="flex justify-between items-start gap-2">
-          <span>Subtotal:</span>
-          <span>{formatSafeCurrency(normalizedOrderNet)}</span>
-        </div>
-        <div className="flex justify-between items-start gap-2">
-          <span>VAT Amount:</span>
-          <span>{formatSafeCurrency(receiptVatTotal)}</span>
-        </div>
-        <div className="pt-1 mt-1">
-          {renderDotRuleLine()}
-          <div className={`flex justify-between items-start gap-2 font-bold ${payableTextClass} py-1`}>
-            <span className="tracking-wide">TOTAL PAYABLE</span>
-            <span>{formatSafeCurrency(normalizedFinalPayable)}</span>
+      {effectiveShowTaxBreakdown && legalTaxBreakdown.length > 0 && (
+        <div className={`mt-2 ${bodyTextClass}`}>
+          <p className="whitespace-nowrap text-center leading-none">{legalRule}</p>
+          {legalTaxBreakdown.map((tax, index) => {
+            const rateText = formatReceiptAmount(tax.rate).replace(/0+$/, '').replace(/\.$/, '');
+            const rateLabel = `${tax.code}-${rateText}%`;
+            return (
+              <React.Fragment key={`${rateLabel}-${index}`}>
+                <div className="flex justify-between gap-2">
+                  <span>TAXABLE {rateLabel}</span>
+                  <span>{formatReceiptAmount(tax.taxableValue)}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span>VAT {rateLabel}</span>
+                  <span>{formatReceiptAmount(tax.vatAmount)}</span>
+                </div>
+              </React.Fragment>
+            );
+          })}
+          <div className="flex justify-between gap-2 font-semibold">
+            <span>TOTAL VAT:</span>
+            <span>{formatReceiptAmount(receiptVatTotal)}</span>
           </div>
-          {renderDotRuleLine()}
         </div>
-      </div>
+      )}
 
-      {/* Payment Information */}
-      <div className={`space-y-0.5 ${sectionSpacingClass} ${bodyTextClass}`}>
-        {renderSectionDivider()}
-        <div className="flex justify-between items-start gap-2">
-          <span>Payment Method:</span>
-          <span>{paymentMethodDisplay || 'N/A'}</span>
+      <div className={`mt-2 ${bodyTextClass}`}>
+        <p className="whitespace-nowrap text-center leading-none">{legalRule}</p>
+        <div className="flex justify-between gap-2 font-bold">
+          <span>TOTAL:</span>
+          <span>{formatReceiptAmount(normalizedFinalPayable)}</span>
         </div>
-        <div className="flex justify-between items-start gap-2 font-semibold">
-          <span>Amount Paid:</span>
-          <span>{formatSafeCurrency(receiptAmountPaid)}</span>
+        <div className="flex justify-between gap-2">
+          <span>Amount Tendered:</span>
+          <span>{formatReceiptAmount(tenderedAmount)}</span>
         </div>
-        <div className="flex justify-between items-start gap-2 font-semibold">
+        <div className="flex justify-between gap-2">
           <span>Change:</span>
-          <span>{formatSafeCurrency(receiptChangeDisplay)}</span>
+          <span>{formatReceiptAmount(receiptChangeDisplay)}</span>
         </div>
+        {paymentMethodDisplay && (
+          <div className="flex justify-between gap-2">
+            <span>Payment:</span>
+            <span>{paymentMethodDisplay}</span>
+          </div>
+        )}
       </div>
 
-      {/* Tax Breakdown */}
-      {showTaxBreakdown && taxBreakdown.length > 0 && (
-        <div className={`${sectionSpacingClass} ${bodyTextClass}`}>
-          <div className="mb-1 space-y-0.5">
-            <p className={`text-center ${metaTextClass} font-semibold tracking-wide`}>
-              {makeSectionBanner('Tax Summary')}
-            </p>
-            {renderDotRuleLine()}
-          </div>
-          {taxBreakdown.map((tax, idx) => {
-            const methodShortLabel = tax.method === 'exclusive' ? 'EXC' : 'INC';
-            const displayTaxRate = toFiniteNumber(tax.rate, 0).toFixed(2);
-            return (
-              <div key={idx} className="space-y-0.5 mb-1">
-                <div className="flex justify-between items-start gap-2">
-                  <span>VAT {displayTaxRate}% ({methodShortLabel})</span>
-                  <span className="font-semibold">{formatSafeCurrency(tax.vatAmount)}</span>
-                </div>
-                <div className={`flex justify-between items-start gap-2 ${metaTextClass} text-gray-700 pl-2`}>
-                  <span>Taxable:</span>
-                  <span>{formatSafeCurrency(tax.taxableValue)}</span>
-                </div>
-              </div>
-            );
-          })}
-          {renderDotRuleLine()}
-        </div>
-      )}
-
-      {/* EIS Verification */}
-      {/* <div className={`space-y-0.5 ${sectionSpacingClass} ${bodyTextClass}`}>
-        {renderSectionDivider()}
-        <div className="flex justify-between items-start gap-2">
-          <span>EIS Receipt No:</span>
-          <span className={`text-right ${inlineValueMaxWidthClass} break-all`}>
-            {fiscalInvoiceNumber || 'PENDING'}
-          </span>
-        </div>
-        <div className="flex justify-between items-start gap-2">
-          <span>Verification Code:</span>
-          <span className={`text-right ${inlineValueMaxWidthClass} break-all`}>
-            {eisUuid || 'N/A'}
-          </span>
-        </div>
-        <div className="flex justify-between items-start gap-2">
-          <span>Fiscal Signature:</span>
-          <span className={`text-right ${inlineValueMaxWidthClass} break-all`}>
-            {digitalSignature || 'N/A'}
-          </span>
-        </div>
-        <div className="flex justify-between items-start gap-2">
-          <span>EIS Status:</span>
-          <span>{eisStatus || 'PENDING'}</span>
-        </div>
-      </div> */}
-
-      {/* Footer */}
-      {showFooter && (
-        <div className="text-center mt-6">
-          <div className="h-3" />
-          <p className={`${metaTextClass} font-semibold`}>Thank you for your purchase</p>
-          {/* <p className={`${metaTextClass} text-gray-700 mt-0.5 mb-1`}>MRA EIS Fiscal Receipt</p> */}
-          {showQRCode && (
-            <div className="flex justify-center">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={qrCodeUrl} alt="EIS QR Code" className={qrSizeClass} />
+      <div className={`mt-5 text-center ${bodyTextClass}`}>
+        <p>DATE: {format(orderDate, 'yyyy-MM-dd')} TIME: {format(orderDate, 'HH:mm:ss')}</p>
+        {hasEisVerificationData && <p>Scan Here For Receipt Details</p>}
+        {shouldRenderQr ? (
+          <div className="flex flex-col items-center justify-center pt-2" style={qrContainerStyle}>
+            <div className="bg-white p-1" style={qrSizeStyle} aria-label="MRA EIS Validation QR Code">
+              <QRCode
+                value={qrPayload}
+                size={256}
+                level="M"
+                style={{ height: '100%', width: '100%' }}
+              />
             </div>
-          )}
+          </div>
+        ) : hasEisVerificationData ? (
+          <p className={`${metaTextClass} mt-2 font-semibold`}>MRA QR PENDING</p>
+        ) : null}
+      </div>
+
+      {effectiveShowFooter && (
+        <div className={`mt-5 text-center ${bodyTextClass}`}>
+          <p className="font-bold">{legalReceiptEndTitle}</p>
+          <p className="mt-2">THANK YOU!</p>
         </div>
       )}
     </div>
+
   );
 };

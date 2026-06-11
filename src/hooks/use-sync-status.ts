@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { authFetch } from '@/lib/auth-fetch';
 import { db } from '@/lib/db';
+import { useBackendReachability } from '@/hooks/use-backend-reachability';
 
 /**
  * Hook to track pending sync items from both:
@@ -16,9 +17,7 @@ import { db } from '@/lib/db';
 export function useSyncStatus(branchId?: string | null) {
   const [pendingCount, setPendingCount] = useState(0);
   const [failedCount, setFailedCount] = useState(0);
-  const [isOnline, setIsOnline] = useState(
-    () => (typeof navigator === 'undefined' ? true : navigator.onLine)
-  );
+  const { isReachable: isOnline } = useBackendReachability({ intervalMs: 10000 });
   const [dirtyRecords, setDirtyRecords] = useState<any[]>([]);
   const [failedQueueItems, setFailedQueueItems] = useState<any[]>([]);
   const [pendingQueueItems, setPendingQueueItems] = useState<any[]>([]);
@@ -27,10 +26,6 @@ export function useSyncStatus(branchId?: string | null) {
     // Check sync status from both authFetch and Sync Service dirty flags
     const updateSyncStatus = async () => {
       try {
-        if (typeof navigator !== 'undefined') {
-          setIsOnline(navigator.onLine);
-        }
-
         const stableStringify = (value: any): string => {
           const normalize = (input: any): any => {
             if (Array.isArray(input)) {
@@ -87,7 +82,9 @@ export function useSyncStatus(branchId?: string | null) {
         // Note: Use filter() instead of where().equals() for boolean fields as IndexedDB doesn't support boolean key ranges
         const dirtyInventory = (await db.inventory.toArray()).filter(r => r._dirty === true && (!branchId || String(r.branchId) === String(branchId)));
         const dirtySessions = (await db.sessions.toArray()).filter(r => r._dirty === true && (!branchId || String(r.branchId) === String(branchId)));
-        const dirtyOrders = (await db.orders.toArray()).filter(r => r._dirty === true && (!branchId || String(r.branchId) === String(branchId)));
+        const localOrders = (await db.orders.toArray()).filter(r => !branchId || String(r.branchId) === String(branchId));
+        const failedLocalOrders = localOrders.filter(r => Boolean(r.syncRetryBlocked && String(r.syncError || '').trim()));
+        const dirtyOrders = localOrders.filter(r => r._dirty === true && r.syncRetryBlocked !== true);
         const dirtyPurchaseOrders = (await db.purchaseOrders.toArray()).filter(r => r._dirty === true && (!branchId || String(r.branchId) === String(branchId)));
         const dirtyStockTransfers = (await db.stockTransfers.toArray()).filter(r => r._dirty === true && (!branchId || String(r.branchId) === String(branchId)));
         const dirtyWasteRecords = (await db.wasteLog.toArray()).filter(r => r._dirty === true && (!branchId || String(r.branchId) === String(branchId)));
@@ -107,12 +104,25 @@ export function useSyncStatus(branchId?: string | null) {
         ];
         
         const dirtyCount = allDirtyRecords.length;
-        const failedQueueItems = authFetchPending.filter(
+        const failedAuthQueueItems = authFetchPending.filter(
           (item: any) => Boolean(String(item?.error || '').trim())
         );
         const pendingQueueItems = authFetchPending.filter(
           (item: any) => !String(item?.error || '').trim()
         );
+        const failedLocalQueueItems = failedLocalOrders.map((order) => ({
+          id: `local-order-${order.id}`,
+          source: 'local-order',
+          entityType: 'Order',
+          entityId: order.id,
+          method: 'POST',
+          url: '/sessions/orders/',
+          error: order.syncError,
+          metadata: {
+            label: order.orderNumber ? `Order #${order.orderNumber}` : `Order ${order.id}`,
+          },
+        }));
+        const failedQueueItems = [...failedAuthQueueItems, ...failedLocalQueueItems];
         const totalPending = dirtyCount + pendingQueueItems.length;
         const totalFailed = failedQueueItems.length;
         
@@ -128,24 +138,7 @@ export function useSyncStatus(branchId?: string | null) {
       }
     };
 
-    if (typeof navigator !== 'undefined') {
-      setIsOnline(navigator.onLine);
-    }
-
     updateSyncStatus();
-
-    // Listen for online/offline events
-    const handleOnline = () => {
-      console.log('[Sync Status] Network online - triggering sync check');
-      setIsOnline(true);
-    };
-    const handleOffline = () => {
-      console.log('[Sync Status] Network offline');
-      setIsOnline(false);
-    };
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
 
     // Poll for sync status changes every 1 second (more frequent for dirty flags)
     const interval = setInterval(updateSyncStatus, 1000);
@@ -157,13 +150,16 @@ export function useSyncStatus(branchId?: string | null) {
         updateSyncStatus();
       }
     };
+    const handleSyncStatusChanged = () => {
+      updateSyncStatus();
+    };
 
     window.addEventListener('storage', handleStorageChange);
+    window.addEventListener('handypos-sync-status-changed', handleSyncStatusChanged);
 
     return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
       window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('handypos-sync-status-changed', handleSyncStatusChanged);
       clearInterval(interval);
     };
   }, [branchId]);

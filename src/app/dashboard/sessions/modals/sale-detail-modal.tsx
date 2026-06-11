@@ -2,7 +2,16 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { format } from 'date-fns';
-import { MoreHorizontal, AlertTriangle, FileText, Loader2, Printer } from 'lucide-react';
+import {
+  MoreHorizontal,
+  AlertTriangle,
+  FileText,
+  Loader2,
+  Printer,
+  FilePlus2,
+  FileMinus2,
+  Ban,
+} from 'lucide-react';
 
 import { db, type Order, type Business } from '@/lib/db';
 import { useCurrency } from '@/hooks/use-currency';
@@ -37,19 +46,50 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Receipt } from '@/components/pos/receipt';
 import { VoidModal } from './void-modal';
+import { CreditNoteModal } from './credit-note-modal';
+import { DebitNoteModal } from './debit-note-modal';
 
-interface VoidTransaction {
+interface FiscalCorrectionBase {
   id: string;
-  void_number: string;
-  void_reason: string;
-  reason_description: string;
-  voided_amount: number;
-  voided_vat: number;
-  refund_method: string;
-  refund_amount: number;
-  refund_processed: boolean;
+  eis_status?: string | null;
+  eis_sync_state?: string | null;
+  eis_submitted_at?: string | null;
+  qr_code_payload?: string | null;
+  digital_signature?: string | null;
   created_by_name?: string;
   created_at: string;
+}
+
+interface CreditNote extends FiscalCorrectionBase {
+  credit_note_number: string;
+  fiscal_credit_number?: string | null;
+  reason: string;
+  description: string;
+  credit_amount: number | string;
+  vat_amount: number | string;
+  total_credit: number | string;
+}
+
+interface DebitNote extends FiscalCorrectionBase {
+  debit_note_number: string;
+  fiscal_debit_number?: string | null;
+  description: string;
+  additional_amount: number | string;
+  vat_amount: number | string;
+  total_debit: number | string;
+}
+
+interface VoidTransaction extends FiscalCorrectionBase {
+  void_number: string;
+  fiscal_void_number?: string | null;
+  void_reason: string;
+  reason_description: string;
+  voided_amount: number | string;
+  voided_vat: number | string;
+  refund_method: string;
+  refund_amount: number | string;
+  refund_processed: boolean;
+  refund_processed_at?: string | null;
 }
 
 const toFiniteNumber = (value: unknown, fallback = 0): number => {
@@ -74,6 +114,62 @@ const toTrimmedString = (value: unknown): string => {
   }
   const trimmed = String(value).trim();
   return trimmed;
+};
+
+const normalizeFiscalStatus = (value: unknown, fallback = ''): string => {
+  const normalized = toTrimmedString(value).toUpperCase();
+  return normalized || fallback;
+};
+
+const formatFiscalReceiptStatus = (status: string): string => {
+  switch (status) {
+    case 'SUBMITTED':
+      return 'Fiscal receipt submitted';
+    case 'ACCEPTED':
+    case 'SUCCESS':
+      return 'Fiscal receipt accepted';
+    case 'PENDING':
+      return 'Fiscal receipt pending';
+    case 'REJECTED':
+    case 'FAILED':
+      return 'Fiscal receipt rejected';
+    default:
+      return status ? `Fiscal receipt ${status.toLowerCase()}` : 'Fiscal receipt not submitted';
+  }
+};
+
+const formatCorrectionStatus = (status: string, kind: string): string => {
+  const normalizedKind = kind.toLowerCase();
+  const documentLabel = normalizedKind.includes('void')
+    ? 'Cancellation'
+    : normalizedKind.includes('credit')
+      ? 'Credit note'
+      : normalizedKind.includes('debit')
+        ? 'Debit note'
+        : 'Correction';
+
+  switch (status) {
+    case 'SUBMITTED':
+      return `${documentLabel} submitted`;
+    case 'ACCEPTED':
+    case 'SUCCESS':
+      return `${documentLabel} accepted`;
+    case 'PENDING':
+      return `${documentLabel} pending`;
+    case 'REJECTED':
+    case 'FAILED':
+      return `${documentLabel} rejected`;
+    default:
+      return status ? `${documentLabel} ${status.toLowerCase()}` : `${documentLabel} not submitted`;
+  }
+};
+
+const correctionStatusLabel = (kind: string): string => {
+  const normalizedKind = kind.toLowerCase();
+  if (normalizedKind.includes('void')) return 'Cancellation status';
+  if (normalizedKind.includes('credit')) return 'Credit note status';
+  if (normalizedKind.includes('debit')) return 'Debit note status';
+  return 'Correction status';
 };
 
 const resolveOrderItemInventoryId = (item: any): string => {
@@ -172,8 +268,12 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
   const { user } = useAuth();
   const { toast } = useToast();
   const [voidOpen, setVoidOpen] = useState(false);
+  const [creditOpen, setCreditOpen] = useState(false);
+  const [debitOpen, setDebitOpen] = useState(false);
   const [voidTransaction, setVoidTransaction] = useState<VoidTransaction | null>(null);
-  const [loadingVoid, setLoadingVoid] = useState(false);
+  const [creditNotes, setCreditNotes] = useState<CreditNote[]>([]);
+  const [debitNotes, setDebitNotes] = useState<DebitNote[]>([]);
+  const [loadingCorrections, setLoadingCorrections] = useState(false);
   const [isPrinting, setIsPrinting] = useState(false);
   const [businessSettings, setBusinessSettings] = useState<Business | null>(null);
   const [inventoryUnitById, setInventoryUnitById] = useState<Record<string, string>>({});
@@ -223,7 +323,39 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
     );
   }, [applyPrinterSettingsToReceipt]);
 
-  // Fetch business settings and void transaction details
+  const refreshCorrectionRecords = useCallback(async () => {
+    if (!order) {
+      setVoidTransaction(null);
+      setCreditNotes([]);
+      setDebitNotes([]);
+      return;
+    }
+
+    setLoadingCorrections(true);
+    setVoidTransaction(null);
+    setCreditNotes([]);
+    setDebitNotes([]);
+    try {
+      const [voids, credits, debits] = await Promise.all([
+        authFetch.fetch<VoidTransaction[]>(`/sessions/void-transactions/by_order/?order_id=${order.id}`),
+        authFetch.fetch<CreditNote[]>(`/sessions/credit-notes/by_order/?order_id=${order.id}`),
+        authFetch.fetch<DebitNote[]>(`/sessions/debit-notes/by_order/?order_id=${order.id}`),
+      ]);
+
+      setVoidTransaction(Array.isArray(voids) && voids.length > 0 ? voids[0] : null);
+      setCreditNotes(Array.isArray(credits) ? credits : []);
+      setDebitNotes(Array.isArray(debits) ? debits : []);
+    } catch (error) {
+      console.error('Error fetching EIS correction records:', error);
+      setVoidTransaction(null);
+      setCreditNotes([]);
+      setDebitNotes([]);
+    } finally {
+      setLoadingCorrections(false);
+    }
+  }, [order]);
+
+  // Fetch business settings and EIS correction details
   useEffect(() => {
     let isMounted = true;
 
@@ -254,28 +386,13 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
           console.warn('Error loading printer settings:', error);
         });
 
-      // Fetch void transaction details if order is voided
-      if (order && order.status === 'Voided') {
-        setLoadingVoid(true);
-        authFetch.fetch<any>(`/sessions/void-transactions/by_order/?order_id=${order.id}`)
-          .then(response => {
-            if (response && Array.isArray(response) && response.length > 0) {
-              setVoidTransaction(response[0]);
-            }
-          })
-          .catch(error => {
-            console.error('Error fetching void transaction:', error);
-          })
-          .finally(() => {
-            setLoadingVoid(false);
-          });
-      }
+      void refreshCorrectionRecords();
     }
 
     return () => {
       isMounted = false;
     };
-  }, [order, isOpen, applyPrinterSettingsToReceipt]);
+  }, [order, isOpen, applyPrinterSettingsToReceipt, refreshCorrectionRecords]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -364,11 +481,20 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
   const buyerNameDisplay = buyerDetails.name || 'Walk-in Customer';
   const buyerPhoneDisplay = buyerDetails.phone || 'N/A';
   const buyerTinDisplay = buyerDetails.tin || 'N/A';
-  const eisStatusDisplay = toTrimmedString((order as any).eisStatus ?? (order as any).eis_status).toUpperCase();
+  const fiscalInvoiceNumber = toTrimmedString(
+    (order as any).fiscalInvoiceNumber ?? (order as any).fiscal_invoice_number
+  );
+  const eisStatusDisplay = normalizeFiscalStatus((order as any).eisStatus ?? (order as any).eis_status);
+  const fiscalReceiptStatusText = formatFiscalReceiptStatus(eisStatusDisplay);
 
-  const isVoided = order.status === 'Voided' || order.status === 'Cancelled';
-  const isFiscalLocked = order.is_fiscal_locked;
+  const isVoided = order.status === 'Voided' || order.status === 'Cancelled' || Boolean(voidTransaction);
+  const isFiscalLocked = Boolean((order as any).is_fiscal_locked ?? (order as any).isFiscalLocked);
   const isAdminUser = String(user?.role || '').toLowerCase() === 'admin';
+  const isEisCorrectionReady =
+    !eisStatusDisplay || ['SUBMITTED', 'ACCEPTED'].includes(eisStatusDisplay);
+  const correctionActionDisabled = isFiscalLocked && !isEisCorrectionReady;
+  const correctionDisabledTitle =
+    correctionActionDisabled ? 'Original EIS sale must be submitted or accepted before correction.' : undefined;
   const normalizedItems = order.items.map((item) => {
     const itemTaxRate = toFiniteNumber(item.tax_rate ?? item.taxRate, 0);
     const itemTaxType = normalizeItemTaxType(item.tax_type ?? item.taxType);
@@ -406,6 +532,58 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
       unitLabel,
     };
   });
+  const voidEisStatus = normalizeFiscalStatus(
+    voidTransaction?.eis_status || voidTransaction?.eis_sync_state || ''
+  );
+  const voidEisIsConfirmed = ['SUBMITTED', 'ACCEPTED', 'SUCCESS'].includes(voidEisStatus);
+  const voidEisIsFailed = ['REJECTED', 'FAILED'].includes(voidEisStatus);
+  const voidEisFiscalNumber = toTrimmedString(voidTransaction?.fiscal_void_number);
+  const voidEisStatusText = voidTransaction
+    ? formatCorrectionStatus(voidEisStatus || 'PENDING', 'Void Sale')
+    : 'Cancellation not recorded';
+
+  const correctionRows = [
+    ...creditNotes.map((note) => ({
+      id: note.id,
+      kind: 'Credit Note',
+      number: note.credit_note_number,
+      fiscalNumber: note.fiscal_credit_number,
+      status: note.eis_status,
+      syncState: note.eis_sync_state,
+      amount: note.total_credit,
+      createdAt: note.created_at,
+      description: note.reason.replace(/_/g, ' '),
+      tone: 'text-emerald-700 dark:text-emerald-300',
+    })),
+    ...debitNotes.map((note) => ({
+      id: note.id,
+      kind: 'Debit Note',
+      number: note.debit_note_number,
+      fiscalNumber: note.fiscal_debit_number,
+      status: note.eis_status,
+      syncState: note.eis_sync_state,
+      amount: note.total_debit,
+      createdAt: note.created_at,
+      description: 'Additional charge',
+      tone: 'text-orange-700 dark:text-orange-300',
+    })),
+    ...(voidTransaction
+      ? [
+          {
+            id: voidTransaction.id,
+            kind: 'Void Sale',
+            number: voidTransaction.void_number,
+            fiscalNumber: voidTransaction.fiscal_void_number,
+            status: voidTransaction.eis_status,
+            syncState: voidTransaction.eis_sync_state,
+            amount: voidTransaction.voided_amount,
+            createdAt: voidTransaction.created_at,
+            description: voidTransaction.void_reason.replace(/_/g, ' '),
+            tone: 'text-destructive',
+          },
+        ]
+      : []),
+  ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   const handlePrintReceipt = async () => {
     try {
@@ -559,12 +737,29 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-56">
+                    <DropdownMenuItem
+                      onClick={() => setCreditOpen(true)}
+                      disabled={correctionActionDisabled}
+                      title={correctionDisabledTitle}
+                    >
+                      <FileMinus2 className="mr-2 h-4 w-4" />
+                      <span>Create Credit Note</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => setDebitOpen(true)}
+                      disabled={correctionActionDisabled}
+                      title={correctionDisabledTitle}
+                    >
+                      <FilePlus2 className="mr-2 h-4 w-4" />
+                      <span>Create Debit Note</span>
+                    </DropdownMenuItem>
                     <DropdownMenuItem 
                       onClick={() => setVoidOpen(true)} 
-                      disabled={isFiscalLocked} 
+                      disabled={correctionActionDisabled}
+                      title={correctionDisabledTitle}
                       className="text-red-600"
                     >
-                      <AlertTriangle className="mr-2 h-4 w-4" />
+                      <Ban className="mr-2 h-4 w-4" />
                       <span>Void Sale</span>
                     </DropdownMenuItem>
                   </DropdownMenuContent>
@@ -576,16 +771,40 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
           <div className="space-y-6 overflow-y-auto pb-1">
             {/* Status Badges */}
             {isVoided && (
-              <div className="bg-destructive/10 border border-destructive/30 p-3 rounded-lg flex items-center gap-2">
-                <AlertTriangle className="h-4 w-4 text-destructive" />
-                <span className="text-sm font-medium text-destructive">This sale has been voided</span>
+              <div className={voidEisIsFailed ? 'rounded-lg border border-destructive/30 bg-destructive/10 p-3' : voidEisIsConfirmed ? 'rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3' : 'rounded-lg border border-amber-500/30 bg-amber-500/10 p-3'}>
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className={voidEisIsFailed ? 'mt-0.5 h-4 w-4 text-destructive' : voidEisIsConfirmed ? 'mt-0.5 h-4 w-4 text-emerald-600 dark:text-emerald-400' : 'mt-0.5 h-4 w-4 text-amber-600 dark:text-amber-400'} />
+                  <div className="min-w-0 text-sm">
+                    <p className={voidEisIsFailed ? 'font-semibold text-destructive' : voidEisIsConfirmed ? 'font-semibold text-emerald-700 dark:text-emerald-300' : 'font-semibold text-amber-700 dark:text-amber-300'}>
+                      Local sale is voided. {voidEisStatusText}
+                    </p>
+                    {voidTransaction ? (
+                      <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+                        <p>Void record: #{voidTransaction.void_number}</p>
+                        <p>Original receipt: {fiscalInvoiceNumber || 'N/A'}</p>
+                        {voidEisFiscalNumber && <p className="break-all">Cancellation fiscal number: {voidEisFiscalNumber}</p>}
+                        {!voidEisIsConfirmed && !voidEisIsFailed && (
+                          <p>MRA portal may not show the cancellation until the pending EIS void retry is accepted.</p>
+                        )}
+                        {voidEisIsFailed && (
+                          <p>Review the EIS correction record and retry queue before relying on the portal state.</p>
+                        )}
+                        {voidEisIsConfirmed && (
+                          <p>The cancellation document was sent separately from the original fiscal receipt. Check portal correction or cancelled receipt records, not only the original sale row.</p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="mt-1 text-xs text-muted-foreground">No linked EIS void transaction was loaded yet.</p>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
 
             {isFiscalLocked && (
               <div className="bg-blue-500/10 dark:bg-blue-500/20 border border-blue-500/30 p-3 rounded-lg flex items-center gap-2">
                 <FileText className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-                <span className="text-sm font-medium text-blue-700 dark:text-blue-300">This invoice is locked (submitted to MRA)</span>
+                <span className="text-sm font-medium text-blue-700 dark:text-blue-300">Original fiscal receipt is locked after MRA submission</span>
               </div>
             )}
 
@@ -813,17 +1032,97 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
             {/* MRA EIS Status */}
             {eisStatusDisplay && (
               <div className="bg-blue-500/10 dark:bg-blue-500/20 p-3 rounded-md border border-blue-500/30">
-                <p className="text-sm text-muted-foreground">MRA EIS Status</p>
-                <p className="font-semibold capitalize text-blue-700 dark:text-blue-300">{eisStatusDisplay}</p>
-                {order.fiscalInvoiceNumber && (
-                  <p className="text-xs text-muted-foreground mt-1">Fiscal Invoice: {order.fiscalInvoiceNumber}</p>
+                <p className="text-sm text-muted-foreground">Fiscal Receipt Submission</p>
+                <p className="font-semibold text-blue-700 dark:text-blue-300">{fiscalReceiptStatusText}</p>
+                {fiscalInvoiceNumber && (
+                  <p className="text-xs text-muted-foreground mt-1">Original fiscal receipt: {fiscalInvoiceNumber}</p>
                 )}
                 {eisStatusDisplay === 'PENDING' && (
                   <p className="text-xs text-blue-700/80 dark:text-blue-300 mt-1">
-                    Pending sync to EIS. Will auto-submit when connectivity is restored.
+                    Original sale receipt is pending sync to EIS. It is separate from any cancellation or correction status.
                   </p>
                 )}
               </div>
+            )}
+
+            {/* Receipt Preview */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Receipt Preview</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto rounded-md border bg-muted/30 p-3">
+                  <div className="flex min-w-max justify-center">
+                    <Receipt
+                      order={order}
+                      business={businessSettings}
+                      currencyFormatter={formatCurrency}
+                      paperWidth={receiptPaperWidth}
+                      showHeader={receiptDisplaySettings.showHeader}
+                      showFooter={receiptDisplaySettings.showFooter}
+                      showQRCode={receiptDisplaySettings.showQRCode}
+                      showItemDetails={receiptDisplaySettings.showItemDetails}
+                      showTaxBreakdown={receiptDisplaySettings.showTaxBreakdown}
+                      copyNumber={1}
+                      elementId={`receipt-preview-${order.id}`}
+                      enablePrintStyles={false}
+                    />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {(loadingCorrections || correctionRows.length > 0) && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">EIS Corrections</CardTitle>
+                  <CardDescription>Fiscal credit, debit, and void documents linked to this sale.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {loadingCorrections ? (
+                    <div className="flex items-center justify-center py-4">
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      <span className="text-sm text-muted-foreground">Loading correction records...</span>
+                    </div>
+                  ) : (
+                    correctionRows.map((row) => {
+                      const rawStatus = normalizeFiscalStatus(row.status || row.syncState || 'PENDING', 'PENDING');
+                      const statusText = formatCorrectionStatus(rawStatus, row.kind);
+                      const statusLabel = correctionStatusLabel(row.kind);
+                      const fiscalNumber = toTrimmedString(row.fiscalNumber) || 'Pending fiscal number';
+                      return (
+                        <div
+                          key={`${row.kind}-${row.id}`}
+                          className="rounded-md border p-3"
+                        >
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                            <div className="min-w-0">
+                              <p className={`text-sm font-semibold ${row.tone}`}>
+                                {row.kind} #{row.number}
+                              </p>
+                              <p className="text-xs capitalize text-muted-foreground">{row.description}</p>
+                            </div>
+                            <div className="text-left sm:text-right">
+                              <p className="text-sm font-semibold">{formatCurrency(toFiniteNumber(row.amount))}</p>
+                              <p className="text-xs text-muted-foreground">{format(new Date(row.createdAt), 'PPp')}</p>
+                            </div>
+                          </div>
+                          <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+                            <div>
+                              <span className="text-muted-foreground">Correction fiscal no: </span>
+                              <span className="font-medium">{fiscalNumber}</span>
+                            </div>
+                            <div>
+                              <span className="text-muted-foreground">{statusLabel}: </span>
+                              <span className="font-medium">{statusText}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </CardContent>
+              </Card>
             )}
 
             {/* Void Transaction Details */}
@@ -833,7 +1132,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                   <CardTitle className="text-base text-destructive">Void Transaction Details</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {loadingVoid ? (
+                  {loadingCorrections ? (
                     <div className="flex items-center justify-center py-4">
                       <Loader2 className="h-4 w-4 animate-spin mr-2" />
                       <span className="text-sm text-muted-foreground">Loading void details...</span>
@@ -856,14 +1155,29 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                         <p className="text-sm text-destructive">{voidTransaction.reason_description}</p>
                       </div>
 
+                      <div className="grid grid-cols-1 gap-4 border-t border-destructive/30 pt-3 sm:grid-cols-2">
+                        <div>
+                          <p className="text-xs text-muted-foreground">Cancellation Fiscal Number</p>
+                          <p className="font-semibold text-destructive">
+                            {toTrimmedString(voidTransaction.fiscal_void_number) || 'Pending fiscal number'}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Cancellation Status</p>
+                          <p className="font-semibold text-destructive">
+                            {formatCorrectionStatus(normalizeFiscalStatus(voidTransaction.eis_status || voidTransaction.eis_sync_state || 'PENDING', 'PENDING'), 'Void Sale')}
+                          </p>
+                        </div>
+                      </div>
+
                       <div className="border-t border-destructive/30 pt-3 space-y-2">
                         <div className="flex justify-between">
                           <span className="text-xs text-muted-foreground">Voided Amount:</span>
-                          <span className="font-medium text-destructive">{formatCurrency(voidTransaction.voided_amount)}</span>
+                          <span className="font-medium text-destructive">{formatCurrency(toFiniteNumber(voidTransaction.voided_amount))}</span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-xs text-muted-foreground">Voided VAT:</span>
-                          <span className="font-medium text-destructive">{formatCurrency(voidTransaction.voided_vat)}</span>
+                          <span className="font-medium text-destructive">{formatCurrency(toFiniteNumber(voidTransaction.voided_vat))}</span>
                         </div>
                       </div>
 
@@ -872,10 +1186,10 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                           <span className="text-xs text-muted-foreground">Refund Method:</span>
                           <span className="font-medium text-destructive capitalize">{voidTransaction.refund_method}</span>
                         </div>
-                        {voidTransaction.refund_amount > 0 && (
+                        {toFiniteNumber(voidTransaction.refund_amount) > 0 && (
                           <div className="flex justify-between">
                             <span className="text-xs text-muted-foreground">Refund Amount:</span>
-                            <span className="font-medium text-destructive">{formatCurrency(voidTransaction.refund_amount)}</span>
+                            <span className="font-medium text-destructive">{formatCurrency(toFiniteNumber(voidTransaction.refund_amount))}</span>
                           </div>
                         )}
                         <div className="flex justify-between">
@@ -926,7 +1240,23 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
             Object.assign(order, updatedOrder);
           }
           setVoidOpen(false);
-          onOpenChange(false);
+          void refreshCorrectionRecords();
+        }}
+      />
+      <CreditNoteModal
+        order={order}
+        isOpen={creditOpen}
+        onOpenChange={setCreditOpen}
+        onCreditNoteCreated={() => {
+          void refreshCorrectionRecords();
+        }}
+      />
+      <DebitNoteModal
+        order={order}
+        isOpen={debitOpen}
+        onOpenChange={setDebitOpen}
+        onDebitNoteCreated={() => {
+          void refreshCorrectionRecords();
         }}
       />
     </>

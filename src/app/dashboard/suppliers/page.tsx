@@ -5,7 +5,7 @@
 import React, { useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useForm } from 'react-hook-form';
-import { MoreHorizontal, PlusCircle, Edit, Trash2, Package, History, DollarSign, Loader2, Printer, Download } from 'lucide-react';
+import { MoreHorizontal, PlusCircle, Edit, Trash2, Package, History, DollarSign, Loader2, Printer, Download, RefreshCw } from 'lucide-react';
 
 import { db, type Supplier, type InventoryItem, type PurchaseRecord } from '@/lib/db';
 import { useCurrency } from '@/hooks/use-currency';
@@ -196,13 +196,26 @@ const SupplierForm = ({
     const { user, business } = useAuth();
     const { register, handleSubmit, reset, formState: { errors } } = useForm({ defaultValues });
 
-    const onSubmit = async (data: { name: string; email?: string; phone?: string; address?: string; city?: string; supplierTin?: string; vatRegistered?: boolean; }) => {
+    const onSubmit = async (data: {
+        name: string;
+        email?: string;
+        phone?: string;
+        address?: string;
+        city?: string;
+        supplierTin?: string;
+        mraSupplierId?: string | number;
+        vatRegistered?: boolean;
+    }) => {
         if (!user) {
             toast({ variant: 'destructive', title: 'User not found' });
             return;
         }
 
         try {
+            const parsedMraSupplierId = Number(data.mraSupplierId);
+            const mraSupplierId = Number.isFinite(parsedMraSupplierId) && parsedMraSupplierId > 0
+                ? parsedMraSupplierId
+                : undefined;
             const businessId = String(
                 activeBusinessId ||
                 user.businessId ||
@@ -223,7 +236,10 @@ const SupplierForm = ({
             if (defaultValues) {
                 await updateSupplier(
                     defaultValues.id,
-                    data,
+                    {
+                        ...data,
+                        mraSupplierId,
+                    },
                     user.uid,
                     user.displayName || user.email || 'Unknown',
                     activeBranchId
@@ -239,6 +255,7 @@ const SupplierForm = ({
                         city: data.city,
                         // MRA EIS Compliance Fields
                         supplierTin: data.supplierTin,
+                        mraSupplierId,
                         vatRegistered: data.vatRegistered
                     },
                     user.uid,
@@ -283,18 +300,28 @@ const SupplierForm = ({
             {/* MRA EIS Compliance Fields */}
             <div className="border-t pt-4 mt-4">
                 <h3 className="font-semibold text-sm mb-3">MRA EIS Compliance</h3>
-                <div>
-                    <Label htmlFor="supplierTin">Supplier TIN (Tax ID)</Label>
-                    <Input 
-                        id="supplierTin" 
-                        placeholder="e.g., 1234567890"
-                        {...register("supplierTin")} 
-                    />
-                    <p className="text-xs text-muted-foreground mt-1">Supplier's Tax Identification Number for VAT reclaim</p>
-                </div>
-                <div className="mt-3 flex items-center gap-2">
-                    <input 
-                        type="checkbox" 
+	                <div>
+	                    <Label htmlFor="supplierTin">Supplier TIN (Tax ID)</Label>
+	                    <Input 
+	                        id="supplierTin" 
+	                        placeholder="e.g., 1234567890"
+	                        {...register("supplierTin")} 
+	                    />
+	                    <p className="text-xs text-muted-foreground mt-1">Supplier's Tax Identification Number for VAT reclaim</p>
+	                </div>
+	                <div className="mt-3">
+	                    <Label htmlFor="mraSupplierId">EIS Supplier ID</Label>
+	                    <Input
+	                        id="mraSupplierId"
+	                        type="number"
+	                        min="1"
+	                        placeholder="Assigned by EIS"
+	                        {...register("mraSupplierId")}
+	                    />
+	                </div>
+	                <div className="mt-3 flex items-center gap-2">
+	                    <input 
+	                        type="checkbox" 
                         id="vatRegistered"
                         {...register("vatRegistered")}
                         className="h-4 w-4 rounded border-gray-300"
@@ -922,18 +949,28 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
                                                     )}
                                                 </p>
                                             </div>
-                                            <div>
-                                                <p className="text-sm font-medium text-muted-foreground">VAT Registration Status</p>
-                                                <p className="text-lg mt-1">
-                                                    {supplier.vatRegistered ? (
-                                                        <Badge variant="secondary">VAT Registered</Badge>
-                                                    ) : (
-                                                        <Badge variant="outline">Not VAT Registered</Badge>
-                                                    )}
-                                                </p>
-                                            </div>
-                                        </div>
-                                    </div>
+	                                            <div>
+	                                                <p className="text-sm font-medium text-muted-foreground">VAT Registration Status</p>
+	                                                <p className="text-lg mt-1">
+	                                                    {supplier.vatRegistered ? (
+	                                                        <Badge variant="secondary">VAT Registered</Badge>
+	                                                    ) : (
+	                                                        <Badge variant="outline">Not VAT Registered</Badge>
+	                                                    )}
+	                                                </p>
+	                                            </div>
+	                                            <div>
+	                                                <p className="text-sm font-medium text-muted-foreground">EIS Supplier ID</p>
+	                                                <p className="text-lg mt-1 font-mono">
+	                                                    {supplier.mraSupplierId ? (
+	                                                        <Badge variant="outline">{supplier.mraSupplierId}</Badge>
+	                                                    ) : (
+	                                                        <span className="text-muted-foreground">Not provided</span>
+	                                                    )}
+	                                                </p>
+	                                            </div>
+	                                        </div>
+	                                    </div>
                                 </div>
                             </CardContent>
                         </Card>
@@ -1076,6 +1113,7 @@ export default function SuppliersPage() {
   const [activeBranchId, setActiveBranchId] = useState<string>('default');
   const [businessId, setBusinessId] = useState<string>('');
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isMraSupplierSyncing, setIsMraSupplierSyncing] = useState(false);
 
   // Get active branch ID and business ID from auth context
   React.useEffect(() => {
@@ -1168,9 +1206,10 @@ export default function SuppliersPage() {
             phone: backendSupplier.phone || '',
             address: backendSupplier.address || '',
             city: backendSupplier.city || '',
-            // MRA EIS Compliance Fields
-            supplierTin: backendSupplier.supplier_tin || '',
-            vatRegistered: backendSupplier.vat_registered || false,
+	            // MRA EIS Compliance Fields
+	            supplierTin: backendSupplier.supplier_tin || '',
+	            mraSupplierId: backendSupplier.mra_supplier_id || undefined,
+	            vatRegistered: backendSupplier.vat_registered || false,
           };
 
           try {
@@ -1255,6 +1294,60 @@ export default function SuppliersPage() {
     }
   };
 
+
+  const handleSyncMraSuppliers = async () => {
+    if (!businessId) {
+      toast({
+        variant: 'destructive',
+        title: 'Business context missing',
+        description: 'Please refresh and try again.',
+      });
+      return;
+    }
+
+    setIsMraSupplierSyncing(true);
+    try {
+      const params = new URLSearchParams({ business_id: businessId });
+      const response = await authFetch.fetch<any>(`/inventory/suppliers/sync-from-mra/?${params.toString()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+        timeoutMs: 30000,
+      });
+
+      const syncedSuppliers = Array.isArray(response?.suppliers) ? response.suppliers : [];
+      for (const backendSupplier of syncedSuppliers) {
+        const mappedSupplier: Supplier = {
+          id: backendSupplier.id,
+          businessId,
+          name: backendSupplier.name,
+          email: backendSupplier.email || '',
+          phone: backendSupplier.phone || '',
+          address: backendSupplier.address || '',
+          city: backendSupplier.city || '',
+          supplierTin: backendSupplier.supplier_tin || '',
+          mraSupplierId: backendSupplier.mra_supplier_id || undefined,
+          vatRegistered: backendSupplier.vat_registered || false,
+        };
+        await db.suppliers.put(mappedSupplier);
+      }
+
+      toast({
+        title: 'EIS suppliers synced',
+        description: `${response?.fetched ?? syncedSuppliers.length} fetched, ${response?.created ?? 0} created, ${response?.updated ?? 0} updated.`,
+      });
+    } catch (error: any) {
+      console.error('[SuppliersPage] Failed to sync MRA suppliers:', error);
+      toast({
+        variant: 'destructive',
+        title: 'EIS supplier sync failed',
+        description: error?.message || 'Could not fetch suppliers from MRA.',
+      });
+    } finally {
+      setIsMraSupplierSyncing(false);
+    }
+  };
+  
   const handleAddFormOpenChange = (open: boolean) => {
     setAddFormOpen(open);
     if (!open) {
@@ -1270,14 +1363,28 @@ export default function SuppliersPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Suppliers</h1>
           <p className="text-muted-foreground">
             Manage your product suppliers and their information.
           </p>
         </div>
-        <Dialog open={isAddFormOpen} onOpenChange={handleAddFormOpenChange}>
+        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={handleSyncMraSuppliers}
+            disabled={!businessId || isSyncing || isMraSupplierSyncing}
+          >
+            {isMraSupplierSyncing ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-2 h-4 w-4" />
+            )}
+            Sync EIS Suppliers
+          </Button>
+          <Dialog open={isAddFormOpen} onOpenChange={handleAddFormOpenChange}>
             <DialogTrigger asChild>
                 <Button>
                     <PlusCircle className="mr-2 h-4 w-4" /> Add Supplier
@@ -1299,7 +1406,8 @@ export default function SuppliersPage() {
                     />
                 </div>
             </DialogContent>
-        </Dialog>
+          </Dialog>
+        </div>
       </div>
       
       <Card>

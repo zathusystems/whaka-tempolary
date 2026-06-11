@@ -14,12 +14,16 @@ import {
   Wallet,
   Smartphone,
   CheckCircle,
+  Eye,
   Loader2,
   Printer,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 import type { CartItem, PaymentMethod } from '@/app/dashboard/pos/page';
 import type { InventoryItem, Order, TaxRate } from '@/lib/db';
 import { useCurrency } from '@/hooks/use-currency';
+import { useBackendReachability } from '@/hooks/use-backend-reachability';
 import { authFetch } from '@/lib/auth-fetch';
 import { Button } from '@/components/ui/button';
 import {
@@ -51,12 +55,19 @@ import { getOfflineBusinessProfile } from '@/lib/business-profile';
 import { PRINTER_CONFIG_UPDATED_EVENT, type PrinterSettings } from '@/lib/services/printer-service';
 import { getNextReceiptCopyNumber, markReceiptPrinted } from '@/lib/services/receipt-copy-service';
 import { safeLocalStorageGetItem } from '@/lib/safe-local-storage';
+import { formatInventoryQuantity } from '@/lib/quantity-format';
 
 
 export type BuyerDetails = {
   name?: string;
   phone?: string;
   tin?: string;
+  authorizationCode?: string;
+  isExport?: boolean;
+  isReliefSupply?: boolean;
+  vat5ProjectNumber?: string;
+  vat5CertificateNumber?: string;
+  vat5Quantity?: number;
 };
 
 export interface PosProps {
@@ -74,6 +85,8 @@ export interface PosProps {
   defaultTaxRate?: TaxRate;
   eisEnabled?: boolean;
   blockSalesIfTaxMappingMissing?: boolean;
+  isEisInvoiceSubmissionBlocked?: boolean;
+  eisInvoiceSubmissionBlockedMessage?: string;
   branchId?: string;
 }
 
@@ -101,8 +114,15 @@ const normalizeBuyerDetails = (details?: BuyerDetails | null): BuyerDetails | un
   const name = details.name?.trim();
   const phone = details.phone?.trim();
   const tin = details.tin?.trim();
+  const authorizationCode = details.authorizationCode?.trim();
+  const vat5ProjectNumber = details.vat5ProjectNumber?.trim();
+  const vat5CertificateNumber = details.vat5CertificateNumber?.trim();
+  const vat5Quantity = Number(details.vat5Quantity);
+  const hasVat5Quantity = Number.isFinite(vat5Quantity) && vat5Quantity > 0;
+  const isExport = details.isExport === true;
+  const isReliefSupply = details.isReliefSupply === true;
 
-  if (!name && !phone && !tin) {
+  if (!name && !phone && !tin && !authorizationCode && !isExport && !isReliefSupply && !vat5ProjectNumber && !vat5CertificateNumber && !hasVat5Quantity) {
     return undefined;
   }
 
@@ -110,6 +130,12 @@ const normalizeBuyerDetails = (details?: BuyerDetails | null): BuyerDetails | un
     name: name || undefined,
     phone: phone || undefined,
     tin: tin || undefined,
+    authorizationCode: authorizationCode || undefined,
+    isExport,
+    isReliefSupply,
+    vat5ProjectNumber: vat5ProjectNumber || undefined,
+    vat5CertificateNumber: vat5CertificateNumber || undefined,
+    vat5Quantity: hasVat5Quantity ? vat5Quantity : undefined,
   };
 };
 
@@ -133,6 +159,173 @@ const hasCompleteFiscalInvoiceNumber = (value: string | null | undefined): boole
   }
 
   return Number.parseInt(suffix, 10) > 0;
+};
+
+const toReceiptString = (value: unknown): string => String(value ?? '').trim();
+
+const isReceiptValidationUrl = (value: unknown): boolean => {
+  const raw = toReceiptString(value);
+  return /^https?:\/\//i.test(raw) || /receiptvalidation\/validate/i.test(raw);
+};
+
+const parseReceiptJson = (value: string): unknown | null => {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+};
+
+const findReceiptValidationUrl = (source: unknown): string => {
+  const queue: unknown[] = [source];
+  const seen = new Set<unknown>();
+  const preferredKeys = new Set([
+    'validationurl',
+    'mraValidationurl',
+    'mravalidationurl',
+    'offlinevalidationurl',
+    'qrcodepayload',
+    'qrpayload',
+  ]);
+  const normalizeKey = (key: string): string => key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === null || current === undefined) {
+      continue;
+    }
+
+    if (typeof current === 'string') {
+      const raw = current.trim();
+      if (isReceiptValidationUrl(raw)) {
+        return raw;
+      }
+      const parsed = parseReceiptJson(raw);
+      if (parsed && typeof parsed === 'object') {
+        queue.push(parsed);
+      }
+      continue;
+    }
+
+    if (typeof current !== 'object') {
+      continue;
+    }
+    if (seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+
+    for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
+      const normalizedKey = normalizeKey(key);
+      if (preferredKeys.has(normalizedKey) && isReceiptValidationUrl(value)) {
+        return toReceiptString(value);
+      }
+      if (value && typeof value === 'object') {
+        queue.push(value);
+      } else if (typeof value === 'string') {
+        const parsed = parseReceiptJson(value.trim());
+        if (parsed && typeof parsed === 'object') {
+          queue.push(parsed);
+        }
+      }
+    }
+  }
+
+  return '';
+};
+
+const extractReceiptValidationPayload = (order: Partial<Order> | null | undefined): string => {
+  return findReceiptValidationUrl([
+    (order as any)?.qrCodePayload,
+    (order as any)?.qr_code_payload,
+    (order as any)?.eisValidationMetadata,
+    (order as any)?.eis_validation_metadata,
+    (order as any)?.mraResponse,
+    (order as any)?.mra_response,
+  ]);
+};
+
+const hasFiscalReceiptPrintData = (order: Partial<Order> | null | undefined): boolean => {
+  return (
+    hasCompleteFiscalInvoiceNumber(extractFiscalInvoiceNumber(order)) &&
+    Boolean(extractReceiptValidationPayload(order))
+  );
+};
+
+const resolveCompletedSaleSubmissionDisplay = (
+  order: Partial<Order> | null | undefined,
+  isBrowserOnline: boolean,
+  eisEnabled?: boolean
+): {
+  label: string;
+  description: string;
+  tone: 'accepted' | 'pending' | 'offline' | 'rejected';
+} => {
+  const status = String((order as any)?.eisStatus ?? (order as any)?.eis_status ?? '').trim().toUpperCase();
+  const hasFiscalData = hasFiscalReceiptPrintData(order);
+
+  if (eisEnabled) {
+    if (status === 'REJECTED') {
+      return {
+        label: 'EIS Rejected',
+        description: 'The sale was saved locally, but MRA rejected the fiscal submission.',
+        tone: 'rejected',
+      };
+    }
+
+    if (status === 'ACCEPTED' || (status === 'SUBMITTED' && hasFiscalData)) {
+      return {
+        label: status === 'ACCEPTED' ? 'EIS Accepted' : 'EIS Submitted',
+        description: 'MRA fiscal receipt details are available for this sale.',
+        tone: 'accepted',
+      };
+    }
+
+    if (
+      status.includes('OFFLINE') ||
+      status.includes('QUEUED') ||
+      (status === 'PENDING' && hasFiscalData) ||
+      !isBrowserOnline
+    ) {
+      return {
+        label: 'EIS Offline Queued',
+        description: hasFiscalData
+          ? 'Offline fiscal receipt has a validation QR and is queued for MRA upload.'
+          : 'Offline receipt is saved locally and will upload to MRA when internet returns.',
+        tone: 'offline',
+      };
+    }
+
+    return {
+      label: 'EIS Online Pending',
+      description: 'Sale is saved and queued for immediate MRA submission in the background.',
+      tone: 'pending',
+    };
+  }
+
+  return isBrowserOnline
+    ? {
+        label: 'Online Sale',
+        description: 'Sale is saved locally and can sync to the backend now.',
+        tone: 'accepted',
+      }
+    : {
+        label: 'Offline Sale',
+        description: 'Sale is saved locally and will sync when internet returns.',
+        tone: 'offline',
+      };
+};
+
+const completedSaleSubmissionBadgeClass = (tone: 'accepted' | 'pending' | 'offline' | 'rejected'): string => {
+  if (tone === 'accepted') return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+  if (tone === 'offline') return 'border-amber-200 bg-amber-50 text-amber-800';
+  if (tone === 'rejected') return 'border-red-200 bg-red-50 text-red-700';
+  return 'border-sky-200 bg-sky-50 text-sky-700';
 };
 
 const normalizeInventoryReference = (value: unknown): string => {
@@ -527,6 +720,8 @@ const PaymentDialog = ({
     cart,
     eisEnabled,
     blockSalesIfTaxMappingMissing,
+    isEisInvoiceSubmissionBlocked = false,
+    eisInvoiceSubmissionBlockedMessage = 'Could not reach the POS server. Connect to working internet before completing the sale so the EIS invoice can be submitted to MRA.',
     branchId,
     onConfigurePrinter,
 }: {
@@ -540,6 +735,8 @@ const PaymentDialog = ({
     cart?: CartItem[];
     eisEnabled?: boolean;
     blockSalesIfTaxMappingMissing?: boolean;
+    isEisInvoiceSubmissionBlocked?: boolean;
+    eisInvoiceSubmissionBlockedMessage?: string;
     branchId?: string;
     onConfigurePrinter: () => void;
     defaultTaxRate?: TaxRate | null;
@@ -552,6 +749,12 @@ const PaymentDialog = ({
     const [buyerName, setBuyerName] = useState('');
     const [buyerPhone, setBuyerPhone] = useState('');
     const [buyerTin, setBuyerTin] = useState('');
+    const [buyerAuthorizationCode, setBuyerAuthorizationCode] = useState('');
+    const [isExportSale, setIsExportSale] = useState(false);
+    const [isReliefSupply, setIsReliefSupply] = useState(false);
+    const [vat5ProjectNumber, setVat5ProjectNumber] = useState('');
+    const [vat5CertificateNumber, setVat5CertificateNumber] = useState('');
+    const [vat5Quantity, setVat5Quantity] = useState<number | string>('');
     const [calculatedTax, setCalculatedTax] = useState(tax);
     const [calculatedNetAmount, setCalculatedNetAmount] = useState(subtotal);
     const [calculatedGrossAmount, setCalculatedGrossAmount] = useState(subtotal + tax);
@@ -559,7 +762,9 @@ const PaymentDialog = ({
     const [productTaxMappings, setProductTaxMappings] = useState<Record<string, ProductTaxMappingDetail>>({});
     const [unmappedProducts, setUnmappedProducts] = useState<string[]>([]);
     const [isProcessingPayment, setIsProcessingPayment] = useState(false);
-    const shouldEnforceTaxMapping = eisEnabled && blockSalesIfTaxMappingMissing === true;
+    const { isReachable: isBrowserOnline } = useBackendReachability({ intervalMs: 10000 });
+    const shouldUseEisTaxMappings = Boolean(eisEnabled);
+    const shouldEnforceTaxMapping = shouldUseEisTaxMappings && blockSalesIfTaxMappingMissing === true;
     const defaultTaxRateDecimal = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
     const activeBranchId = useMemo(
         () => branchId ?? safeLocalStorageGetItem('handypos-active-branch') ?? 'main',
@@ -571,6 +776,16 @@ const PaymentDialog = ({
     );
     const mappingRefreshAttemptedRef = useRef(false);
     const mappingItemFetchAttemptedRef = useRef(false);
+    const saleConnectivityLabel = shouldUseEisTaxMappings
+        ? (isBrowserOnline ? 'EIS Online' : 'EIS Offline')
+        : (isBrowserOnline ? 'Online' : 'Offline');
+    const saleConnectivityDescription = shouldUseEisTaxMappings
+        ? (isBrowserOnline
+            ? 'Sale will be submitted to MRA EIS immediately.'
+            : 'EIS sale is blocked until the POS server can be reached.')
+        : (isBrowserOnline
+            ? 'Sale can sync to the backend now.'
+            : 'Sale will be saved locally and synced when internet returns.');
     const taxMethodSummary = useMemo(() => {
         const methods = new Set<'inclusive' | 'exclusive'>();
         Object.values(productTaxMappings).forEach((mapping) => {
@@ -585,11 +800,11 @@ const PaymentDialog = ({
         if (methods.size > 1) {
             return 'Mixed';
         }
-        if (!shouldEnforceTaxMapping && defaultTaxRateDecimal > 0) {
+        if (!shouldUseEisTaxMappings && defaultTaxRateDecimal > 0) {
             return 'Default (Inclusive)';
         }
         return 'N/A';
-    }, [productTaxMappings, shouldEnforceTaxMapping, defaultTaxRateDecimal]);
+    }, [productTaxMappings, shouldUseEisTaxMappings, defaultTaxRateDecimal]);
 
     useEffect(() => {
         setStep('payment');
@@ -614,7 +829,7 @@ const PaymentDialog = ({
         let cancelled = false;
 
         const calculateCorrectTax = async () => {
-            const effectiveTaxLabel = eisEnabled && shouldEnforceTaxMapping
+            const effectiveTaxLabel = shouldUseEisTaxMappings
                 ? 'VAT Amount (MRA Rules Applied)'
                 : taxLabel;
             console.log('[PaymentDialog] Starting tax calculation, cart items:', cart?.length);
@@ -673,8 +888,7 @@ const PaymentDialog = ({
                 if (
                     missingMappingKeys.length > 0 &&
                     !mappingRefreshAttemptedRef.current &&
-                    typeof navigator !== 'undefined' &&
-                    navigator.onLine &&
+                    isBrowserOnline &&
                     branchId
                 ) {
                     mappingRefreshAttemptedRef.current = true;
@@ -755,8 +969,7 @@ const PaymentDialog = ({
                 if (
                     missingMappingKeys.length > 0 &&
                     !mappingItemFetchAttemptedRef.current &&
-                    typeof navigator !== 'undefined' &&
-                    navigator.onLine &&
+                    isBrowserOnline &&
                     branchId
                 ) {
                     mappingItemFetchAttemptedRef.current = true;
@@ -876,7 +1089,7 @@ const PaymentDialog = ({
                     if (!localMapping && preferredMappingKey && perItemFetchedMappings.has(preferredMappingKey)) {
                         localMapping = perItemFetchedMappings.get(preferredMappingKey);
                     }
-                    if (!localMapping && preferredMappingKey && typeof navigator !== 'undefined' && navigator.onLine && branchId) {
+                    if (!localMapping && preferredMappingKey && isBrowserOnline && branchId) {
                         try {
                             const backendBranchId = normalizeBranchIdentifier(branchId);
                             const response = await authFetch.fetch<any>(
@@ -984,7 +1197,7 @@ const PaymentDialog = ({
                             ? resolveMappingTaxMethod(localMapping)
                             : 'inclusive';
 
-                        if (!shouldEnforceTaxMapping && hasLocalMapping && (fallbackTaxType === 'zero' || fallbackTaxType === 'exempt')) {
+                        if (!shouldUseEisTaxMappings && hasLocalMapping && (fallbackTaxType === 'zero' || fallbackTaxType === 'exempt')) {
                             itemTax = 0;
                             itemNet = lineAmount;
                             itemGross = lineAmount;
@@ -1011,7 +1224,7 @@ const PaymentDialog = ({
                                 ).trim() || undefined,
                                 mappingSource: 'local',
                             };
-                        } else if (!shouldEnforceTaxMapping && hasLocalMapping && normalizedFallbackRate > 0) {
+                        } else if (!shouldUseEisTaxMappings && hasLocalMapping && normalizedFallbackRate > 0) {
                             const effectiveTaxRate = normalizedFallbackRate / 100;
                             if (fallbackMethod === 'exclusive') {
                                 itemTax = lineAmount * effectiveTaxRate;
@@ -1049,7 +1262,7 @@ const PaymentDialog = ({
                                 ).trim() || undefined,
                                 mappingSource: 'local',
                             };
-                        } else if (!shouldEnforceTaxMapping && defaultTaxRateDecimal > 0) {
+                        } else if (!shouldUseEisTaxMappings && defaultTaxRateDecimal > 0) {
                             itemTax = lineAmount * defaultTaxRateDecimal / (1 + defaultTaxRateDecimal);
                             itemGross = lineAmount;
                             itemNet = lineAmount - itemTax;
@@ -1119,7 +1332,7 @@ const PaymentDialog = ({
         return () => {
             cancelled = true;
         };
-    }, [cart, subtotal, tax, taxLabel, eisEnabled, shouldEnforceTaxMapping, defaultTaxRateDecimal, branchId, normalizedActiveBranchId]);
+    }, [cart, subtotal, tax, taxLabel, shouldUseEisTaxMappings, shouldEnforceTaxMapping, defaultTaxRateDecimal, branchId, normalizedActiveBranchId, isBrowserOnline]);
 
     const total = calculatedGrossAmount;
     const hasBlockingUnmapped = shouldEnforceTaxMapping && unmappedProducts.length > 0;
@@ -1194,12 +1407,27 @@ const PaymentDialog = ({
             return;
         }
 
+        if (isEisInvoiceSubmissionBlocked) {
+            toast({
+                variant: 'destructive',
+                title: 'Connection required for EIS invoice',
+                description: eisInvoiceSubmissionBlockedMessage,
+            });
+            return;
+        }
+
         setIsProcessingPayment(true);
         try {
             const buyerDetails = normalizeBuyerDetails({
                 name: buyerName,
                 phone: buyerPhone,
                 tin: buyerTin,
+                authorizationCode: buyerAuthorizationCode,
+                isExport: isExportSale,
+                isReliefSupply,
+                vat5ProjectNumber,
+                vat5CertificateNumber,
+                vat5Quantity: typeof vat5Quantity === 'number' ? vat5Quantity : Number.parseFloat(String(vat5Quantity || '')),
             });
             const order = await onCheckout(method, 0, buyerDetails);
             if (order) {
@@ -1255,6 +1483,8 @@ const PaymentDialog = ({
     const [isPrinting, setIsPrinting] = useState(false);
     const [autoPrintHandled, setAutoPrintHandled] = useState(false);
     const [isAutoPrintRunning, setIsAutoPrintRunning] = useState(false);
+    const [isReceiptPreviewOpen, setIsReceiptPreviewOpen] = useState(false);
+    const [isPreparingReceiptPreview, setIsPreparingReceiptPreview] = useState(false);
     const [hasDefaultPrinter, setHasDefaultPrinter] = useState<boolean | null>(null);
     const [receiptPaperWidth, setReceiptPaperWidth] = useState<'80mm' | '58mm'>('80mm');
     const [receiptDisplaySettings, setReceiptDisplaySettings] = useState<ReceiptDisplaySettings>(DEFAULT_RECEIPT_DISPLAY_SETTINGS);
@@ -1274,6 +1504,8 @@ const PaymentDialog = ({
         setReceiptPaperWidth('80mm');
         setReceiptDisplaySettings(DEFAULT_RECEIPT_DISPLAY_SETTINGS);
         setReceiptCopyNumber(1);
+        setIsReceiptPreviewOpen(false);
+        setIsPreparingReceiptPreview(false);
     }, [resetToken]);
 
     const applyPrinterSettingsToReceipt = useCallback(
@@ -1314,13 +1546,13 @@ const PaymentDialog = ({
         );
     }, [activeBranchId, applyPrinterSettingsToReceipt]);
 
-    const waitForFiscalInvoiceNumber = useCallback(
+    const waitForFiscalReceiptData = useCallback(
         async (orderToPrint: Order, timeoutMs: number = 15000): Promise<Order> => {
             if (!orderToPrint?.id) {
                 return orderToPrint;
             }
 
-            if (hasCompleteFiscalInvoiceNumber(extractFiscalInvoiceNumber(orderToPrint))) {
+            if (hasFiscalReceiptPrintData(orderToPrint)) {
                 return orderToPrint;
             }
 
@@ -1331,7 +1563,7 @@ const PaymentDialog = ({
                 const latestOrder = await db.orders.get(orderToPrint.id);
                 if (latestOrder) {
                     latestKnownOrder = latestOrder as Order;
-                    if (hasCompleteFiscalInvoiceNumber(extractFiscalInvoiceNumber(latestKnownOrder))) {
+                    if (hasFiscalReceiptPrintData(latestKnownOrder)) {
                         return latestKnownOrder;
                     }
                 }
@@ -1368,21 +1600,19 @@ const PaymentDialog = ({
             const activeOrderId = String((activeOrder as any)?.id ?? '').trim();
 
             if (eisEnabled) {
-                const currentFiscal = extractFiscalInvoiceNumber(activeOrder);
-                if (!hasCompleteFiscalInvoiceNumber(currentFiscal)) {
+                if (!hasFiscalReceiptPrintData(activeOrder)) {
                     toast({
                         title: 'Preparing Fiscal Receipt',
-                        description: 'Waiting for fiscal invoice number assignment...',
+                        description: 'Waiting for the fiscal invoice number and MRA validation QR...',
                     });
 
-                    const latestOrder = await waitForFiscalInvoiceNumber(activeOrder);
-                    const resolvedFiscal = extractFiscalInvoiceNumber(latestOrder);
+                    const latestOrder = await waitForFiscalReceiptData(activeOrder);
 
-                    if (!hasCompleteFiscalInvoiceNumber(resolvedFiscal)) {
+                    if (!hasFiscalReceiptPrintData(latestOrder)) {
                         toast({
                             variant: 'destructive',
-                            title: 'Fiscal Number Pending',
-                            description: 'Invoice number is not assigned yet. Please try printing again in a moment.',
+                            title: 'Fiscal Receipt Pending',
+                            description: 'Fiscal invoice number or MRA validation URL is not ready yet. Please try printing again in a moment.',
                         });
                         return false;
                     }
@@ -1517,7 +1747,58 @@ const PaymentDialog = ({
             setIsPrinting(false);
             printJobLockRef.current = false;
         }
-    }, [activeBranchId, toast, applyPrinterSettingsToReceipt, completedOrder, eisEnabled, waitForFiscalInvoiceNumber]);
+    }, [activeBranchId, toast, applyPrinterSettingsToReceipt, completedOrder, eisEnabled, waitForFiscalReceiptData]);
+
+    const handleViewMraReceipt = useCallback(async () => {
+        const activeOrder = completedOrder as Order | null;
+        if (!activeOrder) {
+            return;
+        }
+
+        try {
+            setIsPreparingReceiptPreview(true);
+            let receiptOrder = activeOrder;
+
+            if (eisEnabled && !hasFiscalReceiptPrintData(receiptOrder)) {
+                toast({
+                    title: 'Preparing MRA Receipt',
+                    description: 'Waiting for fiscal receipt details from MRA EIS...',
+                });
+
+                receiptOrder = await waitForFiscalReceiptData(receiptOrder, 15000);
+                setCompletedOrder(receiptOrder);
+            }
+
+            const fiscalNumber = extractFiscalInvoiceNumber(receiptOrder);
+            const qrPayload = extractReceiptValidationPayload(receiptOrder);
+            const signature = String((receiptOrder as any)?.digitalSignature ?? (receiptOrder as any)?.digital_signature ?? '').trim();
+            const status = String((receiptOrder as any)?.eisStatus ?? (receiptOrder as any)?.eis_status ?? '').trim().toUpperCase();
+            const hasReceiptData = Boolean((fiscalNumber && qrPayload) || signature || ['SUBMITTED', 'ACCEPTED'].includes(status));
+
+            if (eisEnabled && !hasFiscalReceiptPrintData(receiptOrder)) {
+                toast({
+                    variant: 'destructive',
+                    title: 'MRA Receipt Not Ready',
+                    description: 'Fiscal invoice number or MRA validation URL is not ready yet. Try again after EIS sync completes.',
+                });
+                return;
+            }
+
+            if (!eisEnabled && !hasReceiptData) {
+                toast({
+                    variant: 'destructive',
+                    title: 'Receipt Not Ready',
+                    description: 'Receipt details are still pending. Try again after sync completes.',
+                });
+                return;
+            }
+
+            setReceiptCopyNumber(1);
+            setIsReceiptPreviewOpen(true);
+        } finally {
+            setIsPreparingReceiptPreview(false);
+        }
+    }, [completedOrder, eisEnabled, toast, waitForFiscalReceiptData]);
 
     useEffect(() => {
         if (step !== 'confirmation' || !completedOrder || autoPrintHandled) {
@@ -1656,9 +1937,27 @@ const PaymentDialog = ({
                 total: item.total || 0,
             })) || []
         };
+        const enrichedFiscalNumber = extractFiscalInvoiceNumber(enrichedOrder);
+        const enrichedQrPayload = String((enrichedOrder as any).qrCodePayload ?? (enrichedOrder as any).qr_code_payload ?? '').trim();
+        const enrichedSignature = String((enrichedOrder as any).digitalSignature ?? (enrichedOrder as any).digital_signature ?? '').trim();
+        const enrichedEisStatus = String((enrichedOrder as any).eisStatus ?? (enrichedOrder as any).eis_status ?? '').trim().toUpperCase();
+        const completedSaleSubmission = resolveCompletedSaleSubmissionDisplay(
+            enrichedOrder,
+            isBrowserOnline,
+            shouldUseEisTaxMappings
+        );
+        const hasPrintableFiscalReceipt = hasFiscalReceiptPrintData(enrichedOrder);
+        const isEisReceiptPrintBlocked = Boolean(eisEnabled && !hasPrintableFiscalReceipt);
+        const canViewMraReceipt = Boolean(
+            eisEnabled ||
+            enrichedFiscalNumber ||
+            enrichedQrPayload ||
+            enrichedSignature ||
+            enrichedEisStatus
+        );
 
         return (
-             <DialogContent>
+             <DialogContent className="max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-md overflow-y-auto p-4 sm:max-w-lg sm:p-6">
                 <DialogHeader>
                     <DialogTitle className="flex items-center justify-center text-center">
                         <CheckCircle className="h-12 w-12 text-green-500" />
@@ -1667,6 +1966,32 @@ const PaymentDialog = ({
                 <div className="text-center py-4">
                     <h2 className="text-xl font-semibold">Payment Successful</h2>
                     <p className="text-muted-foreground">Order #{displayOrderNumber} has been created.</p>
+                    <div className="mt-3 flex flex-col items-center gap-1">
+                        <Badge
+                            variant="outline"
+                            className={cn(
+                                'gap-1.5 text-xs font-semibold',
+                                completedSaleSubmissionBadgeClass(completedSaleSubmission.tone)
+                            )}
+                        >
+                            {completedSaleSubmission.tone === 'offline' ? (
+                                <WifiOff className="h-3.5 w-3.5" />
+                            ) : (
+                                <Wifi className="h-3.5 w-3.5" />
+                            )}
+                            {completedSaleSubmission.label}
+                        </Badge>
+                        <p className={cn(
+                            'max-w-sm text-xs',
+                            completedSaleSubmission.tone === 'offline'
+                                ? 'text-amber-700'
+                                : completedSaleSubmission.tone === 'rejected'
+                                    ? 'text-red-700'
+                                    : 'text-muted-foreground'
+                        )}>
+                            {completedSaleSubmission.description}
+                        </p>
+                    </div>
                     {hasDefaultPrinter === false && (
                         <p className="mt-2 text-sm text-amber-700">
                             No default printer configured. Configure one to print receipts.
@@ -1687,15 +2012,79 @@ const PaymentDialog = ({
                         copyNumber={receiptCopyNumber}
                     />
                  </div>
-                <DialogFooter className="sm:justify-center pt-4 border-t">
-                    <Button variant="outline" onClick={onClose} disabled={isPrintBusy}>New Order</Button>
+                <Dialog open={isReceiptPreviewOpen} onOpenChange={setIsReceiptPreviewOpen}>
+                    <DialogContent className="max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-[420px] overflow-y-auto p-4 sm:p-6">
+                        <DialogHeader>
+                            <DialogTitle>MRA Receipt</DialogTitle>
+                            <DialogDescription>
+                                Fiscal receipt preview for order #{displayOrderNumber}.
+                            </DialogDescription>
+                        </DialogHeader>
+                        <div className="flex justify-center rounded-md bg-muted/40 py-4">
+                            <Receipt
+                                order={enrichedOrder}
+                                business={businessSettings}
+                                currencyFormatter={currencyFormatter}
+                                paperWidth={receiptPaperWidth}
+                                showHeader
+                                showFooter
+                                showQRCode
+                                showItemDetails
+                                showTaxBreakdown
+                                copyNumber={1}
+                                elementId="mra-receipt-preview-area"
+                            />
+                        </div>
+                        <DialogFooter className="gap-2 sm:space-x-0">
+                            <Button className="w-full sm:w-auto" variant="outline" onClick={() => setIsReceiptPreviewOpen(false)}>
+                                Close
+                            </Button>
+                            <Button className="w-full sm:w-auto" onClick={handlePrintReceipt} disabled={isPrintBusy || hasDefaultPrinter === false || isEisReceiptPrintBlocked}>
+                                {isPrintBusy ? (
+                                    <>
+                                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                        Printing...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Printer className="mr-2 h-4 w-4" />
+                                        Print
+                                    </>
+                                )}
+                            </Button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
+
+                <DialogFooter className="gap-2 border-t pt-4 sm:flex-wrap sm:justify-center sm:space-x-0">
+                    <Button className="w-full sm:w-auto" variant="outline" onClick={onClose} disabled={isPrintBusy}>New Order</Button>
+                    {canViewMraReceipt && (
+                        <Button
+                            className="w-full sm:w-auto"
+                            variant="secondary"
+                            onClick={handleViewMraReceipt}
+                            disabled={isPrintBusy || isPreparingReceiptPreview}
+                        >
+                            {isPreparingReceiptPreview ? (
+                                <>
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                    Preparing...
+                                </>
+                            ) : (
+                                <>
+                                    <Eye className="mr-2 h-4 w-4" />
+                                    View MRA Receipt
+                                </>
+                            )}
+                        </Button>
+                    )}
                     {hasDefaultPrinter === false && (
-                        <Button variant="secondary" onClick={onConfigurePrinter} disabled={isPrintBusy}>
+                        <Button className="w-full sm:w-auto" variant="secondary" onClick={onConfigurePrinter} disabled={isPrintBusy}>
                             <Printer className="mr-2 h-4 w-4" />
                             Configure Printer
                         </Button>
                     )}
-                    <Button onClick={handlePrintReceipt} disabled={isPrintBusy || hasDefaultPrinter === false} className="bg-blue-600 hover:bg-blue-700">
+                    <Button onClick={handlePrintReceipt} disabled={isPrintBusy || hasDefaultPrinter === false || isEisReceiptPrintBlocked} className="w-full bg-blue-600 hover:bg-blue-700 sm:w-auto">
                         {isPrintBusy ? (
                             <>
                                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -1714,10 +2103,32 @@ const PaymentDialog = ({
     }
 
     return (
-        <DialogContent className="max-h-[90vh] flex flex-col">
+        <DialogContent className="flex max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-2xl flex-col overflow-hidden p-4 sm:p-6">
             <DialogHeader>
-                <DialogTitle className="text-xl">Complete Payment</DialogTitle>
-                <DialogDescription>Select the payment method</DialogDescription>
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                        <DialogTitle className="text-xl">Complete Payment</DialogTitle>
+                        <DialogDescription>Select the payment method</DialogDescription>
+                    </div>
+                    <Badge
+                        variant="outline"
+                        className={cn(
+                            'w-fit gap-1.5 text-xs font-semibold',
+                            isBrowserOnline
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                : 'border-amber-200 bg-amber-50 text-amber-800'
+                        )}
+                    >
+                        {isBrowserOnline ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
+                        {saleConnectivityLabel}
+                    </Badge>
+                </div>
+                <p className={cn(
+                    'text-xs',
+                    isBrowserOnline ? 'text-muted-foreground' : 'text-amber-700'
+                )}>
+                    {saleConnectivityDescription}
+                </p>
             </DialogHeader>
             <div className="space-y-4 py-3 overflow-y-auto flex-1 hide-scrollbar">
                 <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
@@ -1737,6 +2148,13 @@ const PaymentDialog = ({
                     <Separator className="my-1" />
                     <div className="flex justify-between text-lg font-bold text-primary"><span>Total Amount Due</span><span>{currencyFormatter(total)}</span></div>
                 </div>
+
+                {isEisInvoiceSubmissionBlocked && (
+                    <div className="flex items-start gap-2 rounded-lg border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-900 dark:border-yellow-800 dark:bg-yellow-950/30 dark:text-yellow-100">
+                        <WifiOff className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span>{eisInvoiceSubmissionBlockedMessage}</span>
+                    </div>
+                )}
 
                 {Object.keys(productTaxMappings).length > 0 && cart && cart.length > 0 && (
                     <div className="rounded-lg border bg-amber-50 dark:bg-amber-950/20 p-3">
@@ -1848,24 +2266,86 @@ const PaymentDialog = ({
                             />
                         </div>
                     </div>
-                    <div className="space-y-1">
-                        <label className="text-xs font-medium text-muted-foreground">Buyer TIN</label>
-                        <Input
-                            placeholder="Enter buyer TIN"
-                            value={buyerTin}
-                            onChange={(e) => setBuyerTin(e.target.value)}
-                            disabled={isProcessingPayment}
-                        />
-                    </div>
-                </div>
+	                    <div className="space-y-1">
+	                        <label className="text-xs font-medium text-muted-foreground">Buyer TIN</label>
+	                        <Input
+	                            placeholder="Enter buyer TIN"
+	                            value={buyerTin}
+	                            onChange={(e) => setBuyerTin(e.target.value)}
+	                            disabled={isProcessingPayment}
+	                        />
+	                    </div>
+	                    <div className="space-y-1">
+	                        <label className="text-xs font-medium text-muted-foreground">Authorization Code</label>
+	                        <Input
+	                            placeholder="MRA buyer code"
+	                            value={buyerAuthorizationCode}
+	                            onChange={(e) => setBuyerAuthorizationCode(e.target.value)}
+	                            disabled={isProcessingPayment}
+	                        />
+	                    </div>
+	                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+	                        <label className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm">
+	                            <input
+	                                type="checkbox"
+	                                className="h-4 w-4"
+	                                checked={isExportSale}
+	                                onChange={(e) => setIsExportSale(e.target.checked)}
+	                                disabled={isProcessingPayment}
+	                            />
+	                            Export
+	                        </label>
+	                        <label className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm">
+	                            <input
+	                                type="checkbox"
+	                                className="h-4 w-4"
+	                                checked={isReliefSupply}
+	                                onChange={(e) => setIsReliefSupply(e.target.checked)}
+	                                disabled={isProcessingPayment}
+	                            />
+	                            VAT Relief
+	                        </label>
+	                    </div>
+	                    {isReliefSupply && (
+	                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+	                            <div className="space-y-1">
+	                                <label className="text-xs font-medium text-muted-foreground">Project No.</label>
+	                                <Input
+	                                    value={vat5ProjectNumber}
+	                                    onChange={(e) => setVat5ProjectNumber(e.target.value)}
+	                                    disabled={isProcessingPayment}
+	                                />
+	                            </div>
+	                            <div className="space-y-1">
+	                                <label className="text-xs font-medium text-muted-foreground">Certificate No.</label>
+	                                <Input
+	                                    value={vat5CertificateNumber}
+	                                    onChange={(e) => setVat5CertificateNumber(e.target.value)}
+	                                    disabled={isProcessingPayment}
+	                                />
+	                            </div>
+	                            <div className="space-y-1">
+	                                <label className="text-xs font-medium text-muted-foreground">Quantity</label>
+	                                <Input
+	                                    type="number"
+	                                    min="0"
+	                                    step="0.001"
+	                                    value={vat5Quantity}
+	                                    onChange={(e) => setVat5Quantity(e.target.value)}
+	                                    disabled={isProcessingPayment}
+	                                />
+	                            </div>
+	                        </div>
+	                    )}
+	                </div>
 
                 <div>
                     <h4 className="text-sm font-medium mb-2">Payment Method</h4>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                       <Button size="default" variant={selectedPaymentMethod === 'Cash' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Cash')} className="text-sm h-11" disabled={isProcessingPayment}><Wallet className="mr-1 h-4 w-4"/>Cash</Button>
-                       <Button size="default" variant={selectedPaymentMethod === 'Card' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Card')} className="text-sm h-11" disabled={isProcessingPayment}><CreditCard className="mr-1 h-4 w-4"/>Card</Button>
-                       <Button size="default" variant={selectedPaymentMethod === 'Mobile Money' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Mobile Money')} className="text-sm h-11" disabled={isProcessingPayment}><Smartphone className="mr-1 h-4 w-4"/>Mobile</Button>
-                       <Button size="default" variant={selectedPaymentMethod === 'On Account' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('On Account')} className="text-sm h-11" disabled={isProcessingPayment}><UserPlus className="mr-1 h-4 w-4"/>Account</Button>
+                       <Button size="default" variant={selectedPaymentMethod === 'Cash' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Cash')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><Wallet className="mr-1 h-4 w-4"/>Cash</Button>
+                       <Button size="default" variant={selectedPaymentMethod === 'Card' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Card')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><CreditCard className="mr-1 h-4 w-4"/>Card</Button>
+                       <Button size="default" variant={selectedPaymentMethod === 'Mobile Money' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Mobile Money')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><Smartphone className="mr-1 h-4 w-4"/>Mobile</Button>
+                       <Button size="default" variant={selectedPaymentMethod === 'On Account' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('On Account')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><UserPlus className="mr-1 h-4 w-4"/>Account</Button>
                     </div>
                 </div>
 
@@ -1897,7 +2377,7 @@ const PaymentDialog = ({
                                 value={cashPaid} 
                                 onChange={(e) => setCashPaid(e.target.value ? parseFloat(e.target.value) : '')}
                                 className="mt-2 text-lg font-semibold h-11"
-                                disabled={hasBlockingUnmapped || isProcessingPayment}
+                                disabled={hasBlockingUnmapped || isProcessingPayment || isEisInvoiceSubmissionBlocked}
                             />
                         </div>
                         <Separator />
@@ -1915,8 +2395,8 @@ const PaymentDialog = ({
                             size="lg" 
                             className="w-full bg-green-600 hover:bg-green-700 text-base h-12" 
                             onClick={() => handlePayment('Cash')} 
-                            disabled={typeof cashPaid !== 'number' || cashPaid < total || hasBlockingUnmapped || isProcessingPayment}
-                            title={hasBlockingUnmapped ? 'Cannot complete payment: unmapped products in cart' : ''}
+                            disabled={typeof cashPaid !== 'number' || cashPaid < total || hasBlockingUnmapped || isProcessingPayment || isEisInvoiceSubmissionBlocked}
+                            title={isEisInvoiceSubmissionBlocked ? eisInvoiceSubmissionBlockedMessage : hasBlockingUnmapped ? 'Cannot complete payment: unmapped products in cart' : ''}
                         >
                             {isProcessingPayment ? (
                                 <>
@@ -1938,8 +2418,8 @@ const PaymentDialog = ({
                         size="lg" 
                         className="w-full bg-green-600 hover:bg-green-700 text-base h-12" 
                         onClick={() => handlePayment(selectedPaymentMethod)} 
-                        disabled={hasBlockingUnmapped || isProcessingPayment}
-                        title={hasBlockingUnmapped ? 'Cannot complete payment: unmapped products in cart' : ''}
+                        disabled={hasBlockingUnmapped || isProcessingPayment || isEisInvoiceSubmissionBlocked}
+                        title={isEisInvoiceSubmissionBlocked ? eisInvoiceSubmissionBlockedMessage : hasBlockingUnmapped ? 'Cannot complete payment: unmapped products in cart' : ''}
                     >
                         {isProcessingPayment ? (
                             <>
@@ -1974,13 +2454,16 @@ export const GenericPos = ({
   defaultTaxRate,
   eisEnabled = false,
   blockSalesIfTaxMappingMissing = false,
+  isEisInvoiceSubmissionBlocked = false,
+  eisInvoiceSubmissionBlockedMessage = 'Could not reach the POS server. Connect to working internet before completing the sale so the EIS invoice can be submitted to MRA.',
   branchId,
 }: PosProps) => {
   const [isPaymentDialogOpen, setPaymentDialogOpen] = useState(false);
   const [showPrinterConfig, setShowPrinterConfig] = useState(false);
   const [paymentSessionId, setPaymentSessionId] = useState(0);
   const { format: formatCurrency } = useCurrency();
-  const shouldEnforceTaxMapping = eisEnabled && blockSalesIfTaxMappingMissing === true;
+  const shouldUseEisTaxMappings = Boolean(eisEnabled);
+  const shouldEnforceTaxMapping = shouldUseEisTaxMappings && blockSalesIfTaxMappingMissing === true;
   const activeBranchId = useMemo(
     () => branchId ?? safeLocalStorageGetItem('handypos-active-branch') ?? 'main',
     [branchId]
@@ -2130,7 +2613,7 @@ export const GenericPos = ({
             itemNet = lineAmount - itemTax;
           }
         }
-      } else if (!shouldEnforceTaxMapping) {
+      } else if (!shouldUseEisTaxMappings) {
         taxType = fallbackTaxType;
         ratePercent = normalizedFallbackRate;
         if (hasMapping && (fallbackTaxType === 'zero' || fallbackTaxType === 'exempt')) {
@@ -2193,7 +2676,7 @@ export const GenericPos = ({
       methodSummary = methods.has('exclusive') ? 'Exclusive' : 'Inclusive';
     } else if (methods.size > 1) {
       methodSummary = 'Mixed';
-    } else if (!shouldEnforceTaxMapping && defaultTaxRateDecimal > 0) {
+    } else if (!shouldUseEisTaxMappings && defaultTaxRateDecimal > 0) {
       methodSummary = 'Default (Inclusive)';
     }
 
@@ -2204,12 +2687,12 @@ export const GenericPos = ({
       methodSummary,
       perItemTax,
     };
-  }, [cart, mappingByItemId, defaultTaxRateDecimal, shouldEnforceTaxMapping]);
+  }, [cart, mappingByItemId, defaultTaxRateDecimal, shouldUseEisTaxMappings]);
 
   const subtotal = cartSummary.net;
   const tax = cartSummary.tax;
   const total = cartSummary.gross;
-  const cartTaxLabel = shouldEnforceTaxMapping ? 'VAT Amount (MRA Rules Applied)' : (taxLabel || 'VAT Amount');
+  const cartTaxLabel = shouldUseEisTaxMappings ? 'VAT Amount (MRA Rules Applied)' : (taxLabel || 'VAT Amount');
   const hasItemsInCart = cart.length > 0;
 
   const getMRAMappingStatus = useCallback((itemId: string): {
@@ -2307,9 +2790,9 @@ export const GenericPos = ({
       stockText = available ? '✓ Available' : '✗ Out of Stock';
       hasStock = available;
     } else {
-      const remaining = item.stockUnits || 0;
+      const remaining = Number(item.stockUnits || 0);
       hasStock = remaining > 0;
-      stockText = `${remaining} ${item.unitType || 'units'} remaining`;
+      stockText = `${formatInventoryQuantity(remaining, { preferWholeNumbers: true, maximumFractionDigits: 3 })} ${item.unitType || 'units'} remaining`;
     }
     
     if (!shouldEnforceTaxMapping) {
@@ -2472,7 +2955,7 @@ export const GenericPos = ({
             onUpdateQuantity={onUpdateQuantity}
             currencyFormatter={formatCurrency}
             taxDetail={cartSummary.perItemTax[String(item.id)]}
-            showTaxStatus={shouldEnforceTaxMapping}
+            showTaxStatus={shouldUseEisTaxMappings}
           />
         ))}
       </div>
@@ -2495,7 +2978,18 @@ export const GenericPos = ({
         <span className="flex-shrink-0">Total (Incl VAT)</span>
         <span className="flex-shrink-0 text-right">{formatCurrency(total)}</span>
       </div>
-      <Button size="lg" className="bg-green-600 hover:bg-green-700" onClick={() => { setPaymentSessionId((id) => id + 1); setPaymentDialogOpen(true); }}>
+      {isEisInvoiceSubmissionBlocked && (
+        <div className="flex items-start gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-900 dark:border-yellow-800 dark:bg-yellow-950/30 dark:text-yellow-100">
+          <WifiOff className="mt-0.5 h-4 w-4 shrink-0" />
+          <span className="min-w-0">{eisInvoiceSubmissionBlockedMessage}</span>
+        </div>
+      )}
+      <Button
+        size="lg"
+        className="bg-green-600 hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
+        onClick={() => { setPaymentSessionId((id) => id + 1); setPaymentDialogOpen(true); }}
+        disabled={isEisInvoiceSubmissionBlocked}
+      >
         <CreditCard className="mr-2 h-5 w-5" /> Payment
       </Button>
     </div>
@@ -2583,6 +3077,8 @@ export const GenericPos = ({
             cart={cart}
             eisEnabled={eisEnabled}
             blockSalesIfTaxMappingMissing={blockSalesIfTaxMappingMissing}
+            isEisInvoiceSubmissionBlocked={isEisInvoiceSubmissionBlocked}
+            eisInvoiceSubmissionBlockedMessage={eisInvoiceSubmissionBlockedMessage}
             branchId={branchId}
             onConfigurePrinter={() => setShowPrinterConfig(true)}
         />

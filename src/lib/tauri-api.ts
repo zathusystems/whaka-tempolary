@@ -8,7 +8,7 @@
  * - Type-safe responses
  */
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://pos.express-travel-ticketing.online';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://pos3.express-travel-ticketing.online';
 
 export class APIClient {
   private apiUrl: string = API_URL;

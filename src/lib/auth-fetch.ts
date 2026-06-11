@@ -1,4 +1,5 @@
 import { db } from './db';
+import { ensureTauriDeviceIdentity, getDeviceSerial } from './device-identity';
 import { syncSessionSnapshotToDesktopStore } from './desktop-session-store';
 
 export interface AuthTokens {
@@ -34,7 +35,7 @@ export interface SyncQueueItem {
   metadata?: Record<string, any>;
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://pos.express-travel-ticketing.online/api';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://pos3.express-travel-ticketing.online/api';
 const SYNC_QUEUE_KEY = 'handypos-sync-queue';
 const SYNC_QUEUE_MIGRATION_KEY = 'handypos-sync-queue-migrated-v1';
 const AUTH_TOKENS_KEY = 'handypos-auth-tokens';
@@ -62,6 +63,7 @@ class AuthenticatedFetch {
     this.runOneTimeQueueMigration();
     this.setupNetworkListeners();
     this.startSyncInterval();
+    void ensureTauriDeviceIdentity();
   }
 
   /**
@@ -593,6 +595,10 @@ class AuthenticatedFetch {
     if (this.tokens?.access) {
       headers['Authorization'] = `Bearer ${this.tokens.access}`;
     }
+    const deviceSerial = getDeviceSerial();
+    if (deviceSerial) {
+      headers['X-HandyPOS-Device-Serial'] = deviceSerial;
+    }
     return headers;
   }
 
@@ -872,6 +878,7 @@ class AuthenticatedFetch {
         throw new Error('Invalid response: missing tokens');
       }
       
+      await ensureTauriDeviceIdentity();
       this.saveTokens({
         access: data.access,
         refresh: data.refresh,
@@ -949,6 +956,7 @@ class AuthenticatedFetch {
     
     console.log('[DEBUG REGISTER] Extracted tokens:', { access: tokens.access?.substring(0, 20) + '...', refresh: tokens.refresh?.substring(0, 20) + '...' });
     
+    await ensureTauriDeviceIdentity();
     this.saveTokens(tokens);
     console.log('[DEBUG REGISTER] Tokens saved to localStorage');
     
@@ -996,6 +1004,25 @@ class AuthenticatedFetch {
       count: this.syncQueue.length,
       items: this.syncQueue,
     };
+  }
+
+  removeSyncQueueItem(itemId: string): void {
+    const originalLength = this.syncQueue.length;
+    this.syncQueue = this.syncQueue.filter((item) => item.id !== itemId);
+    if (this.syncQueue.length !== originalLength) {
+      this.saveSyncQueue();
+    }
+  }
+
+  removeSyncQueueItems(itemIds: string[]): void {
+    const ids = new Set(itemIds);
+    if (ids.size === 0) return;
+
+    const originalLength = this.syncQueue.length;
+    this.syncQueue = this.syncQueue.filter((item) => !ids.has(item.id));
+    if (this.syncQueue.length !== originalLength) {
+      this.saveSyncQueue();
+    }
   }
 
   /**

@@ -173,7 +173,7 @@ export function ViewOrdersModal({ branchId, isOpen, onOpenChange }: ViewOrdersMo
       const backendBranchId = branchId.replace(/^BRN-/, '');
       
       const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || 'https://pos.express-travel-ticketing.online/api'}/orders/take-orders/${orderId}/update_status/`,
+        `${process.env.NEXT_PUBLIC_API_URL || 'https://pos3.express-travel-ticketing.online/api'}/orders/take-orders/${orderId}/update_status/`,
         {
           method: 'PATCH',
           headers: {

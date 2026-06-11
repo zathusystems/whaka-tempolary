@@ -90,6 +90,7 @@ export interface Supplier {
     
     // MRA Compliance Fields
     supplierTin?: string; // Supplier's Tax Identification Number
+    mraSupplierId?: number;
     vatRegistered?: boolean; // Is supplier VAT registered?
     
     // Sync fields
@@ -163,6 +164,8 @@ export interface InventoryItem {
     _purchaseSyncPending?: boolean;
 }
 
+export type EisStockReceiptSource = 'pos_goods_receiving' | 'supplier_sale';
+
 export interface PurchaseRecord {
     id?: string | number;
     purchaseOrderId?: string; // ID of the purchase order this item belongs to
@@ -176,6 +179,10 @@ export interface PurchaseRecord {
     productName: string;
     supplierId: string;
     supplierName: string;
+    supplierTin?: string;
+    mraSupplierId?: number;
+    supplierVatRegistered?: boolean;
+    eisStockReceiptSource?: EisStockReceiptSource;
     branchId: string; 
     quantityReceived: number;
     quantityRemaining: number; // New field for FIFO
@@ -255,6 +262,20 @@ export interface Order {
     buyer_name?: string;
     buyerTin?: string;
     buyer_tin?: string;
+    buyerAuthorizationCode?: string;
+    buyer_authorization_code?: string;
+    isExport?: boolean;
+    is_export?: boolean;
+    isReliefSupply?: boolean;
+    is_relief_supply?: boolean;
+    vat5ProjectNumber?: string;
+    vat5_project_number?: string;
+    vat5CertificateNumber?: string;
+    vat5_certificate_number?: string;
+    vat5Quantity?: number;
+    vat5_quantity?: number;
+    eisValidationMetadata?: Record<string, any>;
+    eis_validation_metadata?: Record<string, any>;
     cogs: number; // Cost of Goods Sold for this order
     // Tax snapshot (MRA compliance - NEVER calculate tax dynamically)
     // These fields preserve the exact tax rules that applied at the time of sale
@@ -291,6 +312,10 @@ export interface Order {
     _dirty?: boolean;
     _operation?: 'create' | 'update' | 'delete';
     _synced_at?: string;
+    syncStatus?: 'pending' | 'failed' | 'synced';
+    syncError?: string;
+    syncRetryBlocked?: boolean;
+    syncFailedAt?: string;
 }
 
 export interface Refund {
@@ -584,7 +609,9 @@ export interface PurchaseOrder {
     
     // MRA Compliance Fields
     supplierTin?: string; // Supplier's Tax Identification Number
+    mraSupplierId?: number;
     supplierVatRegistered?: boolean; // Is supplier VAT registered?
+    eisStockReceiptSource?: EisStockReceiptSource;
     
     // EIS Tracking Fields
     eisInvoiceNumber?: string; // MRA EIS invoice number if this PO was invoiced
@@ -665,6 +692,12 @@ export interface MRAMapping {
     isApproved: boolean;
     approvedAt?: string;
     mraSynced: boolean;
+    isReadyForSale?: boolean;
+    is_ready_for_sale?: boolean;
+    isTaxpayerCompatible?: boolean;
+    is_taxpayer_compatible?: boolean;
+    taxpayerCompatibilityError?: string;
+    taxpayer_compatibility_error?: string;
     lastSyncedAt?: string;
     createdAt: string;
     updatedAt: string;

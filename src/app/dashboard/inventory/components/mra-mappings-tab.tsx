@@ -5,7 +5,7 @@ import {
   CheckCircle2,
   Loader2,
   AlertTriangle,
-  Pencil,
+  RefreshCw,
 } from 'lucide-react';
 import { authFetch } from '@/lib/auth-fetch';
 import { toast } from '@/hooks/use-toast';
@@ -29,15 +29,6 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
 import {
   Select,
   SelectContent,
@@ -66,9 +57,6 @@ interface MRAMapping {
   approved_at?: string;
   last_synced_at?: string;
 }
-
-type MRATaxType = 'standard' | 'zero' | 'exempt';
-type TaxCalculationMethod = 'inclusive' | 'exclusive';
 
 const buildMappingsUrl = (branchId?: string): string => {
   if (!branchId) {
@@ -119,34 +107,17 @@ interface MRAMappingsTabProps {
   branchId?: string;
   searchTerm: string;
   refreshKey?: number;
+  isEisEnabled?: boolean;
 }
 
-export function MRAMappingsTab({ inventoryData, businessId, branchId, searchTerm, refreshKey = 0 }: MRAMappingsTabProps) {
+export function MRAMappingsTab({ inventoryData, businessId, branchId, searchTerm, refreshKey = 0, isEisEnabled = false }: MRAMappingsTabProps) {
   const [mappings, setMappings] = useState<MRAMapping[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isApproving, setIsApproving] = useState<string | null>(null);
   const [isApprovingAll, setIsApprovingAll] = useState(false);
-  const [editingMapping, setEditingMapping] = useState<MRAMapping | null>(null);
-  const [isSavingEdit, setIsSavingEdit] = useState(false);
-  const [editMraCode, setEditMraCode] = useState('');
-  const [editMraName, setEditMraName] = useState('');
-  const [editTaxType, setEditTaxType] = useState<MRATaxType>('standard');
-  const [editTaxRate, setEditTaxRate] = useState('16.5');
-  const [editUnitMeasure, setEditUnitMeasure] = useState('unit');
-  const [editCalcMethod, setEditCalcMethod] = useState<TaxCalculationMethod>('inclusive');
+  const [isSyncingEisCatalog, setIsSyncingEisCatalog] = useState(false);
   const [filterStatus, setFilterStatus] = useState<'all' | 'approved' | 'unapproved' | 'synced'>('all');
   const normalizedSearchTerm = searchTerm.trim().toLowerCase();
-
-  const normalizeTaxType = (value?: string): MRATaxType => {
-    const normalized = String(value || '').trim().toLowerCase();
-    if (normalized === 'vat_zero' || normalized === 'zero' || normalized === 'zero_rated' || normalized === 'zero-rated') {
-      return 'zero';
-    }
-    if (normalized === 'vat_exempt' || normalized === 'exempt') {
-      return 'exempt';
-    }
-    return 'standard';
-  };
 
   const normalizeCalcMethod = (value: unknown): 'inclusive' | 'exclusive' => {
     const normalized = String(value ?? '').trim().toLowerCase();
@@ -277,115 +248,6 @@ export function MRAMappingsTab({ inventoryData, businessId, branchId, searchTerm
     }
   };
 
-  const openEditDialog = (mapping: MRAMapping) => {
-    const normalizedTaxType = normalizeTaxType(mapping.mra_tax_type);
-    const normalizedCalcMethod = normalizeCalcMethod(
-      (mapping as any).tax_calculation_method ??
-      (mapping as any).taxCalculationMethod
-    );
-
-    setEditingMapping(mapping);
-    setEditMraCode(String(mapping.mra_product_code || '').trim());
-    setEditMraName(String(mapping.mra_product_name || mapping.inventory_item_name || '').trim());
-    setEditTaxType(normalizedTaxType);
-    setEditTaxRate(String(Number(mapping.mra_tax_rate ?? 0)));
-    setEditUnitMeasure(String(mapping.mra_unit_measure || 'unit').trim() || 'unit');
-    setEditCalcMethod(normalizedCalcMethod);
-  };
-
-  const closeEditDialog = (force = false) => {
-    if (isSavingEdit && !force) return;
-    setEditingMapping(null);
-    setEditMraCode('');
-    setEditMraName('');
-    setEditTaxType('standard');
-    setEditTaxRate('16.5');
-    setEditUnitMeasure('unit');
-    setEditCalcMethod('inclusive');
-  };
-
-  const handleSaveEdit = async () => {
-    if (!editingMapping) {
-      return;
-    }
-
-    const trimmedName = editMraName.trim() || editingMapping.inventory_item_name;
-    const trimmedCode = editMraCode.trim();
-    const normalizedRate = editTaxType === 'standard' ? Number(editTaxRate) : 0;
-    const normalizedUnit = editUnitMeasure.trim() || 'unit';
-    const normalizedCalcMethod: TaxCalculationMethod =
-      editTaxType === 'standard' ? editCalcMethod : 'inclusive';
-
-    if (
-      trimmedCode &&
-      mappings.some(
-        (mapping) =>
-          mapping.id !== editingMapping.id &&
-          String(mapping.mra_product_code || '').trim() === trimmedCode
-      )
-    ) {
-      toast({
-        variant: 'destructive',
-        title: 'Error',
-        description: 'This MRA code is already assigned to another product',
-      });
-      return;
-    }
-
-    if (!Number.isFinite(normalizedRate) || normalizedRate < 0) {
-      toast({
-        variant: 'destructive',
-        title: 'Error',
-        description: 'Enter a valid non-negative tax rate',
-      });
-      return;
-    }
-
-    try {
-      setIsSavingEdit(true);
-
-      await authFetch.fetch<any>(`/inventory/mra-mappings/${editingMapping.id}/`, {
-        method: 'PUT',
-        body: JSON.stringify({
-          inventory_item: editingMapping.inventory_item,
-          mra_product_code: trimmedCode,
-          mra_product_name: trimmedName,
-          mra_tax_type: editTaxType,
-          mra_tax_rate: normalizedRate,
-          mra_unit_measure: normalizedUnit,
-          tax_calculation_method: normalizedCalcMethod,
-        }),
-      });
-
-      if (editingMapping.is_approved) {
-        await authFetch.fetch<any>(`/inventory/mra-mappings/${editingMapping.id}/approve/`, {
-          method: 'POST',
-          body: JSON.stringify({
-            is_approved: true,
-            mra_synced: true,
-          }),
-        });
-      }
-
-      await refreshMappings();
-      closeEditDialog(true);
-
-      toast({
-        title: 'Success',
-        description: 'Mapping updated',
-      });
-    } catch (error) {
-      console.error('Failed to update mapping:', error);
-      toast({
-        variant: 'destructive',
-        title: 'Error',
-        description: 'Failed to update mapping',
-      });
-    } finally {
-      setIsSavingEdit(false);
-    }
-  };
-
   // Filter mappings
   const filteredMappings = mappings.filter(mapping => {
     const matchesSearch =
@@ -491,6 +353,53 @@ export function MRAMappingsTab({ inventoryData, businessId, branchId, searchTerm
     }
   };
 
+  const handleSyncFromEisCatalog = async () => {
+    if (!businessId) {
+      toast({
+        variant: 'destructive',
+        title: 'Business required',
+        description: 'Select a business before syncing EIS product mappings.',
+      });
+      return;
+    }
+
+    try {
+      setIsSyncingEisCatalog(true);
+      const params = new URLSearchParams({ business_id: String(businessId) });
+      if (branchId) {
+        params.set('branch_id', String(branchId));
+      }
+
+      const response = await authFetch.fetch<any>(
+        `/inventory/mra-mappings/sync-from-eis-catalog/?${params.toString()}`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ refresh_catalog: true }),
+        }
+      );
+
+      await refreshMappings();
+
+      const matched = Number(response?.matched || 0);
+      const created = Number(response?.created || 0);
+      const updated = Number(response?.updated || 0);
+      const unmatched = Number(response?.unmatched_count || 0);
+      toast({
+        title: 'EIS catalog synced',
+        description: `Matched ${matched} product${matched === 1 ? '' : 's'} (${created} new, ${updated} updated).${unmatched ? ` ${unmatched} unmatched.` : ''}`,
+      });
+    } catch (error: any) {
+      console.error('[MRAMappingsTab] Failed to sync EIS catalog:', error);
+      toast({
+        variant: 'destructive',
+        title: 'EIS catalog sync failed',
+        description: error?.message || 'Could not pull approved products from EIS.',
+      });
+    } finally {
+      setIsSyncingEisCatalog(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -538,29 +447,57 @@ export function MRAMappingsTab({ inventoryData, businessId, branchId, searchTerm
       </div>
 
       {/* Action */}
+      {isEisEnabled && (
+        <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+          EIS is enabled, so product mappings are read-only here. Update products and tax setup in the MRA EIS portal, then sync the EIS catalog to refresh this list.
+        </div>
+      )}
+
       <div className="flex justify-end gap-2">
         <Button
           type="button"
           variant="outline"
-          onClick={handleApproveAll}
-          disabled={isApprovingAll || pendingFilteredMappings.length === 0}
+          onClick={handleSyncFromEisCatalog}
+          disabled={isSyncingEisCatalog}
         >
-          {isApprovingAll ? (
+          {isSyncingEisCatalog ? (
             <>
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              Approving...
+              Syncing...
             </>
           ) : (
-            `Approve All Pending (${pendingFilteredMappings.length})`
+            <>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Sync EIS Catalog
+            </>
           )}
         </Button>
-        <ProductMappingForm
-          inventoryData={unmappedInventory}
-          businessId={businessId?.toString()}
-          onMappingCreated={() => {
-            void refreshMappings();
-          }}
-        />
+        {!isEisEnabled && (
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleApproveAll}
+              disabled={isApprovingAll || pendingFilteredMappings.length === 0}
+            >
+              {isApprovingAll ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Approving...
+                </>
+              ) : (
+                `Approve All Pending (${pendingFilteredMappings.length})`
+              )}
+            </Button>
+            <ProductMappingForm
+              inventoryData={unmappedInventory}
+              businessId={businessId?.toString()}
+              onMappingCreated={() => {
+                void refreshMappings();
+              }}
+            />
+          </>
+        )}
       </div>
 
       {/* Filters */}
@@ -596,257 +533,107 @@ export function MRAMappingsTab({ inventoryData, businessId, branchId, searchTerm
             </div>
           ) : (
             <>
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Product Name</TableHead>
-                    <TableHead>MRA Code</TableHead>
-                    <TableHead>MRA Product</TableHead>
-                    <TableHead>Tax Rate</TableHead>
-                    <TableHead>Calc Method</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Action</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {paginatedMappings.map((mapping) => (
-                    <TableRow key={mapping.id}>
-                      <TableCell className="font-medium">
-                        {mapping.inventory_item_name}
-                      </TableCell>
-                      <TableCell>
-                        <code className="text-xs bg-muted px-2 py-1 rounded">
-                          {mapping.mra_product_code}
-                        </code>
-                      </TableCell>
-                      <TableCell>{mapping.mra_product_name}</TableCell>
-                      <TableCell>{mapping.mra_tax_rate}%</TableCell>
-                      <TableCell>
-                        {normalizeCalcMethod(
-                          (mapping as any).tax_calculation_method ??
-                          (mapping as any).taxCalculationMethod ??
-                          'inclusive'
-                        ) === 'exclusive' ? 'Exclusive' : 'Inclusive'}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex gap-2">
-                          {mapping.is_approved && (
-                            <Badge variant="default" className="bg-green-600">
-                              <CheckCircle2 className="h-3 w-3 mr-1" />
-                              Approved
-                            </Badge>
-                          )}
-                          {!mapping.is_approved && (
-                            <Badge variant="outline" className="border-amber-600 text-amber-600">
-                              <AlertTriangle className="h-3 w-3 mr-1" />
-                              Pending
-                            </Badge>
-                          )}
-                          {mapping.mra_synced && (
-                            <Badge variant="secondary">
-                              <CheckCircle2 className="h-3 w-3 mr-1" />
-                              Synced
-                            </Badge>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() => openEditDialog(mapping)}
-                          >
-                            <Pencil className="h-3 w-3 mr-1" />
-                            Edit
-                          </Button>
-                          {!mapping.is_approved && (
-                            <Button
-                              type="button"
-                              size="sm"
-                              onClick={() => handleApproveMapping(mapping.id)}
-                              disabled={isApproving === mapping.id || isApprovingAll}
-                            >
-                              {isApproving === mapping.id ? (
-                                <>
-                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                                  Approving...
-                                </>
-                              ) : (
-                                <>
-                                  <CheckCircle2 className="h-3 w-3 mr-1" />
-                                  Approve
-                                </>
-                              )}
-                            </Button>
-                          )}
-                          {mapping.is_approved && (
-                            <span className="text-xs text-muted-foreground">Approved</span>
-                          )}
-                        </div>
-                      </TableCell>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Product Name</TableHead>
+                      <TableHead>MRA Code</TableHead>
+                      <TableHead>MRA Product</TableHead>
+                      <TableHead>Tax Rate</TableHead>
+                      <TableHead>Calc Method</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Action</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-            <PaginationControls
-              currentPage={effectiveCurrentPage}
-              totalItems={totalItems}
-              totalPages={totalPages}
-              pageStartIndex={pageStartIndex}
-              pageEndIndex={pageEndIndex}
-              onPageChange={setCurrentPage}
-              itemLabel="mappings"
-            />
+                  </TableHeader>
+                  <TableBody>
+                    {paginatedMappings.map((mapping) => (
+                      <TableRow key={mapping.id}>
+                        <TableCell className="font-medium">
+                          {mapping.inventory_item_name}
+                        </TableCell>
+                        <TableCell>
+                          <code className="text-xs bg-muted px-2 py-1 rounded">
+                            {mapping.mra_product_code}
+                          </code>
+                        </TableCell>
+                        <TableCell>{mapping.mra_product_name}</TableCell>
+                        <TableCell>{mapping.mra_tax_rate}%</TableCell>
+                        <TableCell>
+                          {normalizeCalcMethod(
+                            (mapping as any).tax_calculation_method ??
+                            (mapping as any).taxCalculationMethod ??
+                            'inclusive'
+                          ) === 'exclusive' ? 'Exclusive' : 'Inclusive'}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex gap-2">
+                            {mapping.is_approved && (
+                              <Badge variant="default" className="bg-green-600">
+                                <CheckCircle2 className="h-3 w-3 mr-1" />
+                                Approved
+                              </Badge>
+                            )}
+                            {!mapping.is_approved && (
+                              <Badge variant="outline" className="border-amber-600 text-amber-600">
+                                <AlertTriangle className="h-3 w-3 mr-1" />
+                                Pending
+                              </Badge>
+                            )}
+                            {mapping.mra_synced && (
+                              <Badge variant="secondary">
+                                <CheckCircle2 className="h-3 w-3 mr-1" />
+                                Synced
+                              </Badge>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap items-center gap-2">
+                            {isEisEnabled ? (
+                              <span className="text-xs text-muted-foreground">Managed by MRA</span>
+                            ) : !mapping.is_approved ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                onClick={() => handleApproveMapping(mapping.id)}
+                                disabled={isApproving === mapping.id || isApprovingAll}
+                              >
+                                {isApproving === mapping.id ? (
+                                  <>
+                                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                    Approving...
+                                  </>
+                                ) : (
+                                  <>
+                                    <CheckCircle2 className="h-3 w-3 mr-1" />
+                                    Approve
+                                  </>
+                                )}
+                              </Button>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">Approved</span>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <PaginationControls
+                currentPage={effectiveCurrentPage}
+                totalItems={totalItems}
+                totalPages={totalPages}
+                pageStartIndex={pageStartIndex}
+                pageEndIndex={pageEndIndex}
+                onPageChange={setCurrentPage}
+                itemLabel="mappings"
+              />
             </>
           )}
         </CardContent>
       </Card>
-
-      <Dialog open={editingMapping !== null} onOpenChange={(open) => {
-        if (!open) {
-          closeEditDialog();
-        }
-      }}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Edit Mapping</DialogTitle>
-            <DialogDescription>
-              Update the selected mapping details and save them back to the current branch.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="grid gap-4 py-2">
-            <div className="grid gap-2">
-              <label className="text-sm font-medium">Product</label>
-              <Input value={editingMapping?.inventory_item_name || ''} disabled />
-            </div>
-
-            <div className="grid gap-2">
-              <label className="text-sm font-medium">MRA Code</label>
-              <Input
-                value={editMraCode}
-                onChange={(event) => setEditMraCode(event.target.value)}
-                placeholder="Enter MRA code"
-              />
-            </div>
-
-            <div className="grid gap-2">
-              <label className="text-sm font-medium">MRA Product Name</label>
-              <Input
-                value={editMraName}
-                onChange={(event) => setEditMraName(event.target.value)}
-                placeholder="Enter MRA product name"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <label className="text-sm font-medium">Tax Type</label>
-                <Select
-                  value={editTaxType}
-                  onValueChange={(value) => {
-                    const nextTaxType = value as MRATaxType;
-                    setEditTaxType(nextTaxType);
-                    if (nextTaxType !== 'standard') {
-                      setEditTaxRate('0');
-                      setEditCalcMethod('inclusive');
-                    }
-                  }}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="standard">Standard</SelectItem>
-                    <SelectItem value="zero">Zero Rated</SelectItem>
-                    <SelectItem value="exempt">Exempt</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="grid gap-2">
-                <label className="text-sm font-medium">Tax Rate (%)</label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={editTaxType === 'standard' ? editTaxRate : '0'}
-                  onChange={(event) => setEditTaxRate(event.target.value)}
-                  disabled={editTaxType !== 'standard'}
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <label className="text-sm font-medium">Unit of Measure</label>
-                <Select value={editUnitMeasure} onValueChange={setEditUnitMeasure}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="unit">Unit</SelectItem>
-                    <SelectItem value="kg">Kilogram</SelectItem>
-                    <SelectItem value="liter">Liter</SelectItem>
-                    <SelectItem value="meter">Meter</SelectItem>
-                    <SelectItem value="box">Box</SelectItem>
-                    <SelectItem value="pack">Pack</SelectItem>
-                    <SelectItem value="bottle">Bottle</SelectItem>
-                    <SelectItem value="can">Can</SelectItem>
-                    <SelectItem value="carton">Carton</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="grid gap-2">
-                <label className="text-sm font-medium">Calculation Method</label>
-                <Select
-                  value={editTaxType === 'standard' ? editCalcMethod : 'inclusive'}
-                  onValueChange={(value) => setEditCalcMethod(value as TaxCalculationMethod)}
-                  disabled={editTaxType !== 'standard'}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="inclusive">Inclusive</SelectItem>
-                    <SelectItem value="exclusive">Exclusive</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-          </div>
-
-          <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => closeEditDialog()}
-                disabled={isSavingEdit}
-              >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              onClick={handleSaveEdit}
-              disabled={isSavingEdit || !editingMapping}
-            >
-              {isSavingEdit ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Saving...
-                </>
-              ) : (
-                'Save Changes'
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
     </div>
   );

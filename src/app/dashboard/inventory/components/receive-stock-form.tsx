@@ -7,7 +7,7 @@ import { Plus, X, Calendar as CalendarIcon, Loader2, ChevronsUpDown, Check } fro
 import { v4 as uuidv4 } from 'uuid';
 import { useLiveQuery } from 'dexie-react-hooks';
 
-import { db, type InventoryItem, type PurchaseRecord, type Supplier, type MRAMapping } from '@/lib/db';
+import { db, type EisStockReceiptSource, type InventoryItem, type PurchaseRecord, type Supplier, type MRAMapping } from '@/lib/db';
 import { type BusinessType } from '@/lib/inventory/config';
 import { toast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
@@ -15,6 +15,7 @@ import { logAuditAction } from '@/lib/audit';
 import { syncService } from '@/lib/services/sync-service';
 import { authFetch } from '@/lib/auth-fetch';
 import { normalizePurchaseBatchQuantities } from '@/lib/purchase-quantity';
+import type { StockReconciliationWarning } from '@/lib/services/stock-reconciliation';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';
@@ -39,6 +40,7 @@ import type { EditablePurchaseGroup } from './purchase-editor-types';
 
 type ReceiveStockFormValues = {
   supplierId?: string;
+  eisStockReceiptSource: EisStockReceiptSource;
   purchaseDate?: Date;
   referenceNumber?: string;
   vatAmount?: number;
@@ -61,6 +63,7 @@ type ReceiveStockFormValues = {
 
 type ReceiveStockDraft = {
     supplierId?: string;
+    eisStockReceiptSource?: EisStockReceiptSource;
     purchaseDate?: string;
     referenceNumber?: string;
     paymentStatus?: 'Paid' | 'Unpaid';
@@ -80,6 +83,30 @@ type ReceiveStockDraft = {
 type ReceiveStockDraftItem = NonNullable<ReceiveStockDraft['items']>[number];
 
 const RECEIVE_STOCK_DRAFT_STORAGE_KEY_PREFIX = 'handypos-receive-stock-draft';
+const EIS_STOCK_RECEIPT_SOURCE_POS: EisStockReceiptSource = 'pos_goods_receiving';
+const EIS_STOCK_RECEIPT_SOURCE_SUPPLIER: EisStockReceiptSource = 'supplier_sale';
+
+const normalizeEisStockReceiptSource = (value: unknown): EisStockReceiptSource => {
+    const normalized = String(value || '').trim().toLowerCase();
+    if ([
+        'supplier_sale',
+        'supplier-sale',
+        'b2b',
+        'b2b_transfer',
+        'b2b-transfer',
+        'stock_transfer',
+        'stock-transfer',
+        'already_posted',
+        'already-posted',
+    ].includes(normalized)) {
+        return EIS_STOCK_RECEIPT_SOURCE_SUPPLIER;
+    }
+    return EIS_STOCK_RECEIPT_SOURCE_POS;
+};
+
+const isSupplierReportedEisStockSource = (value: unknown): boolean => (
+    normalizeEisStockReceiptSource(value) === EIS_STOCK_RECEIPT_SOURCE_SUPPLIER
+);
 
 const normalizeBranchId = (value?: string | number | null): string => {
     const normalized = String(value ?? '').trim();
@@ -160,8 +187,11 @@ const createEmptyReceiveStockItem = (): ReceiveStockFormValues['items'][number] 
     batchNumber: '',
 });
 
-const createDefaultReceiveStockValues = (): ReceiveStockFormValues => ({
+const createDefaultReceiveStockValues = (
+    eisStockReceiptSource: EisStockReceiptSource = EIS_STOCK_RECEIPT_SOURCE_POS
+): ReceiveStockFormValues => ({
     supplierId: '',
+    eisStockReceiptSource,
     purchaseDate: createDefaultPurchaseDate(),
     referenceNumber: '',
     vatAmount: undefined,
@@ -193,6 +223,7 @@ const serializeDraftItem = (item: ReceiveStockFormValues['items'][number] | unde
 
 const normalizeReceiveStockDraft = (draft: ReceiveStockDraft | null | undefined): ReceiveStockFormValues => ({
     supplierId: typeof draft?.supplierId === 'string' ? draft.supplierId : '',
+    eisStockReceiptSource: normalizeEisStockReceiptSource(draft?.eisStockReceiptSource),
     purchaseDate: resolvePurchaseDate(draft?.purchaseDate),
     referenceNumber: typeof draft?.referenceNumber === 'string' ? draft.referenceNumber : '',
     vatAmount: undefined,
@@ -201,6 +232,44 @@ const normalizeReceiveStockDraft = (draft: ReceiveStockDraft | null | undefined)
         ? draft.items.map((item) => normalizeDraftItem(item))
         : [createEmptyReceiveStockItem()],
 });
+
+const buildReceiveStockValuesFromReconciliationDefaults = (
+    warnings: StockReconciliationWarning[],
+    inventoryItems: InventoryItem[],
+    eisStockReceiptSource: EisStockReceiptSource
+): ReceiveStockFormValues => {
+    const inventoryById = new Map(inventoryItems.map((item) => [String(item.id), item]));
+    const items = warnings
+        .map<ReceiveStockFormValues['items'][number] | null>((warning) => {
+            const productId = String(warning.productId || '').trim();
+            const product = inventoryById.get(productId);
+            const missingQuantity = Number(warning.missingBatchQuantity);
+            if (!productId || !Number.isFinite(missingQuantity) || missingQuantity <= 0) {
+                return null;
+            }
+
+            return {
+                productId,
+                quantity: Number(missingQuantity.toFixed(3)),
+                cost: toNumberOrBlank(warning.cost ?? product?.cost, 0),
+                sellingPrice: toOptionalNumber(warning.sellingPrice ?? product?.price),
+                taxRate: normalizeTaxRate(warning.taxRate),
+                taxCalculationMethod: resolveTaxMethod(warning.taxCalculationMethod),
+                batchNumber: '',
+            };
+        })
+        .filter((item): item is ReceiveStockFormValues['items'][number] => Boolean(item));
+
+    return {
+        supplierId: '',
+        eisStockReceiptSource,
+        purchaseDate: createDefaultPurchaseDate(),
+        referenceNumber: '',
+        vatAmount: undefined,
+        paymentStatus: 'Paid',
+        items: items.length > 0 ? items : [createEmptyReceiveStockItem()],
+    };
+};
 
 const normalizeSupplierMatchValue = (value: unknown): string => {
     return String(value || '').trim().toLowerCase();
@@ -249,6 +318,45 @@ const resolveSupplierIdForPurchase = (
     return purchaseSupplierId || itemSupplierId || '';
 };
 
+const resolvePurchaseGroupEisStockReceiptSource = (purchase?: EditablePurchaseGroup | null): EisStockReceiptSource => {
+    return normalizeEisStockReceiptSource(
+        purchase?.eisStockReceiptSource || purchase?.items[0]?.eisStockReceiptSource
+    );
+};
+
+const resolvePurchaseRecordEisStockReceiptSource = (
+    record: PurchaseRecord,
+    purchaseOrder?: { eisStockReceiptSource?: EisStockReceiptSource } | null
+): EisStockReceiptSource => {
+    return normalizeEisStockReceiptSource(record.eisStockReceiptSource || purchaseOrder?.eisStockReceiptSource);
+};
+
+const resolveSourceTransitionStockDelta = ({
+    currentQuantityRemaining,
+    nextQuantityRemaining,
+    currentSource,
+    nextSource,
+}: {
+    currentQuantityRemaining: number;
+    nextQuantityRemaining: number;
+    currentSource: EisStockReceiptSource;
+    nextSource: EisStockReceiptSource;
+}): number => {
+    const currentCountsInLocalStock = !isSupplierReportedEisStockSource(currentSource);
+    const nextCountsInLocalStock = !isSupplierReportedEisStockSource(nextSource);
+
+    if (currentCountsInLocalStock && nextCountsInLocalStock) {
+        return nextQuantityRemaining - currentQuantityRemaining;
+    }
+    if (!currentCountsInLocalStock && nextCountsInLocalStock) {
+        return nextQuantityRemaining;
+    }
+    if (currentCountsInLocalStock && !nextCountsInLocalStock) {
+        return -currentQuantityRemaining;
+    }
+    return 0;
+};
+
 const buildSupplierFieldValueForPurchase = (
     purchase: EditablePurchaseGroup,
     suppliers: Supplier[]
@@ -260,6 +368,10 @@ const buildSupplierFieldValueForPurchase = (
 
     const supplierName = resolveSupplierNameForPurchase(purchase);
     return supplierName ? `editing-supplier:${supplierName}` : '';
+};
+
+const isSyntheticEditingSupplier = (supplier?: Supplier | null): boolean => {
+    return Boolean(supplier?.id && String(supplier.id).startsWith('editing-supplier:'));
 };
 
 const buildReceiveStockValuesFromPurchase = (
@@ -296,6 +408,7 @@ const buildReceiveStockValuesFromPurchase = (
 
     return {
         supplierId: resolvedSupplierId,
+        eisStockReceiptSource: resolvePurchaseGroupEisStockReceiptSource(purchase),
         purchaseDate: resolvePurchaseDate(purchase.receivedDate),
         referenceNumber: purchase.referenceNumber || '',
         vatAmount: toOptionalNumber(purchase.vatAmount),
@@ -378,6 +491,18 @@ const mappingReadinessRank = (mapping: MRAMapping): number => {
     if (mapping.mraSynced) score += 1;
     return score;
 };
+
+const getMappingInventoryItemId = (mapping: MRAMapping): string => (
+    String(mapping.inventoryItemId || mapping.inventory_item_id || '').trim()
+);
+
+const getMappingTaxRate = (mapping: MRAMapping): number => (
+    normalizeTaxRate(mapping.mraTaxRate ?? mapping.mra_tax_rate ?? mapping.taxRate ?? mapping.tax_rate)
+);
+
+const getMappingTaxCalculationMethod = (mapping: MRAMapping): 'inclusive' | 'exclusive' => (
+    resolveTaxMethod(mapping.taxCalculationMethod ?? (mapping as any).tax_calculation_method)
+);
 
 type SessionChoice = {
     id: string;
@@ -484,6 +609,8 @@ export const ReceiveStockForm = ({
     suppliers,
     onFormSubmit,
     editingPurchase,
+    defaultEisStockReceiptSource = EIS_STOCK_RECEIPT_SOURCE_POS,
+    reconciliationDefaults = [],
 }: {
     branchId: string;
     businessType: BusinessType;
@@ -491,6 +618,8 @@ export const ReceiveStockForm = ({
     suppliers: Supplier[];
     onFormSubmit: () => void;
     editingPurchase?: EditablePurchaseGroup | null;
+    defaultEisStockReceiptSource?: EisStockReceiptSource;
+    reconciliationDefaults?: StockReconciliationWarning[];
 }) => {
     const { user } = useAuth();
     const isEditMode = Boolean(editingPurchase);
@@ -502,6 +631,7 @@ export const ReceiveStockForm = ({
     const shouldAutoOpenNewProductPickerRef = React.useRef(false);
     const productSearchInputRefs = React.useRef<Record<string, HTMLInputElement | null>>({});
     const hasHydratedDraftRef = React.useRef(false);
+    const lastAppliedReconciliationDefaultsKeyRef = React.useRef('');
     
     // NEW: Get active session ID from Dexie (same pattern as waste form)
     const [sessionId, setSessionId] = React.useState<string | undefined>(undefined);
@@ -529,6 +659,36 @@ export const ReceiveStockForm = ({
             ),
         [editingPurchase, inventoryItems]
     );
+    const reconciliationDefaultsKey = React.useMemo(() => {
+        if (
+            defaultEisStockReceiptSource !== EIS_STOCK_RECEIPT_SOURCE_SUPPLIER ||
+            reconciliationDefaults.length === 0
+        ) {
+            return '';
+        }
+
+        return reconciliationDefaults
+            .map((item) => [
+                String(item.productId || '').trim(),
+                Number(item.missingBatchQuantity || 0).toFixed(3),
+                Number(item.cost || 0).toFixed(4),
+                Number(item.sellingPrice || 0).toFixed(2),
+                Number(item.taxRate || 0).toFixed(2),
+                String(item.taxCalculationMethod || '').trim(),
+            ].join(':'))
+            .join('|');
+    }, [defaultEisStockReceiptSource, reconciliationDefaults]);
+    const reconciliationProductNameById = React.useMemo(() => {
+        const namesById = new Map<string, string>();
+        for (const item of reconciliationDefaults) {
+            const productId = String(item.productId || '').trim();
+            const productName = String(item.productName || '').trim();
+            if (productId && productName) {
+                namesById.set(productId, productName);
+            }
+        }
+        return namesById;
+    }, [reconciliationDefaults]);
     
     React.useEffect(() => {
         let isCancelled = false;
@@ -703,7 +863,7 @@ export const ReceiveStockForm = ({
     }, [suppliers]);
     
     const form = useForm<ReceiveStockFormValues>({
-        defaultValues: createDefaultReceiveStockValues(),
+        defaultValues: createDefaultReceiveStockValues(defaultEisStockReceiptSource),
     });
     const { control, handleSubmit, setValue, getValues, reset } = form;
     const { fields, append, remove, replace } = useFieldArray({
@@ -752,6 +912,7 @@ export const ReceiveStockForm = ({
         [branchId, businessType]
     );
     const referenceNumberValue = useWatch({ control, name: "referenceNumber" });
+    const eisStockReceiptSourceValue = useWatch({ control, name: "eisStockReceiptSource" });
     const purchaseDateValue = useWatch({ control, name: "purchaseDate" });
     const paymentStatusValue = useWatch({ control, name: "paymentStatus" });
     const supplierOptions = React.useMemo(() => {
@@ -791,6 +952,26 @@ export const ReceiveStockForm = ({
         () => (editingPurchase ? resolveSupplierNameForPurchase(editingPurchase) : ''),
         [editingPurchase]
     );
+    const selectedSupplierDetails = React.useMemo(() => {
+        if (!supplierId) {
+            return null;
+        }
+
+        const supplier = supplierOptions.find((candidate) => String(candidate.id) === String(supplierId));
+        if (!supplier) {
+            return null;
+        }
+
+        return {
+            name: supplier.name,
+            supplierTin: String(supplier.supplierTin || '').trim(),
+            mraSupplierId: supplier.mraSupplierId,
+            vatRegistered: Boolean(supplier.vatRegistered),
+            email: String(supplier.email || '').trim(),
+            phone: String(supplier.phone || '').trim(),
+            isSynthetic: isSyntheticEditingSupplier(supplier),
+        };
+    }, [supplierId, supplierOptions]);
     const hasOpenProductPicker = React.useMemo(
         () => Object.values(productPickerOpen).some(Boolean),
         [productPickerOpen]
@@ -832,6 +1013,7 @@ export const ReceiveStockForm = ({
                 : [serializeDraftItem(createEmptyReceiveStockItem())];
             const draftPayload: ReceiveStockDraft = {
                 supplierId: typeof values.supplierId === 'string' ? values.supplierId : '',
+                eisStockReceiptSource: normalizeEisStockReceiptSource(values.eisStockReceiptSource),
                 purchaseDate: values.purchaseDate ? values.purchaseDate.toISOString() : undefined,
                 referenceNumber: typeof values.referenceNumber === 'string' ? values.referenceNumber : '',
                 paymentStatus: values.paymentStatus === 'Unpaid' ? 'Unpaid' : 'Paid',
@@ -865,19 +1047,47 @@ export const ReceiveStockForm = ({
     }, [draftStorageKey, getValues, isFuelMode, isEditMode]);
 
     React.useEffect(() => {
+        const hasIncomingReconciliationDefaults = Boolean(
+            reconciliationDefaultsKey &&
+            lastAppliedReconciliationDefaultsKeyRef.current !== reconciliationDefaultsKey
+        );
         const shouldPreserveCurrentValues =
-            hasHydratedDraftRef.current && (form.formState.isDirty || hasOpenProductPicker);
+            hasHydratedDraftRef.current &&
+            !hasIncomingReconciliationDefaults &&
+            (form.formState.isDirty || hasOpenProductPicker);
 
-        if (shouldPreserveCurrentValues) {
+        if (shouldPreserveCurrentValues || (!editingPurchase && reconciliationDefaultsKey && !hasIncomingReconciliationDefaults)) {
             return;
         }
 
         hasHydratedDraftRef.current = false;
 
+        if (!reconciliationDefaultsKey) {
+            lastAppliedReconciliationDefaultsKeyRef.current = '';
+        }
+
         try {
             if (editingPurchase) {
+                lastAppliedReconciliationDefaultsKeyRef.current = '';
                 reset(buildReceiveStockValuesFromPurchase(editingPurchase, inventoryItems, suppliers));
                 setIsFuelMode(editingRequiresFuelSession);
+                return;
+            }
+
+            if (hasIncomingReconciliationDefaults) {
+                const reconciliationValues = buildReceiveStockValuesFromReconciliationDefaults(
+                    reconciliationDefaults,
+                    inventoryItems,
+                    EIS_STOCK_RECEIPT_SOURCE_SUPPLIER
+                );
+                reset(reconciliationValues);
+                lastAppliedReconciliationDefaultsKeyRef.current = reconciliationDefaultsKey;
+                const requiresFuelMode = reconciliationValues.items.some((item) => {
+                    const productId = String(item.productId || '').trim();
+                    const product = inventoryItems.find((candidate) => String(candidate.id) === productId);
+                    return Boolean(product?.isFuel);
+                });
+                setIsFuelMode(requiresFuelMode || defaultFuelModeRef.current);
                 return;
             }
 
@@ -887,19 +1097,23 @@ export const ReceiveStockForm = ({
 
             if (rawDraft) {
                 const parsedDraft = JSON.parse(rawDraft) as ReceiveStockDraft;
-                reset(normalizeReceiveStockDraft(parsedDraft));
+                const draftValues = normalizeReceiveStockDraft(parsedDraft);
+                if (defaultEisStockReceiptSource === EIS_STOCK_RECEIPT_SOURCE_SUPPLIER) {
+                    draftValues.eisStockReceiptSource = EIS_STOCK_RECEIPT_SOURCE_SUPPLIER;
+                }
+                reset(draftValues);
                 if (typeof parsedDraft.isFuelMode === 'boolean') {
                     setIsFuelMode(parsedDraft.isFuelMode);
                 } else {
                     setIsFuelMode(defaultFuelModeRef.current);
                 }
             } else {
-                reset(createDefaultReceiveStockValues());
+                reset(createDefaultReceiveStockValues(defaultEisStockReceiptSource));
                 setIsFuelMode(defaultFuelModeRef.current);
             }
         } catch (error) {
             console.error('[ReceiveStockForm] Failed to restore draft:', error);
-            reset(createDefaultReceiveStockValues());
+            reset(createDefaultReceiveStockValues(defaultEisStockReceiptSource));
             setIsFuelMode(defaultFuelModeRef.current);
         } finally {
             hasHydratedDraftRef.current = true;
@@ -913,6 +1127,9 @@ export const ReceiveStockForm = ({
         editingRequiresFuelSession,
         form.formState.isDirty,
         hasOpenProductPicker,
+        defaultEisStockReceiptSource,
+        reconciliationDefaults,
+        reconciliationDefaultsKey,
     ]);
 
     React.useEffect(() => {
@@ -927,7 +1144,7 @@ export const ReceiveStockForm = ({
         return () => {
             window.clearTimeout(timeoutId);
         };
-    }, [supplierId, purchaseDateValue, referenceNumberValue, paymentStatusValue, watchedItems, isFuelMode, isSubmitting, saveDraft, isEditMode]);
+    }, [supplierId, purchaseDateValue, referenceNumberValue, eisStockReceiptSourceValue, paymentStatusValue, watchedItems, isFuelMode, isSubmitting, saveDraft, isEditMode]);
 
     const canToggleFuelModeInForm = canToggleFuelMode && !isEditMode;
 
@@ -967,9 +1184,13 @@ export const ReceiveStockForm = ({
     const mappingByItemId = React.useMemo(() => {
         const map = new Map<string, MRAMapping>();
         for (const mapping of mraMappings) {
-            const existing = map.get(mapping.inventoryItemId);
+            const itemId = getMappingInventoryItemId(mapping);
+            if (!itemId) {
+                continue;
+            }
+            const existing = map.get(itemId);
             if (!existing || mappingReadinessRank(mapping) > mappingReadinessRank(existing)) {
-                map.set(mapping.inventoryItemId, mapping);
+                map.set(itemId, mapping);
             }
         }
         return map;
@@ -1014,17 +1235,15 @@ export const ReceiveStockForm = ({
                 ? normalizeTaxRate(lastPurchase?.taxRate)
                 : undefined;
 
-            if (!mapping) {
-                return {
+            return mapping
+                ? {
+                    taxRate: getMappingTaxRate(mapping),
+                    taxCalculationMethod: getMappingTaxCalculationMethod(mapping)
+                }
+                : {
                     taxRate: lastPurchaseRate ?? 0,
                     taxCalculationMethod: lastPurchaseMethod ?? 'exclusive'
                 };
-            }
-
-            return {
-                taxRate: lastPurchaseRate ?? normalizeTaxRate(mapping.mraTaxRate),
-                taxCalculationMethod: lastPurchaseMethod ?? resolveTaxMethod(mapping.taxCalculationMethod)
-            };
         },
         [mappingByItemId, lastPurchaseByProduct]
     );
@@ -1196,6 +1415,7 @@ export const ReceiveStockForm = ({
         isAdminUser && enforceSessionKind && hasSessionChoices && (isLoadingSessionChoices || needsSessionSelection || sessionMismatch);
     const shouldWarnNoSessions =
         isAdminUser && enforceSessionKind && !hasSessionChoices && !isLoadingSessionChoices;
+    const isSupplierReportedEisStockSelected = isSupplierReportedEisStockSource(eisStockReceiptSourceValue);
     const sessionIdForSubmit =
         isEditMode
             ? (sessionId || editingSessionId)
@@ -1270,19 +1490,30 @@ export const ReceiveStockForm = ({
         const selectedSupplier = data.supplierId
             ? supplierOptions.find((s) => String(s.id) === String(data.supplierId))
             : null;
-        const isSyntheticEditingSupplier = Boolean(
-            selectedSupplier?.id && String(selectedSupplier.id).startsWith('editing-supplier:')
-        );
+        const isSyntheticSupplierSelection = isSyntheticEditingSupplier(selectedSupplier);
         const editingPurchaseFirstItem = editingPurchase?.items[0];
         const selectedSupplierId = selectedSupplier
-            ? isSyntheticEditingSupplier
+            ? isSyntheticSupplierSelection
                 ? String(editingPurchase?.supplierId || editingPurchaseFirstItem?.supplierId || '').trim() || undefined
                 : String(selectedSupplier.id)
             : undefined;
         const selectedSupplierName = selectedSupplier?.name
             || editingPurchaseSupplierName
             || 'No Supplier';
+        const selectedSupplierTin = selectedSupplier && !isSyntheticSupplierSelection
+            ? String(selectedSupplier.supplierTin || '').trim() || undefined
+            : undefined;
+        const selectedMraSupplierId = selectedSupplier && !isSyntheticSupplierSelection
+            ? Number.isFinite(Number(selectedSupplier.mraSupplierId)) && Number(selectedSupplier.mraSupplierId) > 0
+                ? Number(selectedSupplier.mraSupplierId)
+                : undefined
+            : undefined;
+        const selectedSupplierVatRegistered = selectedSupplier && !isSyntheticSupplierSelection
+            ? Boolean(selectedSupplier.vatRegistered)
+            : false;
         const paymentStatus: 'Paid' | 'Unpaid' = data.paymentStatus === 'Unpaid' ? 'Unpaid' : 'Paid';
+        const eisStockReceiptSource = normalizeEisStockReceiptSource(data.eisStockReceiptSource);
+        const isSupplierReportedEisStock = isSupplierReportedEisStockSource(eisStockReceiptSource);
         const purchaseTimestampBase = buildPurchaseTimestampBase(data.purchaseDate);
         const purchaseDateIso = purchaseTimestampBase.toISOString();
         const referenceNumber = data.referenceNumber?.trim() || undefined;
@@ -1294,6 +1525,30 @@ export const ReceiveStockForm = ({
             if (validItems.length === 0) {
                 toast({ variant: 'destructive', title: 'Please add at least one item' });
                 return;
+            }
+
+            if (!isSupplierReportedEisStock) {
+                const invalidQuantityItem = validItems.find((item) => Number(item.quantity) < 1);
+                if (invalidQuantityItem) {
+                    const product = inventoryItems.find((candidate) => candidate.id === invalidQuantityItem.productId);
+                    toast({
+                        variant: 'destructive',
+                        title: 'Quantity too low for EIS',
+                        description: `${product?.name || 'Each EIS-submitted item'} must have quantity of at least 1 for informal purchase submission.`,
+                    });
+                    return;
+                }
+
+                const invalidCostItem = validItems.find((item) => Number(item.cost) < 0.01);
+                if (invalidCostItem) {
+                    const product = inventoryItems.find((candidate) => candidate.id === invalidCostItem.productId);
+                    toast({
+                        variant: 'destructive',
+                        title: 'Cost required for EIS',
+                        description: `${product?.name || 'Each EIS-submitted item'} must have cost/unit of at least 0.01. Use B2B stock-transfer mode only when MRA already increased stock.`,
+                    });
+                    return;
+                }
             }
 
             const purchaseRecordIds: string[] = [];
@@ -1443,11 +1698,17 @@ export const ReceiveStockForm = ({
                         }
 
                         const nextQuantityRemaining = Math.max(0, quantityReceived - consumedQuantity);
-                        const quantityDelta = nextQuantityRemaining - currentQuantityRemaining;
+                        const currentEisStockReceiptSource = resolvePurchaseRecordEisStockReceiptSource(existingRecord, currentOrder);
+                        const stockDelta = resolveSourceTransitionStockDelta({
+                            currentQuantityRemaining,
+                            nextQuantityRemaining,
+                            currentSource: currentEisStockReceiptSource,
+                            nextSource: eisStockReceiptSource,
+                        });
 
                         await applyInventoryPurchaseUpdate({
                             product,
-                            stockDelta: quantityDelta,
+                            stockDelta,
                             nextCostPerUnit: normalizedCostPerUnit,
                             nextSellingPrice: normalizedSellingPrice,
                             updateSellingPrice:
@@ -1462,6 +1723,10 @@ export const ReceiveStockForm = ({
                             productName: product.name,
                             supplierId: selectedSupplierId || '',
                             supplierName: selectedSupplierName,
+                            supplierTin: selectedSupplierTin,
+                            mraSupplierId: selectedMraSupplierId,
+                            supplierVatRegistered: selectedSupplierVatRegistered,
+                            eisStockReceiptSource,
                             branchId: branchId,
                             sessionId: sessionIdForSubmit || existingRecord.sessionId || item.originalSessionId,
                             referenceNumber: referenceNumber,
@@ -1503,7 +1768,7 @@ export const ReceiveStockForm = ({
                     // This maps to PurchaseOrderItem on the backend
                     await applyInventoryPurchaseUpdate({
                         product,
-                        stockDelta: quantityReceived,
+                        stockDelta: isSupplierReportedEisStock ? 0 : quantityReceived,
                         nextCostPerUnit: normalizedCostPerUnit,
                         nextSellingPrice: normalizedSellingPrice,
                         updateSellingPrice:
@@ -1518,6 +1783,10 @@ export const ReceiveStockForm = ({
                         productName: product.name,
                         supplierId: selectedSupplierId || '',
                         supplierName: selectedSupplierName,
+                        supplierTin: selectedSupplierTin,
+                        mraSupplierId: selectedMraSupplierId,
+                        supplierVatRegistered: selectedSupplierVatRegistered,
+                        eisStockReceiptSource,
                         branchId: branchId,
                         sessionId: sessionIdForSubmit || item.originalSessionId,  // Link to active session if available
                         referenceNumber: referenceNumber,
@@ -1571,9 +1840,13 @@ export const ReceiveStockForm = ({
 
                         const inventoryItem = await db.inventory.get(String(currentRecord.productId || '').trim());
                         if (inventoryItem) {
+                            const currentEisStockReceiptSource = resolvePurchaseRecordEisStockReceiptSource(currentRecord, currentOrder);
+                            const isSupplierReportedLine = isSupplierReportedEisStockSource(currentEisStockReceiptSource);
                             const currentStock = Math.max(0, Number(inventoryItem.stockUnits || 0));
                             const quantityRemaining = Math.max(0, Number(currentRecord.quantityRemaining || 0));
-                            const safeQuantityToRemove = Math.max(0, Math.min(currentStock, quantityRemaining));
+                            const safeQuantityToRemove = isSupplierReportedLine
+                                ? 0
+                                : Math.max(0, Math.min(currentStock, quantityRemaining));
                             const normalizedInventoryCost = Number.isFinite(Number(inventoryItem.cost || 0))
                                 ? Number(Number(inventoryItem.cost || 0).toFixed(4))
                                 : 0;
@@ -1586,7 +1859,7 @@ export const ReceiveStockForm = ({
                                 updateSellingPrice: false,
                             });
 
-                            if (safeQuantityToRemove < quantityRemaining) {
+                            if (!isSupplierReportedLine && safeQuantityToRemove < quantityRemaining) {
                                 deletedLineWarnings.push(inventoryItem.name);
                             }
                         }
@@ -1636,8 +1909,10 @@ export const ReceiveStockForm = ({
                     updatedAt: nowIso,
                     
                     // MRA Compliance Fields
-                    supplierTin: selectedSupplier?.supplierTin || undefined,
-                    supplierVatRegistered: selectedSupplier?.vatRegistered || false,
+                    supplierTin: selectedSupplierTin,
+                    mraSupplierId: selectedMraSupplierId,
+                    supplierVatRegistered: selectedSupplierVatRegistered,
+                    eisStockReceiptSource,
                     
                     // EIS Tracking Fields
                     eisSynced: currentOrder?.eisSynced || false,
@@ -1675,6 +1950,7 @@ export const ReceiveStockForm = ({
                     referenceNumber: referenceNumber,
                     vatAmount: vatAmount,
                     paymentStatus: paymentStatus,
+                    eisStockReceiptSource,
                     purchaseDate: purchaseDateIso,
                     purchaseOrderId: poId,
                     deletedLineWarnings,
@@ -1695,9 +1971,11 @@ export const ReceiveStockForm = ({
             }
             toast({
                 title: isEditMode ? 'Purchase updated successfully' : 'Stock Received Successfully',
-                description: deletedLineWarnings.length > 0
-                    ? 'Some removed lines only deducted stock that is still available locally.'
-                    : undefined,
+                description: isSupplierReportedEisStock
+                    ? 'Local batch details were saved without adding stock again because the B2B EIS stock transfer was already posted.'
+                    : deletedLineWarnings.length > 0
+                        ? 'Some removed lines only deducted stock that is still available locally.'
+                        : undefined,
             });
             onFormSubmit();
         } catch (error) {
@@ -1738,6 +2016,82 @@ export const ReceiveStockForm = ({
                             </FormItem>
                         )}
                     />
+                    {selectedSupplierDetails && (
+                        <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                <span className="font-medium text-slate-900">{selectedSupplierDetails.name}</span>
+                                <span className="rounded border border-slate-200 bg-white px-2 py-0.5 text-xs">
+                                    {selectedSupplierDetails.vatRegistered ? 'VAT registered' : 'Non-VAT'}
+                                </span>
+                            </div>
+                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                                <div>
+                                    <div className="text-xs uppercase text-slate-500">Supplier TIN</div>
+                                    <div className="font-medium text-slate-900">
+                                        {selectedSupplierDetails.supplierTin || 'Not set'}
+                                    </div>
+                                </div>
+                                <div>
+                                    <div className="text-xs uppercase text-slate-500">EIS Supplier ID</div>
+                                    <div className="font-medium text-slate-900">
+                                        {selectedSupplierDetails.mraSupplierId || 'Not set'}
+                                    </div>
+                                </div>
+                                <div>
+                                    <div className="text-xs uppercase text-slate-500">Phone</div>
+                                    <div className="font-medium text-slate-900">
+                                        {selectedSupplierDetails.phone || 'Not set'}
+                                    </div>
+                                </div>
+                                <div>
+                                    <div className="text-xs uppercase text-slate-500">Email</div>
+                                    <div className="break-all font-medium text-slate-900">
+                                        {selectedSupplierDetails.email || 'Not set'}
+                                    </div>
+                                </div>
+                            </div>
+                            {!selectedSupplierDetails.supplierTin && !selectedSupplierDetails.isSynthetic && (
+                                <div className="mt-2 text-xs text-amber-700">
+                                    Add this supplier's TIN if the receipt should match an EIS supplier record.
+                                </div>
+                            )}
+                        </div>
+                    )}
+                    <FormField
+                        control={control}
+                        name="eisStockReceiptSource"
+                        render={({ field }) => (
+                            <FormItem>
+                                <FormLabel>EIS Stock Source</FormLabel>
+                                <Select
+                                    onValueChange={field.onChange}
+                                    value={field.value || EIS_STOCK_RECEIPT_SOURCE_POS}
+                                    disabled={isSubmitting}
+                                >
+                                    <FormControl>
+                                        <SelectTrigger>
+                                            <SelectValue placeholder="Select how EIS stock was updated" />
+                                        </SelectTrigger>
+                                    </FormControl>
+                                    <SelectContent>
+                                        <SelectItem value={EIS_STOCK_RECEIPT_SOURCE_POS}>Submit informal purchase to EIS</SelectItem>
+                                        <SelectItem value={EIS_STOCK_RECEIPT_SOURCE_SUPPLIER}>B2B stock transfer already posted in EIS</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                                <FormMessage />
+                            </FormItem>
+                        )}
+                    />
+                    {!isSupplierReportedEisStockSelected && (
+                        <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+                            Use this for normal purchases where MRA stock was not already transferred to you through a B2B EIS transaction. MRA requires quantity of at least 1 and cost/unit of at least 0.01, and the submission is subject to approval.
+                        </div>
+                    )}
+                    {isSupplierReportedEisStockSelected && (
+                        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                            Use only when a B2B EIS purchase/stock transfer already increased your MRA stock. This receipt records local batch, expiry, supplier, and FIFO details only; it will not add stock again or submit another EIS stock increase.
+                        </div>
+                    )}
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                         <FormField
                             control={control}
@@ -1975,6 +2329,7 @@ export const ReceiveStockForm = ({
                                                                     <span className="truncate">
                                                                         {availableProducts.find((product) => product.id === selectField.value)?.name ||
                                                                             filteredProducts.find((product) => product.id === selectField.value)?.name ||
+                                                                            reconciliationProductNameById.get(String(selectField.value || '').trim()) ||
                                                                             'Select product'}
                                                                     </span>
                                                                     <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
@@ -2071,13 +2426,14 @@ export const ReceiveStockForm = ({
                                                 </FormControl>
                                             </FormItem>
                                         )} />
-                                        <FormField control={control} name={`items.${index}.cost`} rules={{ required: true, min: 0 }} render={({ field }) => (
+                                        <FormField control={control} name={`items.${index}.cost`} rules={{ required: true, min: isSupplierReportedEisStockSelected ? 0 : 0.01 }} render={({ field }) => (
                                             <FormItem>
                                                 <FormLabel className="text-xs">Cost/Unit</FormLabel>
                                                 <FormControl>
                                                     <Input
                                                         type="number"
                                                         step="0.01"
+                                                        min={isSupplierReportedEisStockSelected ? 0 : 0.01}
                                                         placeholder="Cost"
                                                         value={field.value ?? ''}
                                                         onChange={(e) =>

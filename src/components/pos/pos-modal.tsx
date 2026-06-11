@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Search, ScanBarcode, LayoutGrid, List, AlertTriangle, Loader2, X, Printer, Barcode, Grid3x3, ListIcon, Camera } from 'lucide-react';
+import { Search, ScanBarcode, LayoutGrid, List, AlertTriangle, Loader2, X, Printer, Barcode, Grid3x3, ListIcon, Camera, RefreshCw } from 'lucide-react';
 
 import { db, type InventoryItem, type Order, type Session, type TaxRate } from '@/lib/db';
 import { type BusinessType } from '@/lib/inventory/config';
@@ -27,12 +27,17 @@ import {
 } from '@/components/ui/select';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { ToastAction } from '@/components/ui/toast';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/use-auth';
+import { getBackendReachabilitySnapshot, useBackendReachability } from '@/hooks/use-backend-reachability';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
 import { warmBranchMraMappingCache } from '@/lib/mra-mapping-cache';
+import { syncInventoryFromBackend } from '@/lib/services/inventory-sync';
 import { safeLocalStorageGetItem, safeLocalStorageSetItem } from '@/lib/safe-local-storage';
+import { ensureTauriDeviceIdentity, getDeviceSerial } from '@/lib/device-identity';
+import { formatInventoryQuantity } from '@/lib/quantity-format';
 import { v4 as uuidv4 } from 'uuid';
 import {
   Dialog,
@@ -271,6 +276,40 @@ const filterMappingsForBranch = (mappings: any[], branchId: string): any[] => {
   });
 };
 
+const extractApiList = <T,>(response: any): T[] => {
+  if (Array.isArray(response)) return response as T[];
+  if (Array.isArray(response?.results)) return response.results as T[];
+  if (Array.isArray(response?.data)) return response.data as T[];
+  return [];
+};
+
+const getApiBranchId = (item: any): string => {
+  const rawBranch = item?.branch;
+  if (rawBranch && typeof rawBranch === 'object') {
+    return String(rawBranch.id ?? rawBranch.pk ?? rawBranch.branch_id ?? '').trim();
+  }
+  return String(rawBranch ?? item?.branch_id ?? item?.branchId ?? '').trim();
+};
+
+const getApiDeviceSerial = (item: any): string => {
+  return String(item?.device_serial ?? item?.deviceSerial ?? item?.mac_address ?? item?.macAddress ?? '').trim();
+};
+
+const findCurrentDeviceTerminal = (terminals: any[], branchId: string): any => {
+  const currentDeviceSerial = getDeviceSerial().toLowerCase();
+  const branchTerminals = terminals.filter(
+    (item) => normalizeBranchId(getApiBranchId(item)) === branchId
+  );
+  return (
+    branchTerminals.find((item) => (
+      String(item?.status || '').toLowerCase() === 'active' &&
+      getApiDeviceSerial(item).toLowerCase() === currentDeviceSerial
+    )) ||
+    branchTerminals.find((item) => getApiDeviceSerial(item).toLowerCase() === currentDeviceSerial) ||
+    null
+  );
+};
+
 const pickPreferredMapping = (mappings: any[]): any => {
   let preferred: any = undefined;
   for (const mapping of mappings) {
@@ -288,13 +327,17 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   const [showScannerConfig, setShowScannerConfig] = useState(false);
   const [showPrinterConfig, setShowPrinterConfig] = useState(false);
   const [showCameraScanner, setShowCameraScanner] = useState(false);
-  const [isLoadingInventory, setIsLoadingInventory] = useState(false);
+  const [isSyncingMraProducts, setIsSyncingMraProducts] = useState(false);
+  const [mraProductSyncError, setMraProductSyncError] = useState<string | null>(null);
   const [eisEnabled, setEisEnabled] = useState(false);
   const [blockSalesIfTaxMappingMissing, setBlockSalesIfTaxMappingMissing] = useState(false);
+  const [taxpayerVatRegistered, setTaxpayerVatRegistered] = useState<boolean | null>(null);
   const [barcodeBuffer, setBarcodeBuffer] = useState('');
   const [barcodeTimeout, setBarcodeTimeout] = useState<NodeJS.Timeout | null>(null);
   const { toast } = useToast();
   const { user, business } = useAuth();
+  const mraConfigEnsureRef = useRef<Record<string, number>>({});
+  const mraProductAutoSyncRef = useRef<string>('');
   const normalizedSearchQuery = searchQuery.toLowerCase().trim();
   const hasSearchQuery = normalizedSearchQuery.length > 0;
 
@@ -344,6 +387,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     const parsed = toFiniteNumber(value, fallback);
     return parsed >= 0 ? parsed : fallback;
   }, [toFiniteNumber]);
+
+  const formatStockQuantity = useCallback((value: unknown): string => (
+    formatInventoryQuantity(value, { preferWholeNumbers: true, maximumFractionDigits: 3 })
+  ), []);
 
   const toBoolean = useCallback((value: unknown, fallback: boolean): boolean => {
     if (typeof value === 'boolean') return value;
@@ -402,6 +449,21 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     return 'standard';
   }, []);
 
+  const resolveMappingSaleBlockReason = useCallback((mapping: any, productName: string): string => {
+    if (!mapping || typeof mapping !== 'object') return '';
+
+    // MRA-approved terminal-site product tax is authoritative. Non-VAT taxpayers
+    // are still allowed to submit EIS sales, so Standard VAT is no longer a local
+    // blocker here. Mapping readiness is enforced through approval/sync checks.
+    const explicitReady = mapping.isReadyForSale ?? mapping.is_ready_for_sale;
+    if (explicitReady === false) {
+      return `${productName} is not sale-ready for EIS. Refresh MRA products or review the mapping in settings.`;
+    }
+
+    return '';
+  }, []);
+
+
   const resolveBlockSalesIfTaxMappingMissing = useCallback((source: any): boolean | null => {
     if (!source || typeof source !== 'object') {
       return null;
@@ -420,6 +482,23 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     return null;
   }, [toBoolean]);
 
+  const resolveTaxpayerVatRegistered = useCallback((source: any): boolean | null => {
+    if (!source || typeof source !== 'object') {
+      return null;
+    }
+
+    const rawVatRegistered = source.vatRegistered ?? source.vat_registered;
+    if (rawVatRegistered !== undefined) {
+      return toBoolean(rawVatRegistered, false);
+    }
+
+    const taxpayerType = String(source.mraTaxpayerType ?? source.mra_taxpayer_type ?? '').trim().toUpperCase();
+    if (taxpayerType === 'VAT') return true;
+    if (taxpayerType === 'NON_VAT') return false;
+
+    return null;
+  }, [toBoolean]);
+
   // Keep cart in memory only. Reset when the active branch changes so carts never bleed across branches.
   useEffect(() => {
     setCart([]);
@@ -427,6 +506,8 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
 
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [isLoadingSession, setIsLoadingSession] = useState(true);
+  const [isUsingCachedBranchSession, setIsUsingCachedBranchSession] = useState(false);
+  const { isReachable: isBackendReachable, checkNow: checkBackendConnectionNow } = useBackendReachability({ intervalMs: 10000 });
 
   const resolveBranchIntegerId = useCallback((rawBranchId: string): number | null => {
     const branchIdMatch = String(rawBranchId || '').match(/\d+/);
@@ -486,37 +567,48 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     return String(sessionLike?.status || '').trim().toLowerCase() === 'active';
   }, []);
 
+  const isBrowserOffline = useCallback((): boolean => !isBackendReachable, [isBackendReachable]);
+
+  const isSessionForCurrentBranch = useCallback((sessionLike: any): boolean => {
+    return normalizeBranchId(sessionLike?.branchId ?? sessionLike?.branch_id ?? sessionLike?.branch) === normalizeBranchId(branchId);
+  }, [branchId]);
+
+  const findLocalActiveSession = useCallback(async (allowBranchFallback = false): Promise<Session | null> => {
+    if (!branchId) {
+      return null;
+    }
+
+    const normalizedBranchId = normalizeBranchId(branchId);
+    const cachedSessions = await db.sessions.toArray();
+    const branchSessions = cachedSessions
+      .filter((session) => isSessionActive(session) && normalizeBranchId(session.branchId) === normalizedBranchId)
+      .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+
+    const ownSession = branchSessions.find((session) => isSessionOwnedByCurrentUser(session));
+    if (ownSession) {
+      return ownSession;
+    }
+
+    return allowBranchFallback ? branchSessions[0] ?? null : null;
+  }, [branchId, isSessionActive, isSessionOwnedByCurrentUser]);
+
   const resolveSessionForCheckout = useCallback(async (): Promise<Session | null> => {
     if (!branchId || (!user?.uid && !user?.email)) {
       return null;
     }
 
-    if (activeSession && isSessionActive(activeSession) && isSessionOwnedByCurrentUser(activeSession)) {
+    const allowBranchFallback = isUsingCachedBranchSession || isBrowserOffline();
+    if (
+      activeSession &&
+      isSessionActive(activeSession) &&
+      isSessionForCurrentBranch(activeSession) &&
+      (isSessionOwnedByCurrentUser(activeSession) || allowBranchFallback)
+    ) {
       return activeSession;
     }
 
-    const normalizedBranchId = normalizeBranchId(branchId);
-    const currentUserId = String(user?.uid || '').trim();
-    const currentUserEmail = String(user?.email || '').trim().toLowerCase();
-    const activeSessions = await db.sessions.where('status').equals('active').toArray();
-
-    return (
-      activeSessions
-        .filter((session) => {
-          if (normalizeBranchId(session.branchId) !== normalizedBranchId) {
-            return false;
-          }
-
-          const sessionUserId = String(session.userId || '').trim();
-          const sessionUserEmail = String(session.userEmail || '').trim().toLowerCase();
-          return (
-            (currentUserId && sessionUserId === currentUserId) ||
-            (currentUserEmail !== '' && sessionUserEmail === currentUserEmail)
-          );
-        })
-        .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0] ?? null
-    );
-  }, [activeSession, branchId, isSessionActive, isSessionOwnedByCurrentUser, user?.uid, user?.email]);
+    return findLocalActiveSession(allowBranchFallback);
+  }, [activeSession, branchId, findLocalActiveSession, isBrowserOffline, isSessionActive, isSessionForCurrentBranch, isSessionOwnedByCurrentUser, isUsingCachedBranchSession, user?.uid, user?.email]);
 
   const closeStaleLocalActiveSessions = useCallback(async () => {
     if (!branchId || (!user?.uid && !user?.email)) {
@@ -563,72 +655,79 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   // Fetch active session from backend first, then fallback to IndexedDB
   useEffect(() => {
     const fetchActiveSession = async () => {
-      if (!user?.uid || !branchId) {
+      if ((!user?.uid && !user?.email) || !branchId) {
         setIsLoadingSession(false);
         return;
       }
 
       setIsLoadingSession(true);
       let backendConfirmedNoSessionForCurrentUser = false;
+      const shouldTryBackendSessionLookup = getBackendReachabilitySnapshot().isReachable;
 
-      try {
-        const branchIdInt = resolveBranchIntegerId(branchId);
-        if (branchIdInt !== null) {
-          // First try backend active endpoint
-          console.log('[POS Modal] Fetching active session from backend for user:', user.uid, 'branch:', branchIdInt);
-          const response = await authFetch.fetch<any>(`/sessions/sessions/active/?branch_id=${branchIdInt}`);
-          console.log('[POS Modal] Backend response:', response);
+      if (shouldTryBackendSessionLookup) {
+        try {
+          const branchIdInt = resolveBranchIntegerId(branchId);
+          if (branchIdInt !== null) {
+            // First try backend active endpoint
+            console.log('[POS Modal] Fetching active session from backend for user:', user.uid, 'branch:', branchIdInt);
+            const response = await authFetch.fetch<any>(`/sessions/sessions/active/?branch_id=${branchIdInt}`);
+            console.log('[POS Modal] Backend response:', response);
 
-          if (response && response.id) {
-            if (isSessionActive(response) && isSessionOwnedByCurrentUser(response)) {
-              const mappedSession = mapBackendSessionToLocal(response);
-              setActiveSession(mappedSession);
-              setIsLoadingSession(false);
-              return;
-            }
-
-            // If /active returns another user's session, check active_list for current user's session.
-            console.warn('[POS Modal] Backend active session belongs to another user. Resolving current-user session from active_list.');
-            try {
-              const activeListResponse = await authFetch.fetch<any>(`/sessions/sessions/active_list/?branch_id=${branchIdInt}`);
-              const activeList = Array.isArray(activeListResponse)
-                ? activeListResponse
-                : Array.isArray(activeListResponse?.results)
-                ? activeListResponse.results
-                : [];
-
-              const ownSession = activeList.find(
-                (session: any) => isSessionActive(session) && isSessionOwnedByCurrentUser(session)
-              );
-              if (ownSession && ownSession.id) {
-                const mappedSession = mapBackendSessionToLocal(ownSession);
+            if (response && response.id) {
+              if (isSessionActive(response) && isSessionOwnedByCurrentUser(response)) {
+                const mappedSession = mapBackendSessionToLocal(response);
                 setActiveSession(mappedSession);
+                setIsUsingCachedBranchSession(false);
                 setIsLoadingSession(false);
                 return;
               }
 
-              backendConfirmedNoSessionForCurrentUser = true;
-            } catch (activeListError: any) {
-              const status = Number(activeListError?.status || 0);
-              if (status === 404) {
+              // If /active returns another user's session, check active_list for current user's session.
+              console.warn('[POS Modal] Backend active session belongs to another user. Resolving current-user session from active_list.');
+              try {
+                const activeListResponse = await authFetch.fetch<any>(`/sessions/sessions/active_list/?branch_id=${branchIdInt}`);
+                const activeList = Array.isArray(activeListResponse)
+                  ? activeListResponse
+                  : Array.isArray(activeListResponse?.results)
+                  ? activeListResponse.results
+                  : [];
+
+                const ownSession = activeList.find(
+                  (session: any) => isSessionActive(session) && isSessionOwnedByCurrentUser(session)
+                );
+                if (ownSession && ownSession.id) {
+                  const mappedSession = mapBackendSessionToLocal(ownSession);
+                  setActiveSession(mappedSession);
+                  setIsUsingCachedBranchSession(false);
+                  setIsLoadingSession(false);
+                  return;
+                }
+
                 backendConfirmedNoSessionForCurrentUser = true;
-              } else {
-                console.warn('[POS Modal] Failed resolving active_list session for current user:', activeListError);
+              } catch (activeListError: any) {
+                const status = Number(activeListError?.status || 0);
+                if (status === 404) {
+                  backendConfirmedNoSessionForCurrentUser = true;
+                } else {
+                  console.warn('[POS Modal] Failed resolving active_list session for current user:', activeListError);
+                }
               }
+            } else {
+              backendConfirmedNoSessionForCurrentUser = true;
             }
-          } else {
+          }
+        } catch (error: any) {
+          const status = Number(error?.status || 0);
+          if (status === 404) {
+            // Backend confirms there is no active session for this user/branch.
             backendConfirmedNoSessionForCurrentUser = true;
+            console.log('[POS Modal] Backend reports no active session for current user in this branch.');
+          } else {
+            console.warn('[POS Modal] Failed to fetch session from backend:', error);
           }
         }
-      } catch (error: any) {
-        const status = Number(error?.status || 0);
-        if (status === 404) {
-          // Backend confirms there is no active session for this user/branch.
-          backendConfirmedNoSessionForCurrentUser = true;
-          console.log('[POS Modal] Backend reports no active session for current user in this branch.');
-        } else {
-          console.warn('[POS Modal] Failed to fetch session from backend:', error);
-        }
+      } else {
+        console.log('[POS Modal] Offline - using cached active session.');
       }
 
       if (backendConfirmedNoSessionForCurrentUser) {
@@ -638,6 +737,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
           console.warn('[POS Modal] Failed to reconcile stale local sessions:', reconcileError);
         }
         setActiveSession(null);
+        setIsUsingCachedBranchSession(false);
         setIsLoadingSession(false);
         return;
       }
@@ -645,36 +745,21 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       // Fallback to IndexedDB
       try {
         console.log('[POS Modal] Falling back to IndexedDB for active session');
-        const normalizedBranchId = normalizeBranchId(branchId);
-        const currentUserId = String(user?.uid || '');
-        const currentUserEmail = String(user?.email || '').trim().toLowerCase();
-        const activeSessions = await db.sessions
-          .where('status')
-          .equals('active')
-          .toArray();
-
-        const dbSession = activeSessions
-          .filter((session) => {
-            if (normalizeBranchId(session.branchId) !== normalizedBranchId) {
-              return false;
-            }
-
-            const sessionUserId = String(session.userId || '');
-            const sessionUserEmail = String(session.userEmail || '').trim().toLowerCase();
-            return sessionUserId === currentUserId || (currentUserEmail !== '' && sessionUserEmail === currentUserEmail);
-          })
-          .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0];
+        const dbSession = await findLocalActiveSession(!shouldTryBackendSessionLookup);
         
         if (dbSession) {
           console.log('[POS Modal] Found active session in IndexedDB:', dbSession.id);
           setActiveSession(dbSession);
+          setIsUsingCachedBranchSession(!isSessionOwnedByCurrentUser(dbSession) && !shouldTryBackendSessionLookup);
         } else {
           console.log('[POS Modal] No active session found in IndexedDB');
           setActiveSession(null);
+          setIsUsingCachedBranchSession(false);
         }
       } catch (error) {
         console.error('[POS Modal] Error fetching from IndexedDB:', error);
         setActiveSession(null);
+        setIsUsingCachedBranchSession(false);
       }
 
       setIsLoadingSession(false);
@@ -689,11 +774,18 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     branchId,
     isOpen,
     closeStaleLocalActiveSessions,
+    findLocalActiveSession,
     isSessionActive,
     isSessionOwnedByCurrentUser,
     mapBackendSessionToLocal,
     resolveBranchIntegerId,
   ]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setIsUsingCachedBranchSession(false);
+    }
+  }, [branchId, isOpen, user?.uid, user?.email]);
 
   // Listen for session creation/closure events and refresh immediately
   useEffect(() => {
@@ -812,8 +904,236 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   );
   const hasCachedInventory = (allInventory?.length ?? 0) > 0;
 
+  const ensureMraConfigurationFresh = useCallback(async () => {
+    if (!business?.id || !branchId || !eisEnabled) {
+      return;
+    }
+
+    if (isBrowserOffline()) {
+      setMraProductSyncError('Server connection unavailable: using cached MRA products and stored EIS configurations.');
+      return;
+    }
+
+    const normalizedBranchId = normalizeBranchId(branchId);
+    if (!normalizedBranchId) {
+      return;
+    }
+
+    const cacheKey = `${business.id}:${normalizedBranchId}`;
+    const now = Date.now();
+    const lastAttemptAt = mraConfigEnsureRef.current[cacheKey] || 0;
+    if (now - lastAttemptAt < 5 * 60 * 1000) {
+      return;
+    }
+    mraConfigEnsureRef.current[cacheKey] = now;
+
+    try {
+      await ensureTauriDeviceIdentity();
+      let terminalId = '';
+      try {
+        const terminalsResponse = await authFetch.fetch<any>('/mra-eis/terminals/');
+        const terminals = extractApiList<any>(terminalsResponse);
+        const terminal = findCurrentDeviceTerminal(terminals, normalizedBranchId);
+        terminalId = String(terminal?.id || '').trim();
+      } catch (terminalError) {
+        console.warn('[POS Modal] Could not resolve MRA terminal for config refresh:', terminalError);
+      }
+
+      if (!terminalId) {
+        throw new Error('Activate this device as the MRA EIS terminal for this branch before refreshing MRA configurations.');
+      }
+
+      const params = new URLSearchParams({ business_id: String(business.id) });
+      if (terminalId) {
+        params.set('terminal_id', terminalId);
+      }
+
+      const response = await authFetch.fetch<any>(
+        `/mra-eis/configurations/ensure_fresh/?${params.toString()}`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ require_success: false }),
+        }
+      );
+
+      if (response?.fresh === false && response?.error) {
+        toast({
+          variant: 'destructive',
+          title: 'MRA config refresh failed',
+          description: String(response.error),
+        });
+      } else if (response?.refreshed) {
+        toast({
+          title: 'New MRA configs downloaded',
+          description: 'Latest EIS taxpayer, terminal, product, and tax settings are now stored locally.',
+        });
+      }
+    } catch (error: any) {
+      console.error('[POS Modal] Failed to ensure fresh MRA configurations:', error);
+      toast({
+        variant: 'destructive',
+        title: 'MRA config refresh failed',
+        description: error?.message || 'Could not download latest EIS configurations.',
+      });
+    }
+  }, [branchId, business?.id, eisEnabled, isBrowserOffline, toast]);
+
+  const syncProductsFromMra = useCallback(async (options?: { showSuccessToast?: boolean; showErrorToast?: boolean }) => {
+    const showSuccessToast = options?.showSuccessToast !== false;
+    const showErrorToast = options?.showErrorToast !== false;
+
+    const fail = (title: string, description: string) => {
+      setMraProductSyncError(description);
+      if (showErrorToast) {
+        toast({
+          variant: 'destructive',
+          title,
+          description,
+        });
+      }
+      return { ok: false, error: description };
+    };
+
+    if (!branchId) {
+      return fail('Select a branch', 'Choose a branch before syncing MRA products.');
+    }
+
+    if (isBrowserOffline()) {
+      return fail('Server unavailable', 'Could not reach the POS server. POS is using cached MRA products for sales.');
+    }
+
+    const normalizedBranchId = normalizeBranchId(branchId);
+    if (!normalizedBranchId) {
+      return fail('Invalid branch', 'The current branch could not be resolved for MRA sync.');
+    }
+
+    setIsSyncingMraProducts(true);
+    setMraProductSyncError(null);
+
+    try {
+      await ensureTauriDeviceIdentity();
+      const terminalsResponse = await authFetch.fetch<any>('/mra-eis/terminals/');
+      const terminals = extractApiList<any>(terminalsResponse);
+      const terminal = findCurrentDeviceTerminal(terminals, normalizedBranchId);
+
+      if (!terminal?.id || String(terminal?.status || '').toLowerCase() !== 'active') {
+        throw new Error('Activate this device as the MRA EIS terminal for this branch before syncing MRA products.');
+      }
+
+      const pullResponse = await authFetch.fetch<any>(
+        `/mra-eis/terminals/${terminal.id}/pull_approved_products/`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ refreshFromMra: true }),
+        }
+      );
+      const syncResult = await syncInventoryFromBackend(branchId);
+
+      if (syncResult.error) {
+        throw new Error(syncResult.error);
+      }
+
+      const reconciliationWarnings = syncResult.stockReconciliationWarnings || [];
+      if (reconciliationWarnings.length > 0) {
+        const totalMissing = reconciliationWarnings.reduce(
+          (sum, item) => sum + Number(item.missingBatchQuantity || 0),
+          0
+        );
+        toast({
+          title: 'EIS stock needs batch details',
+            description: `${reconciliationWarnings.length} product${reconciliationWarnings.length === 1 ? '' : 's'} have EIS stock without matching local batches. Create one or more purchases by supplier to record batch/expiry details for ${formatStockQuantity(totalMissing)} unit${Math.abs(totalMissing - 1) < 0.0001 ? '' : 's'}.`,
+          action: (
+            <ToastAction
+              altText="Create purchases"
+              onClick={() => {
+                window.location.href = '/dashboard/inventory?tab=purchases&modal=receive&reconcile=1';
+              }}
+            >
+              Create purchases
+            </ToastAction>
+          ),
+        });
+      }
+
+      if (showSuccessToast) {
+        const incompatibleCount = Number(pullResponse?.taxpayer_incompatible_count ?? pullResponse?.taxpayerIncompatibleCount ?? 0);
+        const incompatibleNote = incompatibleCount > 0
+          ? ` ${incompatibleCount} MRA-approved product${incompatibleCount === 1 ? '' : 's'} are not sale-ready because their MRA tax setup conflicts with this taxpayer.`
+          : '';
+        toast({
+          title: incompatibleCount > 0 ? 'MRA products synced with tax warnings' : 'MRA products synced',
+          description: `${pullResponse?.created ?? 0} created, ${pullResponse?.updated ?? 0} updated from MRA. Local POS refreshed ${syncResult.synced} product${syncResult.synced === 1 ? '' : 's'} and ${syncResult.mraMappingsSynced ?? 0} mapping${syncResult.mraMappingsSynced === 1 ? '' : 's'}.${incompatibleNote}`,
+          variant: incompatibleCount > 0 ? 'destructive' : undefined,
+        });
+      }
+
+      return { ok: true };
+    } catch (error: any) {
+      console.error('[POS Modal] Failed to sync MRA products:', error);
+      return fail('MRA product sync failed', error?.message || 'Could not fetch products from MRA.');
+    } finally {
+      setIsSyncingMraProducts(false);
+    }
+  }, [branchId, isBrowserOffline, toast]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    void ensureMraConfigurationFresh();
+  }, [ensureMraConfigurationFresh, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      mraProductAutoSyncRef.current = '';
+      setMraProductSyncError(null);
+      return;
+    }
+
+    if (!branchId || !business?.id || !eisEnabled) {
+      return;
+    }
+
+    const normalizedBranchId = normalizeBranchId(branchId);
+    if (!normalizedBranchId) {
+      return;
+    }
+
+    const syncKey = `${business.id}:${normalizedBranchId}`;
+    if (mraProductAutoSyncRef.current === syncKey) {
+      return;
+    }
+    mraProductAutoSyncRef.current = syncKey;
+
+    if (isBrowserOffline()) {
+      setMraProductSyncError('Server connection unavailable: using cached MRA products for sales.');
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadMraProductsOnOpen = async () => {
+      await ensureMraConfigurationFresh();
+      if (cancelled) {
+        return;
+      }
+      await syncProductsFromMra({ showSuccessToast: false, showErrorToast: true });
+    };
+
+    void loadMraProductsOnOpen();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [branchId, business?.id, eisEnabled, ensureMraConfigurationFresh, isBrowserOffline, isOpen, syncProductsFromMra]);
+
   useEffect(() => {
     if (!isOpen || !branchId || (!eisEnabled && !blockSalesIfTaxMappingMissing)) {
+      return;
+    }
+
+    if (isBrowserOffline()) {
       return;
     }
 
@@ -845,7 +1165,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     return () => {
       cancelled = true;
     };
-  }, [allInventory, blockSalesIfTaxMappingMissing, branchId, eisEnabled, isOpen]);
+  }, [allInventory, blockSalesIfTaxMappingMissing, branchId, eisEnabled, isBrowserOffline, isOpen]);
   
   const defaultTaxRate = useLiveQuery(
     async () => {
@@ -927,6 +1247,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               if (cachedBlockSetting !== null) {
                 setBlockSalesIfTaxMappingMissing(cachedBlockSetting);
               }
+              const cachedVatRegistered = resolveTaxpayerVatRegistered(parsed);
+              if (cachedVatRegistered !== null) {
+                setTaxpayerVatRegistered(cachedVatRegistered);
+              }
             } catch (cacheError) {
               console.warn('[POS Modal] Failed to parse cached tax mapping policy:', cacheError);
             }
@@ -954,6 +1278,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               if (backendBlockSetting !== null) {
                 setBlockSalesIfTaxMappingMissing(backendBlockSetting);
               }
+              const backendVatRegistered = resolveTaxpayerVatRegistered(backendBusiness);
+              if (backendVatRegistered !== null) {
+                setTaxpayerVatRegistered(backendVatRegistered);
+              }
               return;
             }
           } catch (backendError) {
@@ -973,6 +1301,11 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               console.log('[POS Modal] EIS is disabled');
               setEisEnabled(false);
             }
+
+            const localVatRegistered = resolveTaxpayerVatRegistered(businessProfile);
+            if (localVatRegistered !== null) {
+              setTaxpayerVatRegistered(localVatRegistered);
+            }
           }
         } catch (error) {
           console.error('[POS Modal] Failed to load EIS status:', error);
@@ -981,23 +1314,20 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       }
     };
     loadEisStatus();
-  }, [business?.id, isOpen, resolveBlockSalesIfTaxMappingMissing]);
+  }, [business?.id, isOpen, resolveBlockSalesIfTaxMappingMissing, resolveTaxpayerVatRegistered]);
 
   // Fetch inventory from backend when modal opens to ensure we have current branch data
   // Falls back to local DB if offline or backend fails
   useEffect(() => {
     if (!isOpen || !branchId) {
-      setIsLoadingInventory(false);
       return;
     }
 
     if (isOpen && branchId) {
       const fetchInventoryFromBackend = async () => {
-        setIsLoadingInventory(true);
         try {
-          // Check if online
-          if (!navigator.onLine) {
-            console.log('[POS Modal] Offline - using cached inventory for branch:', branchId);
+          if (isBrowserOffline()) {
+            console.log('[POS Modal] Server unavailable - using cached inventory for branch:', branchId);
             return;
           }
 
@@ -1021,14 +1351,12 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         } catch (error) {
           console.error('[POS Modal] Error fetching inventory from backend:', error);
           console.log('[POS Modal] Falling back to cached inventory for branch:', branchId);
-        } finally {
-          setIsLoadingInventory(false);
         }
       };
       
       fetchInventoryFromBackend();
     }
-  }, [isOpen, branchId]);
+  }, [isOpen, branchId, isBrowserOffline]);
 
   const sellableItems = useMemo(
     () => {
@@ -1091,6 +1419,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         
         let isReadyForSale = false;
         let mappingStatus = 'unknown';
+        let mappingBlockReason = '';
 
         // Fast path: local cache first so add-to-cart stays responsive.
         try {
@@ -1113,9 +1442,16 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
           const localSynced = Boolean(localMapping?.mraSynced ?? localMapping?.mra_synced);
 
           if (localMapping && localApproved && localSynced) {
-            console.log('[POS Modal] ✓ Found APPROVED & SYNCED MRA mapping in local database for:', item.name);
-            isReadyForSale = true;
-            mappingStatus = 'ready';
+            const localBlockReason = resolveMappingSaleBlockReason(localMapping, item.name);
+            if (localBlockReason) {
+              console.log('[POS Modal] ✗ MRA mapping is approved+synced but not sale-ready for taxpayer:', item.name, localBlockReason);
+              mappingBlockReason = localBlockReason;
+              mappingStatus = 'taxpayer_incompatible';
+            } else {
+              console.log('[POS Modal] ✓ Found APPROVED & SYNCED MRA mapping in local database for:', item.name);
+              isReadyForSale = true;
+              mappingStatus = 'ready';
+            }
           } else if (localMapping && !localApproved) {
             console.log('[POS Modal] ⚠ MRA mapping found but NOT APPROVED for:', item.name);
             mappingStatus = 'pending';
@@ -1131,7 +1467,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         }
         
         // Fallback to API only when local mapping is missing or not ready.
-        if (!isReadyForSale && navigator.onLine) {
+        if (!isReadyForSale && !isBrowserOffline()) {
           try {
             const backendBranchId = toBackendBranchId(branchId);
             let mappings: any[] = [];
@@ -1143,7 +1479,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               mappings = extractMappingsFromResponse(scopedResponse);
             }
 
-            let readyMapping = mappings.find((m) => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced));
+            let approvedSyncedMapping = mappings.find((m) => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced));
+            let readyMapping = approvedSyncedMapping && !resolveMappingSaleBlockReason(approvedSyncedMapping, item.name)
+              ? approvedSyncedMapping
+              : undefined;
 
             // Some backends return shared/unscoped mappings only without a branch filter.
             if (!readyMapping) {
@@ -1153,7 +1492,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               const fallbackMappings = extractMappingsFromResponse(fallbackResponse);
               if (fallbackMappings.length > 0) {
                 mappings = [...mappings, ...fallbackMappings];
-                readyMapping = mappings.find((m) => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced));
+                approvedSyncedMapping = mappings.find((m) => Boolean(m.is_approved ?? m.isApproved) && Boolean(m.mra_synced ?? m.mraSynced));
+                readyMapping = approvedSyncedMapping && !resolveMappingSaleBlockReason(approvedSyncedMapping, item.name)
+                  ? approvedSyncedMapping
+                  : undefined;
               }
             }
 
@@ -1198,6 +1540,9 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                     isApproved: Boolean(readyMapping.is_approved ?? readyMapping.isApproved),
                     approvedAt: readyMapping.approved_at || readyMapping.approvedAt || undefined,
                     mraSynced: Boolean(readyMapping.mra_synced ?? readyMapping.mraSynced),
+                    isReadyForSale: Boolean(readyMapping.is_ready_for_sale ?? readyMapping.isReadyForSale ?? true),
+                    isTaxpayerCompatible: Boolean(readyMapping.is_taxpayer_compatible ?? readyMapping.isTaxpayerCompatible ?? true),
+                    taxpayerCompatibilityError: readyMapping.taxpayer_compatibility_error || readyMapping.taxpayerCompatibilityError || '',
                     lastSyncedAt: nowIso,
                     createdAt: readyMapping.created_at || readyMapping.createdAt || nowIso,
                     updatedAt: nowIso,
@@ -1206,10 +1551,15 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                   console.warn('[POS Modal] Failed to cache MRA mapping after API check:', cacheError);
                 }
               } else {
-                const approvedButNotSynced = mappings.find(
-                  (m) => Boolean(m.is_approved ?? m.isApproved) && !Boolean(m.mra_synced ?? m.mraSynced)
-                );
-                mappingStatus = approvedButNotSynced ? 'unsynced' : 'pending';
+                if (approvedSyncedMapping) {
+                  mappingBlockReason = resolveMappingSaleBlockReason(approvedSyncedMapping, item.name);
+                  mappingStatus = mappingBlockReason ? 'taxpayer_incompatible' : 'pending';
+                } else {
+                  const approvedButNotSynced = mappings.find(
+                    (m) => Boolean(m.is_approved ?? m.isApproved) && !Boolean(m.mra_synced ?? m.mraSynced)
+                  );
+                  mappingStatus = approvedButNotSynced ? 'unsynced' : 'pending';
+                }
               }
             }
           } catch (error) {
@@ -1237,6 +1587,9 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
           } else if (mappingStatus === 'missing') {
             errorTitle = 'MRA Mapping Missing';
             errorDescription = `${item.name} has no MRA mapping. Go to Inventory → MRA Mappings to create one.`;
+          } else if (mappingStatus === 'taxpayer_incompatible') {
+            errorTitle = 'EIS Tax Setup Conflict';
+            errorDescription = mappingBlockReason || `${item.name} is approved in MRA but not sale-ready for this taxpayer.`;
           }
           
           toast({
@@ -1267,7 +1620,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         const currentCartQuantity = prevCart.reduce((acc, cartItem) => 
           resolveCartInventoryItemId(cartItem) === normalizedItemId ? acc + toPositiveNumber(cartItem.quantity, 0) : acc, 0
         );
-        const remainingStock = (item.stockUnits || 0) - currentCartQuantity;
+        const remainingStock = toNonNegativeNumber(item.stockUnits, 0) - currentCartQuantity;
         
         if (remainingStock <= 0) {
           toast({ 
@@ -1282,7 +1635,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
           toast({ 
             variant: 'destructive', 
             title: 'Insufficient Stock', 
-            description: `Only ${remainingStock} ${item.unitType || 'units'} of ${item.name} available.` 
+            description: `Only ${formatStockQuantity(remainingStock)} ${item.unitType || 'units'} of ${item.name} available.` 
           });
           return prevCart;
         }
@@ -1334,7 +1687,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         ];
       }
     });
-  }, [toast, eisEnabled, blockSalesIfTaxMappingMissing, branchId, toPositiveNumber]);
+  }, [toast, eisEnabled, blockSalesIfTaxMappingMissing, branchId, toPositiveNumber, toNonNegativeNumber, formatStockQuantity, resolveMappingSaleBlockReason]);
   
   const handleUpdateQuantity = (itemId: string, newQuantity: number) => {
     const normalizedItemId = String(itemId || '').trim();
@@ -1502,6 +1855,17 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
        toast({ variant: 'destructive', title: 'No active branch', description: 'Could not determine the active branch.' });
        return null;
     }
+    if (eisEnabled) {
+      const reachability = await checkBackendConnectionNow(true);
+      if (!reachability.isReachable) {
+        toast({
+          variant: 'destructive',
+          title: 'Connection required for EIS invoice',
+          description: 'Could not reach the POS server. Connect to working internet before completing the sale so the EIS invoice can be submitted to MRA.',
+        });
+        return null;
+      }
+    }
     const sessionForOrder = await resolveSessionForCheckout();
     if (!sessionForOrder) {
       toast({ variant: 'destructive', title: 'No active session', description: 'Please start a session to record sales.' });
@@ -1511,6 +1875,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     const buyerName = buyerDetails?.name?.trim();
     const buyerPhone = buyerDetails?.phone?.trim();
     const buyerTin = buyerDetails?.tin?.trim();
+    const buyerAuthorizationCode = buyerDetails?.authorizationCode?.trim();
+    const vat5ProjectNumber = buyerDetails?.vat5ProjectNumber?.trim();
+    const vat5CertificateNumber = buyerDetails?.vat5CertificateNumber?.trim();
+    const vat5Quantity = Number(buyerDetails?.vat5Quantity);
     const buyerFields: Partial<Order> = {};
 
     if (buyerName) {
@@ -1524,6 +1892,32 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     if (buyerTin) {
       buyerFields.customerTin = buyerTin;
       buyerFields.customer_tin = buyerTin;
+      buyerFields.buyerTin = buyerTin;
+      buyerFields.buyer_tin = buyerTin;
+    }
+    if (buyerAuthorizationCode) {
+      buyerFields.buyerAuthorizationCode = buyerAuthorizationCode;
+      buyerFields.buyer_authorization_code = buyerAuthorizationCode;
+    }
+    if (buyerDetails?.isExport) {
+      buyerFields.isExport = true;
+      buyerFields.is_export = true;
+    }
+    if (buyerDetails?.isReliefSupply) {
+      buyerFields.isReliefSupply = true;
+      buyerFields.is_relief_supply = true;
+    }
+    if (vat5ProjectNumber) {
+      buyerFields.vat5ProjectNumber = vat5ProjectNumber;
+      buyerFields.vat5_project_number = vat5ProjectNumber;
+    }
+    if (vat5CertificateNumber) {
+      buyerFields.vat5CertificateNumber = vat5CertificateNumber;
+      buyerFields.vat5_certificate_number = vat5CertificateNumber;
+    }
+    if (Number.isFinite(vat5Quantity) && vat5Quantity > 0) {
+      buyerFields.vat5Quantity = vat5Quantity;
+      buyerFields.vat5_quantity = vat5Quantity;
     }
     
     // Validate MRA mappings from local snapshot only.
@@ -1535,6 +1929,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       const unmappedProducts: string[] = [];
       const unapprovedProducts: string[] = [];
       const unsyncedProducts: string[] = [];
+      const taxpayerIncompatibleProducts: string[] = [];
 
       for (const cartItem of cart) {
         const cartInventoryItemId = resolveCartInventoryItemId(cartItem);
@@ -1555,6 +1950,12 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
 
         if (!isSynced) {
           unsyncedProducts.push(cartItem.name);
+          continue;
+        }
+
+        const saleBlockReason = resolveMappingSaleBlockReason(localMapping, cartItem.name);
+        if (saleBlockReason) {
+          taxpayerIncompatibleProducts.push(saleBlockReason);
         }
       }
       
@@ -1585,12 +1986,21 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         });
         return null;
       }
+
+      if (taxpayerIncompatibleProducts.length > 0) {
+        toast({
+          variant: 'destructive',
+          title: 'EIS Tax Setup Conflict',
+          description: taxpayerIncompatibleProducts.slice(0, 2).join(' '),
+        });
+        return null;
+      }
     }
     
     // Build tax snapshot from approved+synced mappings for consistent order math.
-    // When mapping enforcement is disabled, fall back to the default tax rate for unmapped items.
+    // When EIS is enabled, never fall back to local preset tax rules for unmapped items.
     let cartItemTaxRates: Record<string, { rate: number; taxType: 'standard' | 'zero' | 'exempt'; calculationMethod: 'inclusive' | 'exclusive' }> = {};
-    const shouldApplyDefaultTax = !blockSalesIfTaxMappingMissing && Boolean(defaultTaxRate);
+    const shouldApplyDefaultTax = !eisEnabled && !blockSalesIfTaxMappingMissing && Boolean(defaultTaxRate);
     const defaultTaxType = defaultTaxRate ? normalizeMappedTaxType(defaultTaxRate.taxType) : 'standard';
     const rawDefaultRate = defaultTaxRate ? toTaxRateDecimal(defaultTaxRate.rate) : 0;
     const normalizedDefaultRate = defaultTaxType === 'zero' || defaultTaxType === 'exempt' ? 0 : rawDefaultRate;
@@ -1667,9 +2077,9 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
           console.log(`[Order] Item: ${cartItem.name}, INCLUSIVE tax - Gross: ${itemGross}, Tax Rate: ${(rate * 100).toFixed(2)}%, Tax: ${itemTax.toFixed(2)}, Subtotal: ${itemSubtotal.toFixed(2)}`);
         }
       } else {
-        // Fallback to default tax rate (assume inclusive)
+        // Fallback to default tax rate only outside EIS mode (assume inclusive).
         const defaultRate = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
-        if (defaultRate > 0) {
+        if (!eisEnabled && defaultRate > 0) {
           itemTax = itemGross / (1 + defaultRate) * defaultRate;
           itemSubtotal = itemGross - itemTax;
           console.log(`[Order] Item: ${cartItem.name}, INCLUSIVE tax (default) - Gross: ${itemGross}, Tax Rate: ${(defaultRate * 100).toFixed(2)}%, Tax: ${itemTax.toFixed(2)}, Subtotal: ${itemSubtotal.toFixed(2)}`);
@@ -1689,11 +2099,6 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     let finalOrder: Order | null = null;
 
     try {
-      // Track stock recalculation candidates and items that required direct inventory fallback.
-      // If fallback is used, recalculation would overwrite the manual decrement when no batch exists.
-      const itemsToRecalculateStock = new Set<string>();
-      const itemsWithFallbackStockDeduction = new Set<string>();
-
       await db.transaction('rw', db.inventory, db.orders, db.sessions, db.purchaseHistory, async () => {
         const now = new Date();
         
@@ -1866,7 +2271,6 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                   quantityToDecrement -= fallbackInventoryDecrement;
 
                   if (fallbackInventoryDecrement > 0) {
-                    itemsWithFallbackStockDeduction.add(String(itemToDecrement.id));
                     orderCogs += fallbackInventoryDecrement * toNonNegativeNumber(inventoryItemToUpdate.cost, 0);
                     console.warn(`[Order] Used inventory fallback decrement for ${itemToDecrement.id}:`, {
                       fallbackInventoryDecrement,
@@ -1899,10 +2303,6 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                     decrementedBy: totalInventoryDecrement,
                     newStock
                   });
-                }
-
-                if (totalDecrementedFromBatches > 0) {
-                  itemsToRecalculateStock.add(String(itemToDecrement.id));
                 }
 
                 if (quantityToDecrement > 0) {
@@ -2058,26 +2458,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         });
       }
 
-      // Recalculate inventory for items fully tracked by batches.
-      // Skip items where fallback stock decrement was used, otherwise recalculation can undo the fallback deduction.
-      if (itemsToRecalculateStock.size > 0) {
-        const { updateInventoryStockUnits } = await import('@/lib/services/stock-calculator');
-        for (const itemId of itemsToRecalculateStock) {
-          if (itemsWithFallbackStockDeduction.has(itemId)) {
-            console.log(`[Order] Skipping stock recalculation for ${itemId} due to inventory fallback deduction`);
-            continue;
-          }
-
-          try {
-            await updateInventoryStockUnits(itemId, branchId);
-            console.log(`[Order] Updated stock units for item: ${itemId}`);
-          } catch (err) {
-            console.error(`[Order] Failed to update stock units for item ${itemId}:`, err);
-          }
-        }
-      }
-
-      if (finalOrder && typeof window !== 'undefined' && navigator.onLine) {
+      if (finalOrder && typeof window !== 'undefined' && !isBrowserOffline()) {
         // Don't block checkout UX on full sync. Sync runs in background.
         void (async () => {
           try {
@@ -2121,12 +2502,12 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   };
 
   const renderPosForBusiness = () => {
-    if ((isLoadingInventory && !hasCachedInventory) || !allInventory) {
+    if (!allInventory) {
         return (
           <Card className="flex h-full items-center justify-center">
             <CardContent className="text-center">
               <Loader2 className="mx-auto mb-4 h-8 w-8 animate-spin text-muted-foreground" />
-              <p className="text-muted-foreground">Loading products...</p>
+              <p className="text-muted-foreground">Loading cached products...</p>
             </CardContent>
           </Card>
         )
@@ -2136,12 +2517,20 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       ? 'No products found'
       : hasInventory
         ? 'Search to show products'
-        : 'No products available';
+        : mraProductSyncError
+          ? 'No cached products for offline sale'
+          : isSyncingMraProducts
+            ? 'No cached products yet'
+            : 'No products available';
     const emptyStateDescription = hasSearchQuery
       ? undefined
       : hasInventory
         ? undefined
-        : undefined;
+        : mraProductSyncError
+          ? 'This device has no local product cache. Connect once and sync MRA products before relying on offline sales.'
+          : isSyncingMraProducts
+            ? 'Fetching products for first-time setup. If internet is unavailable, cached products from a previous sync are required for offline sales.'
+            : 'Sync MRA products once on this device before making offline sales.';
 
     // Calculate tax using MRA mappings if EIS is enabled
     let cartTax = 0;
@@ -2170,6 +2559,8 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       defaultTaxRate,
       eisEnabled,
       blockSalesIfTaxMappingMissing,
+      isEisInvoiceSubmissionBlocked: eisEnabled && isBrowserOffline(),
+      eisInvoiceSubmissionBlockedMessage: 'Could not reach the POS server. Connect to working internet before completing the sale so the EIS invoice can be submitted to MRA.',
     };
 
     switch (currentBusinessType) {
@@ -2190,23 +2581,46 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     }
   };
 
-  const hasUserSession =
+  const isOfflineAtRender = isBrowserOffline();
+  const hasActiveBranchSession =
     Boolean(activeSession) &&
     isSessionActive(activeSession) &&
-    isSessionOwnedByCurrentUser(activeSession);
+    isSessionForCurrentBranch(activeSession);
+  const hasUserSession =
+    hasActiveBranchSession &&
+    (isSessionOwnedByCurrentUser(activeSession) || isUsingCachedBranchSession);
+  const isUsingUnverifiedOfflineSession =
+    hasActiveBranchSession &&
+    isUsingCachedBranchSession &&
+    !isSessionOwnedByCurrentUser(activeSession);
 
-  if (!hasUserSession) {
+  if (isLoadingSession || !hasUserSession) {
+    const sessionStatusTitle = isLoadingSession
+      ? 'Loading POS session'
+      : isOfflineAtRender
+        ? 'Offline POS session not found'
+        : 'Open a POS session first';
+    const sessionStatusDescription = isLoadingSession
+      ? 'Checking the local session cache so POS can open without internet.'
+      : isOfflineAtRender
+        ? 'Could not reach the POS server. Connect to working internet to sync or open a POS session and submit EIS invoices. This device has no active cached session for this branch.'
+        : 'Start a session for this branch before taking sales.';
+
     return (
       <Dialog open={isOpen} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-md" onOpenAutoFocus={(e) => e.preventDefault()}>
-          <DialogHeader>
-            <DialogTitle>No Active Session</DialogTitle>
+        <DialogContent className="max-w-[95vw] w-full h-[90vh] flex flex-col p-0" onOpenAutoFocus={(e) => e.preventDefault()}>
+          <DialogHeader className="p-3 pb-1 shrink-0">
+            <DialogTitle className="text-lg">Point of Sale</DialogTitle>
           </DialogHeader>
-          <div className="text-center py-6">
-            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400 mb-4">
-              <AlertTriangle />
+          <div className="flex flex-1 items-center justify-center px-4 py-8">
+            <div className="max-w-md rounded-lg border bg-card p-6 text-center shadow-sm">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400">
+                {isLoadingSession ? <Loader2 className="h-6 w-6 animate-spin" /> : <AlertTriangle className="h-6 w-6" />}
+              </div>
+              <h3 className="text-base font-semibold">{sessionStatusTitle}</h3>
+              <p className="mt-2 text-sm text-muted-foreground">{sessionStatusDescription}</p>
+              <Button className="mt-5" onClick={() => onOpenChange(false)}>Close</Button>
             </div>
-            <Button onClick={() => onOpenChange(false)}>Close</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -2221,6 +2635,22 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         </DialogHeader>
         <div className="flex-1 overflow-hidden px-4 pt-4 pb-4 min-h-0">
           <div className="flex flex-col items-stretch gap-4 h-full min-h-0">
+            {isOfflineAtRender && (
+              <div className="flex shrink-0 items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-900 dark:border-yellow-800 dark:bg-yellow-950/30 dark:text-yellow-100">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 break-words">
+                  Could not reach the POS server. Connect to working internet to submit EIS invoices.
+                </span>
+              </div>
+            )}
+            {isUsingUnverifiedOfflineSession && (
+              <div className="flex shrink-0 items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-900 dark:border-yellow-800 dark:bg-yellow-950/30 dark:text-yellow-100">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 break-words">
+                  Offline mode: using the latest cached active session for this branch because user identity cannot be confirmed until internet returns.
+                </span>
+              </div>
+            )}
             <div className="flex flex-col items-stretch gap-4 sm:flex-row sm:items-center shrink-0">
               <div className="flex-1">
                 <div className="relative">
@@ -2234,6 +2664,20 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  className="h-10 w-10 p-0"
+                  title={isSyncingMraProducts ? 'Loading Products from MRA' : 'Sync Products from MRA'}
+                  aria-label={isSyncingMraProducts ? 'Loading Products from MRA' : 'Sync Products from MRA'}
+                  onClick={() => void syncProductsFromMra()}
+                  disabled={isSyncingMraProducts}
+                >
+                  {isSyncingMraProducts ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                </Button>
                 <Button
                   variant="outline"
                   className="h-10 w-10 p-0 sm:hidden"
@@ -2260,6 +2704,18 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                 </Button>
               </div>
             </div>
+            {isSyncingMraProducts && allInventory && (
+              <div className="flex shrink-0 items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>{hasCachedInventory ? 'Loading latest MRA products...' : 'Trying to load MRA products for first-time setup...'}</span>
+              </div>
+            )}
+            {!isSyncingMraProducts && mraProductSyncError && allInventory && (
+              <div className="flex shrink-0 items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 break-words">Latest MRA product load failed: {mraProductSyncError}</span>
+              </div>
+            )}
             <div className="flex-1 overflow-hidden min-h-0">{renderPosForBusiness()}</div>
           </div>
         </div>

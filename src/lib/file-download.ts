@@ -23,3 +23,24 @@ export const downloadTextFile = (
     return false;
   }
 };
+
+export const downloadBlobFile = (blob: Blob, filename: string): boolean => {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  try {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+  } catch (error) {
+    console.error('[Download] Failed to trigger file download:', error);
+    return false;
+  }
+};

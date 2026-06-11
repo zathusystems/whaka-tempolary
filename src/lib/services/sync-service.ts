@@ -531,6 +531,9 @@ class SyncService {
 
           if (result.results?.errors && result.results.errors.length > 0) {
             console.error(`[Sync] ${result.results.errors.length} order sync errors:`, result.results.errors);
+            for (const orderError of result.results.errors) {
+              await this.markOrderSyncError(orderError);
+            }
           }
 
           // Prevent inventory/purchase pushes in the same cycle if any orders failed.
@@ -706,6 +709,88 @@ class SyncService {
       console.error('[Sync] Push failed:', error);
       // Don't throw - allow pull to continue
     }
+  }
+
+  private isRetryBlockedOrderError(error: unknown): boolean {
+    const message = String(error || '').toLowerCase();
+    return [
+      'mra',
+      'eis',
+      'non-vat',
+      'standard vat',
+      'tax mapping',
+      'compliance policy',
+      'cannot submit an empty pos order',
+    ].some((needle) => message.includes(needle));
+  }
+
+  private getMraSubmissionDiagnostic(source: any): any | null {
+    if (!source || typeof source !== 'object') {
+      return null;
+    }
+
+    const direct = source.mra_submission || source.mraSubmission;
+    if (direct && typeof direct === 'object') {
+      return direct;
+    }
+
+    const metadata =
+      source.eis_validation_metadata ||
+      source.eisValidationMetadata ||
+      source.eis_validation_metadata_json ||
+      null;
+    if (metadata && typeof metadata === 'object') {
+      const nested = metadata.mra_submission || metadata.mraSubmission;
+      if (nested && typeof nested === 'object') {
+        return nested;
+      }
+    }
+
+    return null;
+  }
+
+  private getMraSubmissionFailureMessage(source: any): string {
+    const diagnostic = this.getMraSubmissionDiagnostic(source);
+    const message = String(diagnostic?.message || source?.error || 'Order sync failed').trim();
+    return message || 'Order sync failed';
+  }
+
+  private isMraSubmissionIncomplete(source: any): boolean {
+    const diagnostic = this.getMraSubmissionDiagnostic(source);
+    const state = String(diagnostic?.state || '').trim().toLowerCase();
+    if (state) {
+      return !['accepted', 'offline_queued'].includes(state);
+    }
+
+    const status = String(source?.eis_status ?? source?.eisStatus ?? '').trim().toUpperCase();
+    return status === 'REJECTED';
+  }
+
+  private async markOrderSyncError(errorItem: any): Promise<void> {
+    const id = String(errorItem?.id || '').trim();
+    const message = this.getMraSubmissionFailureMessage(errorItem);
+    if (!id || !message) {
+      return;
+    }
+
+    const diagnostic = this.getMraSubmissionDiagnostic(errorItem);
+    const existingOrder = await db.orders.get(id);
+    const existingMetadata =
+      existingOrder?.eisValidationMetadata ||
+      existingOrder?.eis_validation_metadata ||
+      {};
+    const nextMetadata = diagnostic
+      ? { ...existingMetadata, mra_submission: diagnostic }
+      : existingMetadata;
+
+    await db.orders.update(id, {
+      syncStatus: 'failed',
+      syncError: message,
+      syncRetryBlocked: this.isRetryBlockedOrderError(message),
+      syncFailedAt: new Date().toISOString(),
+      eisValidationMetadata: nextMetadata,
+      eis_validation_metadata: nextMetadata,
+    });
   }
 
   private async pushPendingMraMappings(branchId: string): Promise<void> {
@@ -1279,7 +1364,18 @@ class SyncService {
    * Note: Large base64 images are kept for sync but may need compression in production
    */
   private sanitizeForSync(data: any): any {
-    const { _dirty, _operation, _synced_at, initialStockViaPurchase, _purchaseSyncPending, ...clean } = data;
+    const {
+      _dirty,
+      _operation,
+      _synced_at,
+      initialStockViaPurchase,
+      _purchaseSyncPending,
+      syncStatus,
+      syncError,
+      syncRetryBlocked,
+      syncFailedAt,
+      ...clean
+    } = data;
     if (_operation === 'create' && initialStockViaPurchase) {
       clean.stockUnits = 0;
       clean.value = 0;
@@ -1287,7 +1383,7 @@ class SyncService {
     }
     
     // ✅ Fields that should NOT be converted to snake_case (backend expects camelCase)
-    const keepCamelCase = ['supplierId', 'supplierName', 'totalItems', 'totalCost', 'paymentStatus', 'amountPaid', 'amountDue', 'createdBy', 'inventoryItemId', 'quantityOrdered', 'quantityReceived', 'quantityRemaining', 'costPerUnit', 'batchNumber', 'expiryDate', 'branchId', 'businessId', 'supplierTin', 'vatRegistered', 'itemType', 'stockUnits', 'unitType', 'reorderLevel', 'isVariablePrice', 'isProduced', 'isSoldInPortions', 'portionName', 'portionsPerUnit', 'isRecipeIngredient', 'onMenu', 'isRecipeIngredient'];
+    const keepCamelCase = ['supplierId', 'supplierName', 'totalItems', 'totalCost', 'paymentStatus', 'amountPaid', 'amountDue', 'createdBy', 'inventoryItemId', 'quantityOrdered', 'quantityReceived', 'quantityRemaining', 'costPerUnit', 'batchNumber', 'expiryDate', 'branchId', 'businessId', 'supplierTin', 'mraSupplierId', 'vatRegistered', 'eisStockReceiptSource', 'itemType', 'stockUnits', 'unitType', 'reorderLevel', 'isVariablePrice', 'isProduced', 'isSoldInPortions', 'portionName', 'portionsPerUnit', 'isRecipeIngredient', 'onMenu', 'isRecipeIngredient'];
     
     // Convert camelCase keys to snake_case for backend
     const converted: any = {};
@@ -1344,6 +1440,13 @@ class SyncService {
       ['customerNotes', 'customer_notes'],
       ['buyerName', 'buyer_name'],
       ['buyerTin', 'buyer_tin'],
+      ['buyerAuthorizationCode', 'buyer_authorization_code'],
+      ['isExport', 'is_export'],
+      ['isReliefSupply', 'is_relief_supply'],
+      ['vat5ProjectNumber', 'vat5_project_number'],
+      ['vat5CertificateNumber', 'vat5_certificate_number'],
+      ['vat5Quantity', 'vat5_quantity'],
+      ['eisValidationMetadata', 'eis_validation_metadata'],
     ];
 
     const orderNumberRaw = normalized.orderNumber ?? normalized.order_number;
@@ -1510,11 +1613,33 @@ class SyncService {
       }
 
       const normalizedAck = this.normalizeOrderRecord(ack);
+      const mraSubmission = this.getMraSubmissionDiagnostic(normalizedAck);
+      const mraIncomplete = this.isMraSubmissionIncomplete(normalizedAck);
+      const mraFailureMessage = mraIncomplete
+        ? this.getMraSubmissionFailureMessage(normalizedAck)
+        : '';
       const updatePayload: any = {
         _dirty: false,
         _operation: undefined,
         _synced_at: normalizedAck.updated_at || normalizedAck.updatedAt || new Date().toISOString(),
+        syncStatus: mraIncomplete ? 'failed' : 'synced',
+        syncError: mraIncomplete ? mraFailureMessage : undefined,
+        syncRetryBlocked: mraIncomplete ? this.isRetryBlockedOrderError(mraFailureMessage) : false,
+        syncFailedAt: mraIncomplete ? new Date().toISOString() : undefined,
       };
+      if (mraSubmission) {
+        const existingMetadata =
+          existingOrder.eisValidationMetadata ||
+          existingOrder.eis_validation_metadata ||
+          {};
+        const nextMetadata = {
+          ...existingMetadata,
+          ...(normalizedAck.eisValidationMetadata || normalizedAck.eis_validation_metadata || {}),
+          mra_submission: mraSubmission,
+        };
+        updatePayload.eisValidationMetadata = nextMetadata;
+        updatePayload.eis_validation_metadata = nextMetadata;
+      }
 
       const syncKeys = [
         'orderNumber',
@@ -1535,6 +1660,21 @@ class SyncService {
         'buyer_name',
         'buyerTin',
         'buyer_tin',
+        'buyerAuthorizationCode',
+        'buyer_authorization_code',
+        'isExport',
+        'is_export',
+        'isReliefSupply',
+        'is_relief_supply',
+        'vat5ProjectNumber',
+        'vat5_project_number',
+        'vat5CertificateNumber',
+        'vat5_certificate_number',
+        'vat5Quantity',
+        'vat5_quantity',
+        'eisValidationMetadata',
+        'eis_validation_metadata',
+        'mra_submission',
         'fiscalInvoiceNumber',
         'fiscal_invoice_number',
         'eisStatus',
@@ -1566,7 +1706,9 @@ class SyncService {
       const fiscalNumber = String(
         updatePayload.fiscalInvoiceNumber ?? updatePayload.fiscal_invoice_number ?? ''
       ).trim();
-      if (fiscalNumber) {
+      if (mraIncomplete) {
+        console.warn(`[Sync] Order ${id} synced locally but MRA submission is incomplete: ${mraFailureMessage}`);
+      } else if (fiscalNumber) {
         console.log(`[Sync] Marked order ${id} as synced with fiscal invoice ${fiscalNumber}`);
       } else {
         console.log(`[Sync] Marked order ${id} as synced`);
@@ -1663,7 +1805,14 @@ class SyncService {
       // Try orders first
       const order = await db.orders.get(id);
       if (order) {
-        await db.orders.update(id, { _dirty: false, _operation: undefined });
+        await db.orders.update(id, {
+          _dirty: false,
+          _operation: undefined,
+          syncStatus: 'synced',
+          syncError: undefined,
+          syncRetryBlocked: false,
+          syncFailedAt: undefined,
+        });
         console.log(`[Sync] Marked order ${id} as synced`);
         return;
       }
@@ -2104,8 +2253,13 @@ class SyncService {
         for (const supplier of changes.suppliers) {
           try {
             console.log(`[Sync] Storing supplier ${supplier.id}:`, supplier);
+            const mraSupplierId = supplier.mraSupplierId ?? supplier.mra_supplier_id;
             await db.suppliers.put({
               ...supplier,
+              supplierTin: supplier.supplierTin ?? supplier.supplier_tin,
+              mraSupplierId,
+              mra_supplier_id: mraSupplierId,
+              vatRegistered: supplier.vatRegistered ?? supplier.vat_registered,
               businessId: String(supplier.businessId || businessId || '').trim() || undefined,
               _dirty: false,
               _synced_at: new Date().toISOString()
@@ -2336,8 +2490,14 @@ class SyncService {
                 existingPo?.updatedAt ??
                 new Date().toISOString(),
               supplierTin: convertedPo.supplierTin ?? existingPo?.supplierTin,
+              mraSupplierId: convertedPo.mraSupplierId ?? (convertedPo as any).mra_supplier_id ?? existingPo?.mraSupplierId,
               supplierVatRegistered:
                 convertedPo.supplierVatRegistered ?? existingPo?.supplierVatRegistered,
+              eisStockReceiptSource:
+                convertedPo.eisStockReceiptSource ??
+                (convertedPo as any).eis_stock_receipt_source ??
+                (po as any).eis_stock_receipt_source ??
+                existingPo?.eisStockReceiptSource,
               eisInvoiceNumber: convertedPo.eisInvoiceNumber ?? existingPo?.eisInvoiceNumber,
               eisSynced: convertedPo.eisSynced ?? existingPo?.eisSynced,
               eisSyncedAt: convertedPo.eisSyncedAt ?? existingPo?.eisSyncedAt,
@@ -2445,6 +2605,11 @@ class SyncService {
                 branchId: fallbackBranchId ?? existingRecord?.branchId ?? '',
                 supplierId: supplierId,
                 supplierName: supplierName,
+                supplierTin: mergedPo.supplierTin ?? existingRecord?.supplierTin,
+                mraSupplierId: mergedPo.mraSupplierId ?? existingRecord?.mraSupplierId,
+                supplierVatRegistered:
+                  mergedPo.supplierVatRegistered ?? existingRecord?.supplierVatRegistered,
+                eisStockReceiptSource: mergedPo.eisStockReceiptSource ?? existingRecord?.eisStockReceiptSource,
                 productId: inventoryItemId,
                 productName: productName,
                 referenceNumber:

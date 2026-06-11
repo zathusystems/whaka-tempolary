@@ -149,6 +149,243 @@ const businessSettingsSchema = z.object({
 
 type BusinessSettingsFormValues = z.infer<typeof businessSettingsSchema>;
 
+type SyncedMraConfiguration = {
+  config_type?: string;
+  config_data?: unknown;
+  effective_from?: string | null;
+  fetched_from_mra_at?: string | null;
+  created_at?: string | null;
+  is_active?: boolean;
+};
+
+type MraBusinessDetails = Partial<Pick<
+  BusinessSettingsFormValues,
+  | 'businessName'
+  | 'email'
+  | 'phone'
+  | 'address'
+  | 'tin'
+  | 'vatRegistrationNumber'
+  | 'vatRegistered'
+  | 'mraTaxpayerType'
+  | 'mraEnrolled'
+>> & {
+  available: boolean;
+  changedFields: string[];
+  fetchedAt?: string | null;
+};
+
+const MRA_LOCKED_BUSINESS_FIELDS: Array<keyof BusinessSettingsFormValues> = [
+  'businessName',
+  'email',
+  'phone',
+  'address',
+  'tin',
+];
+
+const MRA_BUSINESS_FIELD_LABELS: Partial<Record<keyof BusinessSettingsFormValues, string>> = {
+  businessName: 'business name',
+  email: 'email',
+  phone: 'phone',
+  address: 'address',
+  tin: 'TIN',
+  vatRegistrationNumber: 'VAT registration number',
+  vatRegistered: 'VAT status',
+  mraTaxpayerType: 'taxpayer type',
+  mraEnrolled: 'MRA enrollment',
+};
+
+const toTrimmedString = (value: unknown): string => String(value ?? '').trim();
+
+const readBooleanFlag = (value: unknown): boolean | null => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  }
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'enabled', 'vat'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'disabled', 'non_vat', 'non-vat'].includes(normalized)) return false;
+  return null;
+};
+
+const extractApiList = <T,>(response: any): T[] => {
+  if (Array.isArray(response)) return response as T[];
+  if (Array.isArray(response?.results)) return response.results as T[];
+  if (Array.isArray(response?.data)) return response.data as T[];
+  return [];
+};
+
+const getConfigDataObject = (config?: SyncedMraConfiguration | null): Record<string, any> => {
+  const data = config?.config_data;
+  return data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, any>
+    : {};
+};
+
+const getConfigTimestamp = (config?: SyncedMraConfiguration | null): string => {
+  return String(config?.fetched_from_mra_at || config?.effective_from || config?.created_at || '');
+};
+
+const getLatestConfig = (
+  configs: SyncedMraConfiguration[],
+  configTypes: string[]
+): SyncedMraConfiguration | null => {
+  const typeSet = new Set(configTypes);
+  return configs
+    .filter((config) => config?.is_active !== false && typeSet.has(String(config?.config_type || '')))
+    .sort((a, b) => getConfigTimestamp(b).localeCompare(getConfigTimestamp(a)))[0] || null;
+};
+
+const firstText = (...values: unknown[]): string => {
+  for (const value of values) {
+    const normalized = toTrimmedString(value);
+    if (normalized) return normalized;
+  }
+  return '';
+};
+
+const joinAddressLines = (value: unknown): string => {
+  if (Array.isArray(value)) {
+    return value.map(toTrimmedString).filter(Boolean).join('\n');
+  }
+  return toTrimmedString(value);
+};
+
+const normalizeForCompare = (value: unknown): string => String(value ?? '').trim().replace(/\s+/g, ' ');
+
+const extractMraBusinessDetails = (configs: SyncedMraConfiguration[]): MraBusinessDetails => {
+  const systemConfig = getLatestConfig(configs, ['system_settings']);
+  const taxpayerConfig = getLatestConfig(configs, ['taxpayer_configuration']);
+  const terminalConfig = getLatestConfig(configs, ['terminal_configuration']);
+
+  const systemData = getConfigDataObject(systemConfig);
+  const taxpayer = {
+    ...getConfigDataObject(taxpayerConfig),
+    ...(systemData.taxpayerConfiguration && typeof systemData.taxpayerConfiguration === 'object'
+      ? systemData.taxpayerConfiguration
+      : {}),
+  };
+  const terminal = {
+    ...getConfigDataObject(terminalConfig),
+    ...(systemData.terminalConfiguration && typeof systemData.terminalConfiguration === 'object'
+      ? systemData.terminalConfiguration
+      : {}),
+  };
+
+  const vatRegistered = readBooleanFlag(
+    taxpayer.isVATRegistered ??
+    taxpayer.vatRegistered ??
+    taxpayer.isVatRegistered
+  );
+  const address = firstText(
+    joinAddressLines(terminal.addressLines),
+    joinAddressLines(terminal.address_lines),
+    terminal.address,
+    terminal.physicalAddress,
+    taxpayer.address
+  );
+  const tin = firstText(taxpayer.tin, taxpayer.TIN, taxpayer.taxpayerTIN, taxpayer.taxpayerTin);
+  const businessName = firstText(
+    terminal.tradingName,
+    terminal.businessName,
+    taxpayer.tradingName,
+    taxpayer.taxpayerName,
+    taxpayer.name
+  );
+
+  const details: MraBusinessDetails = {
+    available: Boolean(systemConfig || taxpayerConfig || terminalConfig),
+    changedFields: [],
+    fetchedAt: getConfigTimestamp(systemConfig || taxpayerConfig || terminalConfig) || null,
+  };
+
+  if (businessName) details.businessName = businessName;
+  if (firstText(terminal.emailAddress, terminal.email, taxpayer.emailAddress, taxpayer.email)) {
+    details.email = firstText(terminal.emailAddress, terminal.email, taxpayer.emailAddress, taxpayer.email);
+  }
+  if (firstText(terminal.phoneNumber, terminal.phone, taxpayer.phoneNumber, taxpayer.phone)) {
+    details.phone = firstText(terminal.phoneNumber, terminal.phone, taxpayer.phoneNumber, taxpayer.phone);
+  }
+  if (address) details.address = address;
+  if (tin) details.tin = tin;
+  if (firstText(taxpayer.vatRegistrationNumber, taxpayer.vatNo, taxpayer.vatNumber)) {
+    details.vatRegistrationNumber = firstText(taxpayer.vatRegistrationNumber, taxpayer.vatNo, taxpayer.vatNumber);
+  }
+  if (vatRegistered !== null) {
+    details.vatRegistered = vatRegistered;
+    details.mraTaxpayerType = vatRegistered ? 'VAT' : 'NON_VAT';
+  }
+  if (details.available) {
+    details.mraEnrolled = Boolean(tin || details.available);
+  }
+
+  return details;
+};
+
+const applyMraBusinessDetails = (
+  values: BusinessSettingsFormValues,
+  mraDetails: MraBusinessDetails | null
+): { values: BusinessSettingsFormValues; changedFields: string[] } => {
+  if (!values.enableEis || !mraDetails?.available) {
+    return { values, changedFields: [] };
+  }
+
+  const next = { ...values };
+  const changedFields: string[] = [];
+  const apply = <K extends keyof BusinessSettingsFormValues>(key: K, value: BusinessSettingsFormValues[K] | undefined) => {
+    if (value === undefined || value === null) return;
+    if (typeof value === 'string' && !value.trim()) return;
+    if (normalizeForCompare(next[key]) === normalizeForCompare(value)) return;
+
+    next[key] = value;
+    changedFields.push(MRA_BUSINESS_FIELD_LABELS[key] || String(key));
+  };
+
+  apply('businessName', mraDetails.businessName);
+  apply('email', mraDetails.email);
+  apply('phone', mraDetails.phone);
+  apply('address', mraDetails.address);
+  apply('tin', mraDetails.tin);
+  apply('vatRegistrationNumber', mraDetails.vatRegistrationNumber);
+  apply('vatRegistered', mraDetails.vatRegistered);
+  apply('mraTaxpayerType', mraDetails.mraTaxpayerType);
+  apply('mraEnrolled', mraDetails.mraEnrolled);
+
+  return { values: next, changedFields };
+};
+
+const buildLocalBusinessData = (businessId: string, values: BusinessSettingsFormValues): Business => ({
+  id: businessId,
+  name: values.businessName,
+  type: values.businessType,
+  currency: values.currency,
+  tin: values.tin || '',
+  email: values.email || '',
+  phone: values.phone || '',
+  address: values.address || '',
+  website: values.website || '',
+});
+
+const buildBackendBusinessPayload = (values: BusinessSettingsFormValues) => ({
+  name: values.businessName,
+  business_type: normalizeBusinessTypeForBackend(values.businessType),
+  email: values.email || '',
+  phone: values.phone || '',
+  address: values.address || '',
+  website: values.website || '',
+  tin: values.tin || '',
+  vat_registration_number: values.vatRegistrationNumber || '',
+  vat_registered: values.vatRegistered,
+  mra_taxpayer_type: values.mraTaxpayerType,
+  mra_enrolled: values.mraEnrolled,
+  enable_eis: values.enableEis,
+  eis_environment: values.eisEnvironment,
+  block_sales_if_eis_down: values.blockSalesIfEisDown,
+  block_sales_if_tax_mapping_missing: values.blockSalesIfTaxMappingMissing,
+  fuel_pumps: normalizePumpList(values.fuelPumps),
+});
+
 
 interface Branch {
   id: string;
@@ -162,6 +399,7 @@ export default function BusinessSettingsPage() {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [isSyncingBranches, setIsSyncingBranches] = useState(false);
   const [newPumpName, setNewPumpName] = useState('');
+  const [mraBusinessDetails, setMraBusinessDetails] = useState<MraBusinessDetails | null>(null);
   const isAdminUser = user?.role === 'Admin';
   
   useEffect(() => {
@@ -192,6 +430,25 @@ export default function BusinessSettingsPage() {
     },
   });
   const fuelPumps = businessForm.watch('fuelPumps');
+  const enableEis = businessForm.watch('enableEis');
+  const mraBusinessFieldsLocked = Boolean(enableEis && mraBusinessDetails?.available);
+  const isMraLockedBusinessField = (field: keyof BusinessSettingsFormValues): boolean => (
+    mraBusinessFieldsLocked && MRA_LOCKED_BUSINESS_FIELDS.includes(field)
+  );
+
+  const loadMraBusinessDetails = async (businessId: string): Promise<MraBusinessDetails | null> => {
+    try {
+      const response = await authFetch.fetch<any>(`/mra-eis/configurations/?business_id=${businessId}`);
+      const configs = extractApiList<SyncedMraConfiguration>(response);
+      const details = extractMraBusinessDetails(configs);
+      setMraBusinessDetails(details.available ? details : null);
+      return details.available ? details : null;
+    } catch (error) {
+      console.warn('[DEBUG SETTINGS] Could not load MRA business details:', error);
+      setMraBusinessDetails(null);
+      return null;
+    }
+  };
 
   // Load business settings from backend
   useEffect(() => {
@@ -270,8 +527,36 @@ export default function BusinessSettingsPage() {
                         cachedFuelPumps
                     ),
                 };
-                console.log('[DEBUG SETTINGS] Form data to reset:', formData);
-                businessForm.reset(formData);
+                const mraDetails = enableEisValue ? await loadMraBusinessDetails(String(business.id)) : null;
+                const mraApplied = applyMraBusinessDetails(formData, mraDetails);
+                const nextFormData = mraApplied.values;
+                if (mraDetails) {
+                  setMraBusinessDetails({
+                    ...mraDetails,
+                    changedFields: mraApplied.changedFields,
+                  });
+                }
+                console.log('[DEBUG SETTINGS] Form data to reset:', nextFormData);
+                businessForm.reset(nextFormData);
+                localStorage.setItem(
+                  LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS,
+                  JSON.stringify(nextFormData)
+                );
+                if (mraApplied.changedFields.length > 0) {
+                  await db.business.put(buildLocalBusinessData(String(business.id), nextFormData));
+                  try {
+                    await authFetch.fetch(`/business/businesses/${business.id}/`, {
+                      method: 'PUT',
+                      body: JSON.stringify(buildBackendBusinessPayload(nextFormData)),
+                    });
+                  } catch (syncError) {
+                    console.warn('[DEBUG SETTINGS] MRA business detail override saved locally but backend sync failed:', syncError);
+                  }
+                  toast({
+                    title: 'MRA business details applied',
+                    description: `Updated ${mraApplied.changedFields.join(', ')} from synced EIS configuration.`,
+                  });
+                }
                 console.log('[DEBUG SETTINGS] Form reset completed');
                 
                 // Verify form values after reset
@@ -285,6 +570,7 @@ export default function BusinessSettingsPage() {
                 }, 100);
               } else {
                 console.log('[DEBUG SETTINGS] No settings found from backend for business ID:', business.id);
+                setMraBusinessDetails(null);
                 // Set defaults
                 businessForm.reset({
                     businessName: '',
@@ -309,6 +595,7 @@ export default function BusinessSettingsPage() {
               }
             } catch (error) {
               console.error('[DEBUG SETTINGS] Error loading settings from backend:', error);
+              setMraBusinessDetails(null);
               // Fallback to IndexedDB
               let settings = await db.business.get(business.id);
               console.log('[DEBUG SETTINGS] Fallback - Loaded settings from IndexedDB:', settings);
@@ -467,18 +754,16 @@ export default function BusinessSettingsPage() {
       return;
     }
 
-    const resolvedFuelPumps = normalizePumpList(fuelPumps ?? data.fuelPumps);
-    const businessData: Business = {
-        id: business.id,
-        name: data.businessName,
-        type: data.businessType,
-        currency: data.currency,
-        tin: data.tin || '',
-        email: data.email || '',
-        phone: data.phone || '',
-        address: data.address || '',
-        website: data.website || '',
-    };
+    const mraProtected = applyMraBusinessDetails(
+      {
+        ...data,
+        fuelPumps: normalizePumpList(fuelPumps ?? data.fuelPumps),
+      },
+      mraBusinessDetails
+    );
+    const saveData = mraProtected.values;
+    const resolvedFuelPumps = normalizePumpList(saveData.fuelPumps);
+    const businessData = buildLocalBusinessData(String(business.id), saveData);
 
     try {
       // Step 1: Save to local IndexedDB immediately
@@ -490,7 +775,7 @@ export default function BusinessSettingsPage() {
       localStorage.setItem(
         LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS,
         JSON.stringify({
-          ...data,
+          ...saveData,
           fuelPumps: resolvedFuelPumps,
         })
       );
@@ -499,25 +784,10 @@ export default function BusinessSettingsPage() {
       const isOnline = authFetch.getOnlineStatus();
       console.log('[DEBUG SETTINGS] Online status:', isOnline);
 
-      const backendPayload = {
-        name: data.businessName,
-        business_type: normalizeBusinessTypeForBackend(data.businessType),
-        email: data.email || '',
-        phone: data.phone || '',
-        address: data.address || '',
-        website: data.website || '',
-        // MRA EIS Fields
-        tin: data.tin || '',
-        vat_registration_number: data.vatRegistrationNumber || '',
-        vat_registered: data.vatRegistered,
-        mra_taxpayer_type: data.mraTaxpayerType,
-        mra_enrolled: data.mraEnrolled,
-        enable_eis: data.enableEis,
-        eis_environment: data.eisEnvironment,
-        block_sales_if_eis_down: data.blockSalesIfEisDown,
-        block_sales_if_tax_mapping_missing: data.blockSalesIfTaxMappingMissing,
-        fuel_pumps: resolvedFuelPumps,
-      };
+      const backendPayload = buildBackendBusinessPayload({
+        ...saveData,
+        fuelPumps: resolvedFuelPumps,
+      });
 
       console.log('[DEBUG SETTINGS] Attempting to sync to backend:', backendPayload);
       console.log('[DEBUG SETTINGS] Online status:', isOnline);
@@ -545,31 +815,31 @@ export default function BusinessSettingsPage() {
           const blockSalesValue = response.block_sales_if_eis_down !== false;
           const rawBlockTaxMapping = response.block_sales_if_tax_mapping_missing ?? response.blockSalesIfTaxMappingMissing;
           const blockTaxMappingValue = rawBlockTaxMapping === undefined
-            ? data.blockSalesIfTaxMappingMissing
+            ? saveData.blockSalesIfTaxMappingMissing
             : rawBlockTaxMapping !== false && rawBlockTaxMapping !== 'false';
-          
-            businessForm.reset({
-            businessName: response.name || data.businessName,
-            businessType: normalizeBusinessTypeForForm(response.business_type || data.businessType),
-            currency: response.settings?.currency || data.currency,
-            fiscalYearStartMonth: data.fiscalYearStartMonth || 1,
-            email: response.email || data.email,
-            phone: response.phone || data.phone,
-            address: response.address || data.address,
-            website: response.website || data.website,
-            tin: response.tin || response.tax_pin || response.taxPin || data.tin,
-            vatRegistrationNumber: response.vat_registration_number || data.vatRegistrationNumber,
+          const responseFormData: BusinessSettingsFormValues = {
+            businessName: response.name || saveData.businessName,
+            businessType: normalizeBusinessTypeForForm(response.business_type || saveData.businessType),
+            currency: response.settings?.currency || saveData.currency,
+            fiscalYearStartMonth: saveData.fiscalYearStartMonth || 1,
+            email: response.email || saveData.email,
+            phone: response.phone || saveData.phone,
+            address: response.address || saveData.address,
+            website: response.website || saveData.website,
+            tin: response.tin || response.tax_pin || response.taxPin || saveData.tin,
+            vatRegistrationNumber: response.vat_registration_number || saveData.vatRegistrationNumber,
             vatRegistered: response.vat_registered === true || response.vat_registered === 'true',
-            mraTaxpayerType: response.mra_taxpayer_type || data.mraTaxpayerType,
+            mraTaxpayerType: response.mra_taxpayer_type || saveData.mraTaxpayerType,
             mraEnrolled: response.mra_enrolled === true || response.mra_enrolled === 'true',
             enableEis: enableEisValue,
             eisEnvironment: eisEnvironmentValue,
             blockSalesIfEisDown: blockSalesValue,
             blockSalesIfTaxMappingMissing: blockTaxMappingValue,
             fuelPumps: normalizePumpList(
-              response.settings?.fuel_pumps ?? response.fuel_pumps ?? data.fuelPumps
+              response.settings?.fuel_pumps ?? response.fuel_pumps ?? saveData.fuelPumps
             ),
-          });
+          };
+          businessForm.reset(applyMraBusinessDetails(responseFormData, mraBusinessDetails).values);
           console.log('[DEBUG SETTINGS] Form reloaded with backend response values');
         }
 
@@ -653,12 +923,17 @@ export default function BusinessSettingsPage() {
                 <FormItem>
                   <FormLabel>Business Name</FormLabel>
                   <FormControl>
-                    <Input placeholder="Your business name" {...field} />
+                    <Input placeholder="Your business name" {...field} disabled={isMraLockedBusinessField('businessName')} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
               )}
             />
+            {mraBusinessFieldsLocked && (
+              <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm text-muted-foreground">
+                EIS is enabled, so taxpayer identity fields are locked to the latest synced MRA configuration.
+              </div>
+            )}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <FormField
                     control={businessForm.control}
@@ -667,7 +942,7 @@ export default function BusinessSettingsPage() {
                         <FormItem>
                             <FormLabel>Contact Email</FormLabel>
                             <FormControl>
-                                <Input type="email" placeholder="contact@mybusiness.com" {...field} />
+                                <Input type="email" placeholder="contact@mybusiness.com" {...field} disabled={isMraLockedBusinessField('email')} />
                             </FormControl>
                             <FormMessage />
                         </FormItem>
@@ -680,7 +955,7 @@ export default function BusinessSettingsPage() {
                         <FormItem>
                             <FormLabel>Contact Phone</FormLabel>
                             <FormControl>
-                                <Input placeholder="+1 (555) 123-4567" {...field} />
+                                <Input placeholder="+1 (555) 123-4567" {...field} disabled={isMraLockedBusinessField('phone')} />
                             </FormControl>
                             <FormMessage />
                         </FormItem>
@@ -694,7 +969,7 @@ export default function BusinessSettingsPage() {
                 <FormItem>
                   <FormLabel>Business TIN</FormLabel>
                   <FormControl>
-                    <Input placeholder="Taxpayer Identification Number" {...field} />
+                    <Input placeholder="Taxpayer Identification Number" {...field} disabled={isMraLockedBusinessField('tin')} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -707,7 +982,7 @@ export default function BusinessSettingsPage() {
                     <FormItem>
                         <FormLabel>Business Address</FormLabel>
                         <FormControl>
-                            <Textarea placeholder="123 Business Rd, Suite 100, Commerce City, 12345" {...field} />
+                            <Textarea placeholder="123 Business Rd, Suite 100, Commerce City, 12345" {...field} disabled={isMraLockedBusinessField('address')} />
                         </FormControl>
                         <FormMessage />
                     </FormItem>

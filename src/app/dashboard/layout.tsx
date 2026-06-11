@@ -2,7 +2,7 @@
 
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useCallback, useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
@@ -156,6 +156,134 @@ const getBranchIdCandidates = (branchId?: string | null): string[] => {
   return Array.from(candidates).filter((candidate) => candidate.length > 0);
 };
 
+const normalizeApiBranchId = (value?: unknown): string => toBackendBranchId(String(value || '').trim());
+
+const extractApiList = <T,>(payload: any): T[] => {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.results)) return payload.results;
+  if (Array.isArray(payload?.data)) return payload.data;
+  return [];
+};
+
+const getApiBranchId = (item: any): string => {
+  const rawBranch = item?.branch;
+  if (rawBranch && typeof rawBranch === 'object') {
+    return String(rawBranch.id ?? rawBranch.pk ?? rawBranch.branch_id ?? rawBranch.branchId ?? '').trim();
+  }
+  return String(rawBranch ?? item?.branch_id ?? item?.branchId ?? '').trim();
+};
+
+const getApiDeviceSerial = (item: any): string => {
+  return String(item?.device_serial ?? item?.deviceSerial ?? item?.mac_address ?? item?.macAddress ?? '').trim();
+};
+
+const parseStoredJson = <T,>(key: string): T | null => {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+};
+
+const readBooleanFlag = (value: unknown): boolean | null => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'enabled'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'disabled'].includes(normalized)) return false;
+  }
+  return null;
+};
+
+const resolveCachedEisEnabled = (businessId: string, business?: any): boolean | null => {
+  const storedBusiness =
+    parseStoredJson<any>('handy-pos-business') ??
+    parseStoredJson<any>('handypos-business') ??
+    null;
+  const storedSettings = parseStoredJson<any>('handypos-business-settings');
+
+  const settingsBusinessId = String(storedSettings?.businessId ?? storedSettings?.business_id ?? '').trim();
+  const settingsBelongToBusiness = !settingsBusinessId || settingsBusinessId === String(businessId);
+
+  const candidates = [
+    business?.enable_eis,
+    business?.enableEis,
+    storedBusiness?.enable_eis,
+    storedBusiness?.enableEis,
+    settingsBelongToBusiness ? storedSettings?.enableEis : undefined,
+    settingsBelongToBusiness ? storedSettings?.enable_eis : undefined,
+  ];
+
+  for (const value of candidates) {
+    const parsed = readBooleanFlag(value);
+    if (parsed !== null) return parsed;
+  }
+
+  return null;
+};
+
+const getTerminalStorageKeys = (businessId: string, branchId?: string | null): string[] => {
+  const keys = new Set<string>();
+  for (const candidate of getBranchIdCandidates(branchId)) {
+    keys.add(`handypos-terminal:${businessId}:${candidate}`);
+  }
+  return Array.from(keys);
+};
+
+const isActivatedTerminalForDevice = (
+  terminal: any,
+  normalizedBranchId: string,
+  currentDeviceSerial: string
+): boolean => {
+  if (!terminal || typeof terminal !== 'object') return false;
+  if (String(terminal.status || '').toLowerCase() !== 'active') return false;
+
+  const terminalDeviceSerial = getApiDeviceSerial(terminal).toLowerCase();
+  if (!terminalDeviceSerial || terminalDeviceSerial !== currentDeviceSerial.toLowerCase()) {
+    return false;
+  }
+
+  const terminalBranchId = normalizeApiBranchId(getApiBranchId(terminal));
+  return !terminalBranchId || terminalBranchId === normalizedBranchId;
+};
+
+const readCachedActivatedTerminal = (
+  businessId: string,
+  branchId: string,
+  currentDeviceSerial: string
+): any | null => {
+  if (typeof window === 'undefined') return null;
+
+  const normalizedBranchId = normalizeApiBranchId(branchId);
+  for (const key of getTerminalStorageKeys(businessId, branchId)) {
+    const terminal = parseStoredJson<any>(key);
+    if (isActivatedTerminalForDevice(terminal, normalizedBranchId, currentDeviceSerial)) {
+      return terminal;
+    }
+  }
+
+  return null;
+};
+
+const persistCachedTerminal = (businessId: string, branchId: string, terminal: any): void => {
+  if (typeof window === 'undefined' || !terminal) return;
+
+  for (const key of getTerminalStorageKeys(businessId, branchId)) {
+    try {
+      localStorage.setItem(key, JSON.stringify(terminal));
+    } catch (error) {
+      console.warn('[Dashboard] Failed to persist EIS terminal cache:', error);
+    }
+  }
+};
+
 // Helper to clear all failed order sync items
 const clearFailedOrders = () => {
   const SYNC_QUEUE_KEY = 'handypos-sync-queue';
@@ -198,6 +326,11 @@ import { plans } from '@/lib/subscriptions';
 import { cn } from '@/lib/utils';
 import { PosModal } from '@/components/pos/pos-modal';
 import { authFetch } from '@/lib/auth-fetch';
+import {
+  DEVICE_IDENTITY_CHANGED_EVENT,
+  ensureTauriDeviceIdentity,
+  getDeviceSerial,
+} from '@/lib/device-identity';
 
 import type { Permission } from '@/lib/rbac/permissions';
 import { hasPermission as checkPermission } from '@/lib/rbac/permissions';
@@ -206,6 +339,7 @@ const navItems = [
     { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', permission: 'view_dashboard' as Permission },
     { href: '/dashboard/pos', icon: MonitorPlay, label: 'POS', permission: 'access_pos' as Permission },
     { href: '/dashboard/sessions', icon: History, label: 'Sessions', permission: 'view_sessions' as Permission },
+    { href: '/dashboard/eis-sales', icon: FileText, label: 'EIS Sales', permission: 'view_sessions' as Permission },
     { href: '/dashboard/sales', icon: BarChart2, label: 'Reports', permission: 'view_reports' as Permission },
     { href: '/dashboard/expenses', icon: CreditCard, label: 'Expenses', permission: 'view_expenses' as Permission },
     { href: '/dashboard/inventory', icon: Boxes, label: 'Inventory', permission: 'view_inventory' as Permission },
@@ -217,6 +351,15 @@ const settingsNav = [
   { href: '/dashboard/settings', icon: Settings, label: 'Settings', permission: 'manage_settings' as Permission },
   { href: '/dashboard/audit', icon: UserCheck, label: 'Audit Log', permission: 'view_audit_log' as Permission },
 ];
+
+const EIS_ACTIVATION_PATH = '/dashboard/settings/eis';
+const EIS_TERMINAL_ACTIVATION_CHANGED_EVENT = 'handypos-eis-terminal-activation-changed';
+
+type EisActivationGateState = {
+  checking: boolean;
+  required: boolean;
+  reason: string;
+};
 
 const profileSchema = z.object({
   displayName: z.string().min(2, 'Display name must be at least 2 characters.'),
@@ -1430,11 +1573,72 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const { user, loading, logout } = useAuth();
+  const { user, loading, logout, business } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
+  const { toast } = useToast();
   const [isPosModalOpen, setIsPosModalOpen] = useState(false);
   const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
+  const [eisActivationGate, setEisActivationGate] = useState<EisActivationGateState>({
+    checking: false,
+    required: false,
+    reason: '',
+  });
+  const [activationGateRefreshKey, setActivationGateRefreshKey] = useState(0);
+  const startupConfigEnsureRef = React.useRef<Record<string, number>>({});
+  const activationGateToastRef = React.useRef('');
+  const isEisActivationPath = pathname.startsWith(EIS_ACTIVATION_PATH);
+  const canManageEisActivation = user ? checkPermission(user.role, 'manage_settings') : false;
+  const activationRequiredUrl = useMemo(() => {
+    const normalizedBranchId = normalizeApiBranchId(activeBranchId || '');
+    const params = new URLSearchParams({ activationRequired: '1' });
+    if (normalizedBranchId) {
+      params.set('branch', normalizedBranchId);
+    }
+    return `${EIS_ACTIVATION_PATH}?${params.toString()}`;
+  }, [activeBranchId]);
+
+  const forceEisActivation = useCallback((reason?: string) => {
+    const message = reason || eisActivationGate.reason || 'Activate this device as an MRA EIS terminal before using this business.';
+    const description = canManageEisActivation
+      ? message
+      : `${message} Ask an admin or manager to activate this terminal.`;
+    const toastKey = `${activationRequiredUrl}:${message}`;
+    if (activationGateToastRef.current !== toastKey) {
+      activationGateToastRef.current = toastKey;
+      toast({
+        variant: 'destructive',
+        title: 'EIS terminal activation required',
+        description,
+      });
+    }
+    setIsPosModalOpen(false);
+    if (!canManageEisActivation) {
+      if (isEisActivationPath) {
+        router.replace('/dashboard/pos');
+      }
+      return;
+    }
+    if (!isEisActivationPath) {
+      router.replace(activationRequiredUrl);
+    }
+  }, [activationRequiredUrl, canManageEisActivation, eisActivationGate.reason, isEisActivationPath, router, toast]);
+
+  const handleOpenPos = useCallback(() => {
+    if (eisActivationGate.required) {
+      forceEisActivation();
+      return;
+    }
+    setIsPosModalOpen(true);
+  }, [eisActivationGate.required, forceEisActivation]);
+
+  const handlePosModalOpenChange = useCallback((open: boolean) => {
+    if (open && eisActivationGate.required) {
+      forceEisActivation();
+      return;
+    }
+    setIsPosModalOpen(open);
+  }, [eisActivationGate.required, forceEisActivation]);
 
   useEffect(() => {
     if (loading) return;
@@ -1481,17 +1685,280 @@ export default function DashboardLayout({
   }, [user]);
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-        const branchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
-        setActiveBranchId(branchId);
+    if (typeof window === 'undefined') {
+      return;
     }
+
+    const syncActiveBranch = (nextBranchId?: string | null) => {
+      const branchId = nextBranchId ?? localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
+      setActiveBranchId(branchId ? String(branchId) : null);
+    };
+
+    const handleBranchChanged = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      const nextBranchId = customEvent.detail?.branchId;
+      syncActiveBranch(nextBranchId ? String(nextBranchId) : null);
+    };
+
+    const handleBranchesUpdated = () => syncActiveBranch();
+
+    syncActiveBranch();
+    window.addEventListener('branchChanged', handleBranchChanged);
+    window.addEventListener('branchesUpdated', handleBranchesUpdated);
+
+    return () => {
+      window.removeEventListener('branchChanged', handleBranchChanged);
+      window.removeEventListener('branchesUpdated', handleBranchesUpdated);
+    };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const refreshActivationGate = () => {
+      setActivationGateRefreshKey((value) => value + 1);
+    };
+
+    void ensureTauriDeviceIdentity().finally(refreshActivationGate);
+    window.addEventListener(EIS_TERMINAL_ACTIVATION_CHANGED_EVENT, refreshActivationGate);
+    window.addEventListener(DEVICE_IDENTITY_CHANGED_EVENT, refreshActivationGate);
+    return () => {
+      window.removeEventListener(EIS_TERMINAL_ACTIVATION_CHANGED_EVENT, refreshActivationGate);
+      window.removeEventListener(DEVICE_IDENTITY_CHANGED_EVENT, refreshActivationGate);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (loading || !user || !business?.id || !activeBranchId) {
+      setEisActivationGate({ checking: false, required: false, reason: '' });
+      return;
+    }
+
+    const businessId = String(business.id).trim();
+    const normalizedBranchId = normalizeApiBranchId(activeBranchId);
+    if (!businessId || !normalizedBranchId) {
+      setEisActivationGate({ checking: false, required: false, reason: '' });
+      return;
+    }
+
+    let cancelled = false;
+
+    const failGate = (reason: string) => {
+      if (cancelled) return;
+      setEisActivationGate({ checking: false, required: true, reason });
+    };
+
+    const passGate = () => {
+      if (cancelled) return;
+      setEisActivationGate({ checking: false, required: false, reason: '' });
+    };
+
+    const verifyDeviceTerminalActivation = async () => {
+      setEisActivationGate((previous) => ({
+        ...previous,
+        checking: true,
+      }));
+
+      let eisEnabled = resolveCachedEisEnabled(businessId, business);
+      try {
+        const backendBusiness = await authFetch.fetch<any>(`/business/businesses/${businessId}/`);
+        const backendEnabled = readBooleanFlag(backendBusiness?.enable_eis ?? backendBusiness?.enableEis);
+        if (backendEnabled !== null) {
+          eisEnabled = backendEnabled;
+        }
+      } catch (error) {
+        console.warn('[Dashboard] Could not confirm backend EIS status for terminal activation gate:', error);
+      }
+
+      if (!eisEnabled) {
+        passGate();
+        return;
+      }
+
+      const currentDeviceSerial = getDeviceSerial();
+      if (!currentDeviceSerial) {
+        failGate('This device has no local device serial. Restart the app and activate the terminal before issuing EIS receipts.');
+        return;
+      }
+      const cachedActivatedTerminal = readCachedActivatedTerminal(
+        businessId,
+        activeBranchId,
+        currentDeviceSerial
+      );
+
+      try {
+        const terminalsResponse = await authFetch.fetch<any>('/mra-eis/terminals/');
+        const terminals = extractApiList<any>(terminalsResponse);
+        const matchingTerminal = terminals.find((terminal) => {
+          const sameBranch = normalizeApiBranchId(getApiBranchId(terminal)) === normalizedBranchId;
+          const isActive = String(terminal?.status || '').toLowerCase() === 'active';
+          const terminalDeviceSerial = getApiDeviceSerial(terminal);
+          return (
+            sameBranch &&
+            isActive &&
+            terminalDeviceSerial.toLowerCase() === currentDeviceSerial.toLowerCase()
+          );
+        });
+
+        if (matchingTerminal) {
+          persistCachedTerminal(businessId, activeBranchId, matchingTerminal);
+          passGate();
+          return;
+        }
+
+        failGate('MRA EIS is enabled, but this device is not activated as an active terminal for the selected branch. Enter a TAC to activate this device before using POS.');
+      } catch (error: any) {
+        console.error('[Dashboard] Failed to verify EIS terminal activation:', error);
+        if (cachedActivatedTerminal) {
+          console.warn('[Dashboard] Using cached EIS terminal activation because backend verification is unavailable.');
+          passGate();
+          return;
+        }
+        failGate(error?.message || "Could not verify this device's MRA terminal activation. Connect to the backend and activate this device before using POS.");
+      }
+    };
+
+    void verifyDeviceTerminalActivation();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeBranchId, activationGateRefreshKey, business, business?.id, loading, user]);
+
+  useEffect(() => {
+    if (!eisActivationGate.required) {
+      return;
+    }
+    forceEisActivation(eisActivationGate.reason);
+  }, [eisActivationGate.required, eisActivationGate.reason, forceEisActivation]);
+
+  useEffect(() => {
+    if (loading || !user || !business?.id || !activeBranchId) {
+      return;
+    }
+
+    const normalizedBranchId = normalizeApiBranchId(activeBranchId);
+    const businessId = String(business.id).trim();
+    if (!normalizedBranchId || !businessId) {
+      return;
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const sessionKey = `handypos-mra-config-startup-check:${businessId}:${normalizedBranchId}:${today}`;
+    if (sessionStorage.getItem(sessionKey)) {
+      return;
+    }
+
+    const refKey = `${businessId}:${normalizedBranchId}`;
+    const now = Date.now();
+    const lastAttemptAt = startupConfigEnsureRef.current[refKey] || 0;
+    if (now - lastAttemptAt < 5 * 60 * 1000) {
+      return;
+    }
+    startupConfigEnsureRef.current[refKey] = now;
+
+    let cancelled = false;
+
+    const ensureFreshConfigAtStartup = async () => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        console.log('[Dashboard] Offline - skipping startup MRA config check.');
+        return;
+      }
+
+      try {
+        let eisEnabled = resolveCachedEisEnabled(businessId, business);
+        try {
+          const backendBusiness = await authFetch.fetch<any>(`/business/businesses/${businessId}/`);
+          const backendEnabled = readBooleanFlag(backendBusiness?.enable_eis ?? backendBusiness?.enableEis);
+          if (backendEnabled !== null) {
+            eisEnabled = backendEnabled;
+          }
+        } catch (businessError) {
+          console.warn('[Dashboard] Could not confirm backend EIS status for startup config check:', businessError);
+        }
+
+        if (!eisEnabled) {
+          return;
+        }
+
+        let terminalId = '';
+        try {
+          const terminalsResponse = await authFetch.fetch<any>('/mra-eis/terminals/');
+          const terminals = extractApiList<any>(terminalsResponse);
+          const matchingTerminal = terminals.find(
+            (item) => normalizeApiBranchId(getApiBranchId(item)) === normalizedBranchId
+          );
+          terminalId = String(matchingTerminal?.id || '').trim();
+        } catch (terminalError) {
+          console.warn('[Dashboard] Could not resolve MRA terminal for startup config check:', terminalError);
+        }
+
+        const params = new URLSearchParams({ business_id: businessId });
+        if (terminalId) {
+          params.set('terminal_id', terminalId);
+        }
+
+        const response = await authFetch.fetch<any>(
+          `/mra-eis/configurations/ensure_fresh/?${params.toString()}`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ require_success: false, startup_check: true }),
+          }
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        sessionStorage.setItem(sessionKey, new Date().toISOString());
+
+        if (response?.fresh === false && response?.error) {
+          toast({
+            variant: 'destructive',
+            title: 'MRA config refresh failed',
+            description: String(response.error),
+          });
+        } else if (response?.refreshed) {
+          toast({
+            title: 'New MRA configs downloaded',
+            description: 'Startup EIS config check downloaded the latest taxpayer, terminal, product, and tax settings.',
+          });
+        }
+      } catch (error: any) {
+        if (cancelled) {
+          return;
+        }
+        console.error('[Dashboard] Startup MRA config check failed:', error);
+        toast({
+          variant: 'destructive',
+          title: 'MRA config refresh failed',
+          description: error?.message || 'Could not check latest EIS configurations at startup.',
+        });
+      }
+    };
+
+    void ensureFreshConfigAtStartup();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeBranchId, business, business?.id, loading, toast, user]);
 
   useEffect(() => {
     if (user) {
         const accessibleRoutes = [...navItems, ...settingsNav]
             .filter(item => checkPermission(user.role, item.permission))
             .map(item => item.href);
+
+        if (isEisActivationPath) {
+            if (!checkPermission(user.role, 'manage_settings')) {
+                const roleStr = (user.role ?? 'Admin').toLowerCase();
+                router.replace(roleStr === 'cashier' || roleStr === 'waiter' ? '/dashboard/pos' : '/dashboard');
+            }
+            return;
+        }
         
         // Allow access to the base dashboard page
         if (pathname === '/dashboard') return;
@@ -1507,7 +1974,7 @@ export default function DashboardLayout({
             }
         }
     }
-  }, [user, pathname, router]);
+  }, [isEisActivationPath, user, pathname, router]);
 
   if (loading || !user) {
     return (
@@ -1517,14 +1984,28 @@ export default function DashboardLayout({
     );
   }
 
+  if (eisActivationGate.checking && !isEisActivationPath) {
+    return (
+      <div className="flex h-screen items-center justify-center">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          <div>
+            <p className="text-sm font-medium">Checking EIS terminal activation</p>
+            <p className="text-xs text-muted-foreground">This device must be activated before fiscal sales.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <SidebarProvider>
       <div className="flex h-screen w-full">
         <Sidebar className="hidden lg:flex lg:flex-col">
-           <AppSidebar user={user} onPosClick={() => setIsPosModalOpen(true)} />
+           <AppSidebar user={user} onPosClick={handleOpenPos} />
         </Sidebar>
         <div className="flex-1 flex flex-col overflow-y-auto">
-          <Header onPosClick={() => setIsPosModalOpen(true)} />
+          <Header onPosClick={handleOpenPos} />
           <main className="flex-1 w-full bg-background/95">
             <div className="mx-auto flex h-full w-full max-w-[1540px] flex-col px-4 py-4 sm:px-6 lg:px-8 xl:py-6 2xl:px-10">
               {children}
@@ -1536,7 +2017,7 @@ export default function DashboardLayout({
         <PosModal
           branchId={activeBranchId}
           isOpen={isPosModalOpen}
-          onOpenChange={setIsPosModalOpen}
+          onOpenChange={handlePosModalOpenChange}
         />
       )}
       <ThemeCustomizer />

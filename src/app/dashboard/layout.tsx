@@ -215,10 +215,16 @@ const resolveCachedEisEnabled = (businessId: string, business?: any): boolean | 
   const candidates = [
     business?.enable_eis,
     business?.enableEis,
+    business?.eis_enabled,
+    business?.eisEnabled,
     storedBusiness?.enable_eis,
     storedBusiness?.enableEis,
+    storedBusiness?.eis_enabled,
+    storedBusiness?.eisEnabled,
     settingsBelongToBusiness ? storedSettings?.enableEis : undefined,
     settingsBelongToBusiness ? storedSettings?.enable_eis : undefined,
+    settingsBelongToBusiness ? storedSettings?.eis_enabled : undefined,
+    settingsBelongToBusiness ? storedSettings?.eisEnabled : undefined,
   ];
 
   for (const value of candidates) {
@@ -325,6 +331,7 @@ import { db, type Subscription, type InventoryItem, type PurchaseRecord } from '
 import { plans } from '@/lib/subscriptions';
 import { cn } from '@/lib/utils';
 import { PosModal } from '@/components/pos/pos-modal';
+import { TerminalActivationDialog } from '@/components/mra-eis/terminal-activation-dialog';
 import { authFetch } from '@/lib/auth-fetch';
 import {
   DEVICE_IDENTITY_CHANGED_EVENT,
@@ -354,6 +361,7 @@ const settingsNav = [
 
 const EIS_ACTIVATION_PATH = '/dashboard/settings/eis';
 const EIS_TERMINAL_ACTIVATION_CHANGED_EVENT = 'handypos-eis-terminal-activation-changed';
+const EIS_TERMINAL_ACTIVATION_REQUESTED_EVENT = 'handypos-eis-terminal-activation-requested';
 
 type EisActivationGateState = {
   checking: boolean;
@@ -1578,6 +1586,7 @@ export default function DashboardLayout({
   const pathname = usePathname();
   const { toast } = useToast();
   const [isPosModalOpen, setIsPosModalOpen] = useState(false);
+  const [isEisActivationDialogOpen, setIsEisActivationDialogOpen] = useState(false);
   const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
   const [eisActivationGate, setEisActivationGate] = useState<EisActivationGateState>({
     checking: false,
@@ -1588,41 +1597,21 @@ export default function DashboardLayout({
   const startupConfigEnsureRef = React.useRef<Record<string, number>>({});
   const activationGateToastRef = React.useRef('');
   const isEisActivationPath = pathname.startsWith(EIS_ACTIVATION_PATH);
-  const canManageEisActivation = user ? checkPermission(user.role, 'manage_settings') : false;
-  const activationRequiredUrl = useMemo(() => {
-    const normalizedBranchId = normalizeApiBranchId(activeBranchId || '');
-    const params = new URLSearchParams({ activationRequired: '1' });
-    if (normalizedBranchId) {
-      params.set('branch', normalizedBranchId);
-    }
-    return `${EIS_ACTIVATION_PATH}?${params.toString()}`;
-  }, [activeBranchId]);
 
   const forceEisActivation = useCallback((reason?: string) => {
-    const message = reason || eisActivationGate.reason || 'Activate this device as an MRA EIS terminal before using this business.';
-    const description = canManageEisActivation
-      ? message
-      : `${message} Ask an admin or manager to activate this terminal.`;
-    const toastKey = `${activationRequiredUrl}:${message}`;
+    const message = reason || eisActivationGate.reason || 'Activate this device as an MRA EIS terminal before fiscal actions can be submitted.';
+    const toastKey = `${activeBranchId || ''}:${message}`;
     if (activationGateToastRef.current !== toastKey) {
       activationGateToastRef.current = toastKey;
       toast({
         variant: 'destructive',
         title: 'EIS terminal activation required',
-        description,
+        description: message,
       });
     }
     setIsPosModalOpen(false);
-    if (!canManageEisActivation) {
-      if (isEisActivationPath) {
-        router.replace('/dashboard/pos');
-      }
-      return;
-    }
-    if (!isEisActivationPath) {
-      router.replace(activationRequiredUrl);
-    }
-  }, [activationRequiredUrl, canManageEisActivation, eisActivationGate.reason, isEisActivationPath, router, toast]);
+    setIsEisActivationDialogOpen(true);
+  }, [activeBranchId, eisActivationGate.reason, toast]);
 
   const handleOpenPos = useCallback(() => {
     if (eisActivationGate.required) {
@@ -1639,6 +1628,12 @@ export default function DashboardLayout({
     }
     setIsPosModalOpen(open);
   }, [eisActivationGate.required, forceEisActivation]);
+
+  useEffect(() => {
+    if (isPosModalOpen && eisActivationGate.required) {
+      forceEisActivation(eisActivationGate.reason);
+    }
+  }, [eisActivationGate.required, eisActivationGate.reason, forceEisActivation, isPosModalOpen]);
 
   useEffect(() => {
     if (loading) return;
@@ -1717,6 +1712,28 @@ export default function DashboardLayout({
       return;
     }
 
+    const handleActivationRequested = (event: Event) => {
+      const customEvent = event as CustomEvent<{ reason?: string }>;
+      const reason = customEvent.detail?.reason || 'Activate this device before submitting MRA EIS fiscal actions.';
+      setEisActivationGate((previous) => ({
+        ...previous,
+        required: true,
+        reason,
+      }));
+      forceEisActivation(reason);
+    };
+
+    window.addEventListener(EIS_TERMINAL_ACTIVATION_REQUESTED_EVENT, handleActivationRequested);
+    return () => {
+      window.removeEventListener(EIS_TERMINAL_ACTIVATION_REQUESTED_EVENT, handleActivationRequested);
+    };
+  }, [forceEisActivation]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
     const refreshActivationGate = () => {
       setActivationGateRefreshKey((value) => value + 1);
     };
@@ -1764,7 +1781,12 @@ export default function DashboardLayout({
       let eisEnabled = resolveCachedEisEnabled(businessId, business);
       try {
         const backendBusiness = await authFetch.fetch<any>(`/business/businesses/${businessId}/`);
-        const backendEnabled = readBooleanFlag(backendBusiness?.enable_eis ?? backendBusiness?.enableEis);
+        const backendEnabled = readBooleanFlag(
+          backendBusiness?.enable_eis ??
+          backendBusiness?.enableEis ??
+          backendBusiness?.eis_enabled ??
+          backendBusiness?.eisEnabled
+        );
         if (backendEnabled !== null) {
           eisEnabled = backendEnabled;
         }
@@ -1828,13 +1850,6 @@ export default function DashboardLayout({
   }, [activeBranchId, activationGateRefreshKey, business, business?.id, loading, user]);
 
   useEffect(() => {
-    if (!eisActivationGate.required) {
-      return;
-    }
-    forceEisActivation(eisActivationGate.reason);
-  }, [eisActivationGate.required, eisActivationGate.reason, forceEisActivation]);
-
-  useEffect(() => {
     if (loading || !user || !business?.id || !activeBranchId) {
       return;
     }
@@ -1871,7 +1886,12 @@ export default function DashboardLayout({
         let eisEnabled = resolveCachedEisEnabled(businessId, business);
         try {
           const backendBusiness = await authFetch.fetch<any>(`/business/businesses/${businessId}/`);
-          const backendEnabled = readBooleanFlag(backendBusiness?.enable_eis ?? backendBusiness?.enableEis);
+          const backendEnabled = readBooleanFlag(
+            backendBusiness?.enable_eis ??
+            backendBusiness?.enableEis ??
+            backendBusiness?.eis_enabled ??
+            backendBusiness?.eisEnabled
+          );
           if (backendEnabled !== null) {
             eisEnabled = backendEnabled;
           }
@@ -1976,25 +1996,27 @@ export default function DashboardLayout({
     }
   }, [isEisActivationPath, user, pathname, router]);
 
+  const handleTerminalActivated = useCallback((terminalResponse: any) => {
+    const terminal = terminalResponse?.terminal && typeof terminalResponse.terminal === 'object'
+      ? { ...terminalResponse.terminal, ...terminalResponse }
+      : terminalResponse;
+
+    if (business?.id && activeBranchId && terminal) {
+      persistCachedTerminal(String(business.id), activeBranchId, terminal);
+    }
+
+    const isActive = String(terminal?.status || '').toLowerCase() === 'active';
+    if (isActive) {
+      setEisActivationGate({ checking: false, required: false, reason: '' });
+    }
+    setActivationGateRefreshKey((value) => value + 1);
+  }, [activeBranchId, business?.id]);
+
   if (loading || !user) {
     return (
         <div className="flex h-screen items-center justify-center">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
-    );
-  }
-
-  if (eisActivationGate.checking && !isEisActivationPath) {
-    return (
-      <div className="flex h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-3 text-center">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-          <div>
-            <p className="text-sm font-medium">Checking EIS terminal activation</p>
-            <p className="text-xs text-muted-foreground">This device must be activated before fiscal sales.</p>
-          </div>
-        </div>
-      </div>
     );
   }
 
@@ -2008,6 +2030,29 @@ export default function DashboardLayout({
           <Header onPosClick={handleOpenPos} />
           <main className="flex-1 w-full bg-background/95">
             <div className="mx-auto flex h-full w-full max-w-[1540px] flex-col px-4 py-4 sm:px-6 lg:px-8 xl:py-6 2xl:px-10">
+              {eisActivationGate.required && (
+                <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-amber-950 dark:text-amber-200">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0" />
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold">This device is not activated for MRA EIS fiscal actions</p>
+                        <p className="mt-1 text-sm">
+                          {eisActivationGate.reason || 'Management screens remain available. Activate this device before making EIS sales or submitting fiscal documents.'}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      className="w-full sm:w-auto"
+                      onClick={() => setIsEisActivationDialogOpen(true)}
+                    >
+                      <Zap className="mr-2 h-4 w-4" />
+                      Activate Now
+                    </Button>
+                  </div>
+                </div>
+              )}
               {children}
             </div>
           </main>
@@ -2020,6 +2065,14 @@ export default function DashboardLayout({
           onOpenChange={handlePosModalOpenChange}
         />
       )}
+      <TerminalActivationDialog
+        open={isEisActivationDialogOpen}
+        onOpenChange={setIsEisActivationDialogOpen}
+        businessId={business?.id}
+        branchId={activeBranchId}
+        reason={eisActivationGate.reason}
+        onActivated={handleTerminalActivated}
+      />
       <ThemeCustomizer />
     </SidebarProvider>
   );

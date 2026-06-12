@@ -2,14 +2,30 @@ name: Android Tauri Build
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/android-tauri-build.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "next.config.js"
+      - "scripts/**"
+      - "src/**"
+      - "src-tauri/**"
+
+permissions:
+  contents: read
 
 jobs:
   build-android:
     runs-on: ubuntu-latest
     env:
-      NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
-      NEXT_PUBLIC_API_BASE_URL: ${{ secrets.NEXT_PUBLIC_API_BASE_URL }}
-      NEXT_PUBLIC_DJANGO_URL: ${{ secrets.NEXT_PUBLIC_DJANGO_URL }}
+      NEXT_PUBLIC_APP_ENV: desktop
+      NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
+      NEXT_PUBLIC_API_BASE_URL: ${{ vars.NEXT_PUBLIC_API_BASE_URL }}
+      NEXT_PUBLIC_DJANGO_URL: ${{ vars.NEXT_PUBLIC_DJANGO_URL }}
 
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -26,7 +42,7 @@ jobs:
           cache: npm
 
       - name: Setup Java
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -45,7 +61,7 @@ jobs:
 
       - name: Install Android SDK/NDK packages
         run: |
-          sdkmanager --licenses
+          yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" "ndk;26.1.10909125"
 
       - name: Configure Android SDK/NDK
@@ -64,6 +80,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Show build configuration
+        run: |
+          node --version
+          npm --version
+          rustc --version
+          cargo --version
+          echo "NEXT_PUBLIC_APP_ENV=$NEXT_PUBLIC_APP_ENV"
+          echo "NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL"
+
       - name: Initialize Android project
         run: npm run tauri:android:init
 
@@ -77,7 +102,9 @@ jobs:
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-artifacts
+          name: handy-pos-android-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 14
           path: |
             src-tauri/gen/android/app/build/outputs/apk/**/*.apk
             src-tauri/gen/android/app/build/outputs/bundle/**/*.aab

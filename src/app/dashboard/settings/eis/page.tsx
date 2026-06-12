@@ -1128,6 +1128,7 @@ export default function EISSettingsPage() {
 
   const activeBranchId = terminalForm.watch('activeBranch');
   const isEisEnabled = eisForm.watch('enableEis');
+  const activationUiEnabled = isEisEnabled || activationRequired;
   const tinValue = eisForm.watch('tin');
   const currentDeviceSerial = useMemo(
     () => (typeof window === 'undefined' ? '' : getDeviceSerial()),
@@ -1327,7 +1328,12 @@ export default function EISSettingsPage() {
           const backendBusiness = await authFetch.fetch<any>(`/business/businesses/${business.id}/`);
           
           if (backendBusiness) {
-            const enableEisValue = backendBusiness.enable_eis === true || backendBusiness.enable_eis === 'true';
+            const rawEnableEis =
+              backendBusiness.enable_eis ??
+              backendBusiness.enableEis ??
+              backendBusiness.eis_enabled ??
+              backendBusiness.eisEnabled;
+            const enableEisValue = readBooleanFlag(rawEnableEis) ?? activationRequired;
             const vatRegisteredValue = backendBusiness.vat_registered === true || backendBusiness.vat_registered === 'true';
             const mraEnrolledValue = backendBusiness.mra_enrolled === true || backendBusiness.mra_enrolled === 'true';
             const blockSalesValue = backendBusiness.block_sales_if_eis_down !== false && backendBusiness.block_sales_if_eis_down !== 'false';
@@ -1350,11 +1356,14 @@ export default function EISSettingsPage() {
           }
         } catch (error) {
           console.error('Error loading EIS settings:', error);
+          if (activationRequired) {
+            eisForm.setValue('enableEis', true, { shouldValidate: true });
+          }
         }
       };
       loadSettings();
     }
-  }, [business?.id, eisForm]);
+  }, [activationRequired, business?.id, eisForm]);
 
   // Load branches
   useEffect(() => {
@@ -1410,13 +1419,13 @@ export default function EISSettingsPage() {
   }, [business?.id, activeBranchId, loadTerminalForBranch, ACTIVE_BRANCH_STORAGE_KEY]);
 
   useEffect(() => {
-    if (!business?.id || !isEisEnabled) {
+    if (!business?.id || !activationUiEnabled) {
       setConfigurationStatus(createDefaultConfigurationStatus());
       setSyncedConfigurations([]);
       return;
     }
     loadConfigurationStatus();
-  }, [business?.id, isEisEnabled, terminal?.id, terminal?.status, loadConfigurationStatus]);
+  }, [activationUiEnabled, business?.id, terminal?.id, terminal?.status, loadConfigurationStatus]);
 
   const onEISSetupSubmit = async (data: EISSetupFormValues) => {
     if (!business?.id) {
@@ -2801,12 +2810,12 @@ export default function EISSettingsPage() {
       </Dialog>
 
       <Tabs defaultValue={activationRequired ? 'terminal' : 'setup'} className="space-y-4">
-        <TabsList className={`grid h-auto w-full gap-2 ${isEisEnabled ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-1'}`}>
+        <TabsList className={`grid h-auto w-full gap-2 ${activationUiEnabled ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-1'}`}>
           <TabsTrigger value="setup" className="gap-2">
             <Settings className="h-4 w-4" />
             Setup
           </TabsTrigger>
-          {isEisEnabled && (
+          {activationUiEnabled && (
             <>
               <TabsTrigger value="terminal" className="gap-2">
                 <Terminal className="h-4 w-4" />
@@ -2853,7 +2862,7 @@ export default function EISSettingsPage() {
                     control={eisForm.control}
                     name="enableEis"
                     render={({ field }) => {
-                      const isEisEnabled = field.value;
+                      const isEisEnabled = field.value || activationRequired;
                       
                       if (isEisEnabled) {
                         // Once enabled, show locked status instead of checkbox
@@ -2900,7 +2909,7 @@ export default function EISSettingsPage() {
                 </div>
 
                 {/* Taxpayer Information - Only if enabled */}
-                {eisForm.watch('enableEis') && (
+                {activationUiEnabled && (
                   <div className="p-4 rounded-lg border border-border space-y-4">
                     <h3 className="font-semibold text-sm flex items-center gap-2">
                       <FileText className="h-4 w-4" />
@@ -2945,7 +2954,7 @@ export default function EISSettingsPage() {
                   </div>
                 )}
 
-                {eisForm.watch('enableEis') && (
+                {activationUiEnabled && (
                   <details className="rounded-lg border border-border bg-muted/20 p-4">
                     <summary className="cursor-pointer text-sm font-semibold">Advanced POS rules</summary>
                     <div className="mt-4 space-y-3">
@@ -2993,7 +3002,7 @@ export default function EISSettingsPage() {
                   </details>
                 )}
 
-                {!eisForm.watch('enableEis') && (
+                {!activationUiEnabled && (
                   <div className="p-3 rounded border border-border text-sm text-muted-foreground">
                     Enable MRA EIS above to configure tax compliance settings.
                   </div>
@@ -3008,7 +3017,7 @@ export default function EISSettingsPage() {
         </TabsContent>
 
         {/* Section 2: Terminal Activation */}
-        {isEisEnabled && (
+        {activationUiEnabled && (
           <TabsContent value="terminal" className="space-y-4">
             <Card>
           <CardHeader 
@@ -3502,7 +3511,7 @@ export default function EISSettingsPage() {
         )}
 
         {/* Section 3: Configuration Management */}
-        {isEisEnabled && (
+        {activationUiEnabled && (
           <TabsContent value="configuration" className="space-y-4">
             <Card>
           <CardHeader 
@@ -3663,7 +3672,7 @@ export default function EISSettingsPage() {
         )}
 
         {/* Section 4: Product Mapping */}
-        {isEisEnabled && (
+        {activationUiEnabled && (
           <TabsContent value="products" className="space-y-4">
             <Card>
           <CardHeader 
@@ -3912,7 +3921,7 @@ export default function EISSettingsPage() {
       </Tabs>
 
       {/* Info Box */}
-      {!isEisEnabled && (
+      {!activationUiEnabled && (
         <Card className="border-sky-500/30 bg-sky-500/10">
           <CardContent className="pt-6">
             <div className="flex items-start gap-3">

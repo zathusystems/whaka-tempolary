@@ -721,7 +721,7 @@ const PaymentDialog = ({
     eisEnabled,
     blockSalesIfTaxMappingMissing,
     isEisInvoiceSubmissionBlocked = false,
-    eisInvoiceSubmissionBlockedMessage = 'Could not reach the POS server. Connect to working internet before completing the sale so the EIS invoice can be submitted to MRA.',
+    eisInvoiceSubmissionBlockedMessage = 'Could not reach the POS server. Connect to working internet before completing the sale.',
     branchId,
     onConfigurePrinter,
 }: {
@@ -762,7 +762,7 @@ const PaymentDialog = ({
     const [productTaxMappings, setProductTaxMappings] = useState<Record<string, ProductTaxMappingDetail>>({});
     const [unmappedProducts, setUnmappedProducts] = useState<string[]>([]);
     const [isProcessingPayment, setIsProcessingPayment] = useState(false);
-    const { isReachable: isBrowserOnline } = useBackendReachability({ intervalMs: 10000 });
+    const { isReachable: isBackendReachable } = useBackendReachability({ intervalMs: 10000 });
     const shouldUseEisTaxMappings = Boolean(eisEnabled);
     const shouldEnforceTaxMapping = shouldUseEisTaxMappings && blockSalesIfTaxMappingMissing === true;
     const defaultTaxRateDecimal = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
@@ -776,16 +776,16 @@ const PaymentDialog = ({
     );
     const mappingRefreshAttemptedRef = useRef(false);
     const mappingItemFetchAttemptedRef = useRef(false);
-    const saleConnectivityLabel = shouldUseEisTaxMappings
-        ? (isBrowserOnline ? 'EIS Online' : 'EIS Offline')
-        : (isBrowserOnline ? 'Online' : 'Offline');
-    const saleConnectivityDescription = shouldUseEisTaxMappings
-        ? (isBrowserOnline
+    const saleConnectivityLabel = isEisInvoiceSubmissionBlocked
+        ? 'Server Unavailable'
+        : shouldUseEisTaxMappings
+            ? 'EIS Online'
+            : 'Online';
+    const saleConnectivityDescription = isEisInvoiceSubmissionBlocked
+        ? eisInvoiceSubmissionBlockedMessage
+        : shouldUseEisTaxMappings
             ? 'Sale will be submitted to MRA EIS immediately.'
-            : 'EIS sale is blocked until the POS server can be reached.')
-        : (isBrowserOnline
-            ? 'Sale can sync to the backend now.'
-            : 'Sale will be saved locally and synced when internet returns.');
+            : 'Sale will be submitted to the POS server immediately.';
     const taxMethodSummary = useMemo(() => {
         const methods = new Set<'inclusive' | 'exclusive'>();
         Object.values(productTaxMappings).forEach((mapping) => {
@@ -1410,7 +1410,7 @@ const PaymentDialog = ({
         if (isEisInvoiceSubmissionBlocked) {
             toast({
                 variant: 'destructive',
-                title: 'Connection required for EIS invoice',
+                title: 'Connection required for sale',
                 description: eisInvoiceSubmissionBlockedMessage,
             });
             return;
@@ -2455,7 +2455,7 @@ export const GenericPos = ({
   eisEnabled = false,
   blockSalesIfTaxMappingMissing = false,
   isEisInvoiceSubmissionBlocked = false,
-  eisInvoiceSubmissionBlockedMessage = 'Could not reach the POS server. Connect to working internet before completing the sale so the EIS invoice can be submitted to MRA.',
+  eisInvoiceSubmissionBlockedMessage = 'Could not reach the POS server. Connect to working internet before completing the sale.',
   branchId,
 }: PosProps) => {
   const [isPaymentDialogOpen, setPaymentDialogOpen] = useState(false);

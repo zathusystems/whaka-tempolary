@@ -14,6 +14,11 @@ export type BackendReachability = {
   error: string | null;
 };
 
+export type BackendConnectionIssue = {
+  title: string;
+  description: string;
+};
+
 let snapshot: BackendReachability = {
   isReachable: typeof navigator === 'undefined' ? true : navigator.onLine !== false,
   isChecking: false,
@@ -69,6 +74,31 @@ const ensureConnectivityListeners = () => {
 };
 
 export const getBackendReachabilitySnapshot = (): BackendReachability => snapshot;
+
+export const getBackendConnectionIssue = (
+  state: Partial<BackendReachability> = snapshot
+): BackendConnectionIssue => {
+  const browserOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  if (browserOffline) {
+    return {
+      title: 'Internet connection required',
+      description: 'This device appears to be offline. Connect to the internet before completing the sale so the POS server can issue and store the receipt.',
+    };
+  }
+
+  const error = String(state.error || '').trim();
+  const lowerError = error.toLowerCase();
+  const serverHint = lowerError.includes('timed out')
+    ? 'The POS server did not respond in time.'
+    : lowerError.includes('http')
+      ? 'The POS server responded with an error.'
+      : 'Your internet may be connected, but the POS server could not be reached.';
+
+  return {
+    title: 'POS server unavailable',
+    description: `${serverHint} Check server availability, DNS/VPN/hotspot settings, then try the sale again.${error ? ` (${error})` : ''}`,
+  };
+};
 
 export const subscribeToBackendReachability = (
   listener: (state: BackendReachability) => void

@@ -30,7 +30,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ToastAction } from '@/components/ui/toast';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/use-auth';
-import { getBackendReachabilitySnapshot, useBackendReachability } from '@/hooks/use-backend-reachability';
+import { getBackendConnectionIssue, getBackendReachabilitySnapshot, useBackendReachability } from '@/hooks/use-backend-reachability';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
 import { warmBranchMraMappingCache } from '@/lib/mra-mapping-cache';
@@ -507,7 +507,11 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [isLoadingSession, setIsLoadingSession] = useState(true);
   const [isUsingCachedBranchSession, setIsUsingCachedBranchSession] = useState(false);
-  const { isReachable: isBackendReachable, checkNow: checkBackendConnectionNow } = useBackendReachability({ intervalMs: 10000 });
+  const {
+    isReachable: isBackendReachable,
+    error: backendReachabilityError,
+    checkNow: checkBackendConnectionNow,
+  } = useBackendReachability({ intervalMs: 10000 });
 
   const resolveBranchIntegerId = useCallback((rawBranchId: string): number | null => {
     const branchIdMatch = String(rawBranchId || '').match(/\d+/);
@@ -1855,16 +1859,15 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
        toast({ variant: 'destructive', title: 'No active branch', description: 'Could not determine the active branch.' });
        return null;
     }
-    if (eisEnabled) {
-      const reachability = await checkBackendConnectionNow(true);
-      if (!reachability.isReachable) {
-        toast({
-          variant: 'destructive',
-          title: 'Connection required for EIS invoice',
-          description: 'Could not reach the POS server. Connect to working internet before completing the sale so the EIS invoice can be submitted to MRA.',
-        });
-        return null;
-      }
+    const reachability = await checkBackendConnectionNow(true);
+    if (!reachability.isReachable) {
+      const issue = getBackendConnectionIssue(reachability);
+      toast({
+        variant: 'destructive',
+        title: issue.title,
+        description: issue.description,
+      });
+      return null;
     }
     const sessionForOrder = await resolveSessionForCheckout();
     if (!sessionForOrder) {
@@ -2559,8 +2562,11 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       defaultTaxRate,
       eisEnabled,
       blockSalesIfTaxMappingMissing,
-      isEisInvoiceSubmissionBlocked: eisEnabled && isBrowserOffline(),
-      eisInvoiceSubmissionBlockedMessage: 'Could not reach the POS server. Connect to working internet before completing the sale so the EIS invoice can be submitted to MRA.',
+      isEisInvoiceSubmissionBlocked: !isBackendReachable,
+      eisInvoiceSubmissionBlockedMessage: getBackendConnectionIssue({
+        isReachable: isBackendReachable,
+        error: backendReachabilityError,
+      }).description,
     };
 
     switch (currentBusinessType) {

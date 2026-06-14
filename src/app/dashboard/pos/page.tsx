@@ -33,7 +33,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/use-auth';
-import { useBackendReachability } from '@/hooks/use-backend-reachability';
+import { getBackendConnectionIssue, useBackendReachability } from '@/hooks/use-backend-reachability';
 import { authFetch } from '@/lib/auth-fetch';
 import { v4 as uuidv4 } from 'uuid';
 import { saveSaleToLocalStorage, addPendingSale, markSaleAsSynced, markSaleAsFailed } from '@/lib/services/sales-service';
@@ -507,7 +507,11 @@ export default function PosPage() {
   const [isAndroidTauri, setIsAndroidTauri] = useState(false);
   const [blockSalesIfTaxMappingMissing, setBlockSalesIfTaxMappingMissing] = useState(false);
   const [eisEnabled, setEisEnabled] = useState(false);
-  const { isReachable: isBrowserOnline, checkNow: checkBackendConnectionNow } = useBackendReachability({ intervalMs: 10000 });
+  const {
+    isReachable: isBackendReachable,
+    error: backendReachabilityError,
+    checkNow: checkBackendConnectionNow,
+  } = useBackendReachability({ intervalMs: 10000 });
   const [taxpayerVatRegistered, setTaxpayerVatRegistered] = useState<boolean | null>(null);
   const { toast } = useToast();
   const router = useRouter();
@@ -1061,16 +1065,15 @@ export default function PosPage() {
       toast({ variant: 'destructive', title: 'Cart is empty' });
       return null;
     }
-    if (eisEnabled) {
-      const reachability = await checkBackendConnectionNow(true);
-      if (!reachability.isReachable) {
-        toast({
-          variant: 'destructive',
-          title: 'Connection required for EIS receipt',
-          description: 'Could not reach the POS server. Connect to working internet before completing the sale so the legal EIS receipt can be submitted to MRA.',
-        });
-        return null;
-      }
+    const reachability = await checkBackendConnectionNow(true);
+    if (!reachability.isReachable) {
+      const issue = getBackendConnectionIssue(reachability);
+      toast({
+        variant: 'destructive',
+        title: issue.title,
+        description: issue.description,
+      });
+      return null;
     }
     if (!activeBranchId) {
        toast({ variant: 'destructive', title: 'No active branch', description: 'Could not determine the active branch.' });
@@ -1830,8 +1833,11 @@ export default function PosPage() {
       defaultTaxRate,
       eisEnabled,
       blockSalesIfTaxMappingMissing,
-      isEisInvoiceSubmissionBlocked: eisEnabled && !isBrowserOnline,
-      eisInvoiceSubmissionBlockedMessage: 'Could not reach the POS server. Connect to working internet before completing the sale so the EIS invoice can be submitted to MRA.',
+      isEisInvoiceSubmissionBlocked: !isBackendReachable,
+      eisInvoiceSubmissionBlockedMessage: getBackendConnectionIssue({
+        isReachable: isBackendReachable,
+        error: backendReachabilityError,
+      }).description,
     };
 
     switch (currentBusinessType) {

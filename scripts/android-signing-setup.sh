@@ -30,8 +30,7 @@ elif command -v openssl >/dev/null 2>&1; then
 else
   STORE_PASSWORD="$(date +%s%N | sha256sum | cut -c1-32)"
 fi
-# PKCS12 keystores use one password for both store and key.
-KEY_PASSWORD="$STORE_PASSWORD"
+KEY_PASSWORD="${ANDROID_KEY_PASSWORD:-$STORE_PASSWORD}"
 KEYSTORE_FILE="${ANDROID_KEYSTORE_PATH:-$ANDROID_DIR/handypos-release.jks}"
 
 if [[ "$KEYSTORE_FILE" != /* ]]; then
@@ -51,6 +50,38 @@ if [[ ! -f "$KEYSTORE_FILE" ]]; then
     -storepass "$STORE_PASSWORD" \
     -keypass "$KEY_PASSWORD" \
     -dname "CN=Mwaka POS, OU=POS, O=Mwaka POS, L=Lilongwe, ST=Central, C=MW"
+else
+  if [[ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ]]; then
+    echo "Existing Android keystore found, but ANDROID_KEYSTORE_PASSWORD is not set."
+    echo "Set the GitHub secret ANDROID_KEYSTORE_PASSWORD to the password used when this keystore was created."
+    exit 1
+  fi
+
+  if ! keytool -list -keystore "$KEYSTORE_FILE" -storepass "$STORE_PASSWORD" >/tmp/handypos-keytool-list.txt 2>/tmp/handypos-keytool-error.txt; then
+    echo "Android keystore password validation failed."
+    echo "The restored keystore exists, but ANDROID_KEYSTORE_PASSWORD cannot open it."
+    echo "Recreate ANDROID_KEYSTORE_BASE64 from the correct keystore file or update ANDROID_KEYSTORE_PASSWORD."
+    sed -n '1,8p' /tmp/handypos-keytool-error.txt
+    exit 1
+  fi
+
+  if ! awk -F',' -v alias="$KEY_ALIAS" '
+    {
+      first_field = $1
+      gsub(/^[ \t]+|[ \t]+$/, "", first_field)
+      if (first_field == alias) {
+        found = 1
+      }
+    }
+    END { exit found ? 0 : 1 }
+  ' /tmp/handypos-keytool-list.txt; then
+    echo "Android keystore alias validation failed."
+    echo "Alias '$KEY_ALIAS' was not found in the restored keystore."
+    echo "Available aliases:"
+    grep -Ei "^[^,]+," /tmp/handypos-keytool-list.txt | sed 's/^/  /' || true
+    echo "Set ANDROID_KEY_ALIAS to the keystore alias, or regenerate the keystore with alias '$KEY_ALIAS'."
+    exit 1
+  fi
 fi
 
 STORE_FILE_PROPERTY="$KEYSTORE_FILE"

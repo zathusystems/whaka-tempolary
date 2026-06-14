@@ -194,13 +194,18 @@ sign_release_apks() {
   for unsigned_apk in "${unsigned_apks[@]}"; do
     local signed_apk="${unsigned_apk%-unsigned.apk}.apk"
 
-    "$apksigner" sign \
+    if ! "$apksigner" sign \
       --ks "$keystore_path" \
       --ks-key-alias "$key_alias" \
       --ks-pass "file:$ks_pass_file" \
       --key-pass "file:$key_pass_file" \
       --out "$signed_apk" \
-      "$unsigned_apk"
+      "$unsigned_apk"; then
+      echo "Android APK signing failed."
+      echo "If keystore password validation passed earlier, check ANDROID_KEY_PASSWORD."
+      echo "If your keystore uses the same password for store and key, leave ANDROID_KEY_PASSWORD unset."
+      return 1
+    fi
 
     "$apksigner" verify "$signed_apk" >/dev/null
     echo "Signed: $signed_apk"

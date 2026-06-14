@@ -762,7 +762,7 @@ const PaymentDialog = ({
     const [productTaxMappings, setProductTaxMappings] = useState<Record<string, ProductTaxMappingDetail>>({});
     const [unmappedProducts, setUnmappedProducts] = useState<string[]>([]);
     const [isProcessingPayment, setIsProcessingPayment] = useState(false);
-    const { isReachable: isBackendReachable } = useBackendReachability({ intervalMs: 10000 });
+    const { isReachable: isBrowserOnline } = useBackendReachability({ intervalMs: 10000 });
     const shouldUseEisTaxMappings = Boolean(eisEnabled);
     const shouldEnforceTaxMapping = shouldUseEisTaxMappings && blockSalesIfTaxMappingMissing === true;
     const defaultTaxRateDecimal = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;

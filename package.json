@@ -16,7 +16,7 @@
     "tauri:build:linux": "tauri build --config src-tauri/tauri.linux.conf.json",
     "tauri:build:deb": "npm run tauri:build:linux",
     "tauri:build:windows": "tauri build",
-    "tauri:build:windows:x64": "tauri build --target x86_64-pc-windows-msvc",
+    "tauri:build:windows:x64": "tauri build --target x86_64-pc-windows-msvc -- --locked",
     "tauri:android:init": "bash scripts/tauri-android.sh init --ci --skip-targets-install",
     "tauri:android:signing:setup": "bash scripts/android-signing-setup.sh",
     "tauri:android:dev": "bash scripts/tauri-android.sh dev",

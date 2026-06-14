@@ -78,6 +78,7 @@ firestore-debug.log
 # Tauri
 src-tauri/target/
 src-tauri/Cargo.lock
+!src-tauri/Cargo.lock
 src-tauri/backend-bundle/*
 !src-tauri/backend-bundle/.keep
 src-tauri/gen/android/

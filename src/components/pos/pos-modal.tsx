@@ -60,6 +60,8 @@ const LOCAL_STORAGE_KEYS = {
     POS_MODAL_VIEW_MODE: 'handypos-pos-modal-view-mode',
 };
 
+const POS_SESSION_LOOKUP_TIMEOUT_MS = 2500;
+
 const normalizeBranchId = (value?: string | number | null): string => {
   if (value && typeof value === 'object') {
     const maybeId = (value as any).id ?? (value as any).branch_id ?? (value as any).branchId ?? (value as any).branch;
@@ -583,7 +585,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     }
 
     const normalizedBranchId = normalizeBranchId(branchId);
-    const cachedSessions = await db.sessions.toArray();
+    const cachedSessions = await db.sessions.where('status').equals('active').toArray();
     const branchSessions = cachedSessions
       .filter((session) => isSessionActive(session) && normalizeBranchId(session.branchId) === normalizedBranchId)
       .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
@@ -656,17 +658,37 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     console.log('[POS Modal] Marked stale local sessions as closed:', staleSessions.map((s) => s.id));
   }, [branchId, user?.uid, user?.email]);
 
-  // Fetch active session from backend first, then fallback to IndexedDB
+  // Open quickly from IndexedDB, then reconcile with the backend in the background.
   useEffect(() => {
+    let cancelled = false;
+
     const fetchActiveSession = async () => {
       if ((!user?.uid && !user?.email) || !branchId) {
-        setIsLoadingSession(false);
+        if (!cancelled) {
+          setIsLoadingSession(false);
+        }
         return;
       }
 
       setIsLoadingSession(true);
       let backendConfirmedNoSessionForCurrentUser = false;
       const shouldTryBackendSessionLookup = getBackendReachabilitySnapshot().isReachable;
+      const immediateLocalSession = await findLocalActiveSession(!shouldTryBackendSessionLookup);
+
+      if (cancelled) {
+        return;
+      }
+
+      if (immediateLocalSession) {
+        setActiveSession(immediateLocalSession);
+        setIsUsingCachedBranchSession(!isSessionOwnedByCurrentUser(immediateLocalSession) && !shouldTryBackendSessionLookup);
+        setIsLoadingSession(false);
+      } else if (!shouldTryBackendSessionLookup) {
+        setActiveSession(null);
+        setIsUsingCachedBranchSession(false);
+        setIsLoadingSession(false);
+        return;
+      }
 
       if (shouldTryBackendSessionLookup) {
         try {
@@ -674,8 +696,15 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
           if (branchIdInt !== null) {
             // First try backend active endpoint
             console.log('[POS Modal] Fetching active session from backend for user:', user.uid, 'branch:', branchIdInt);
-            const response = await authFetch.fetch<any>(`/sessions/sessions/active/?branch_id=${branchIdInt}`);
+            const response = await authFetch.fetch<any>(
+              `/sessions/sessions/active/?branch_id=${branchIdInt}`,
+              { timeoutMs: POS_SESSION_LOOKUP_TIMEOUT_MS }
+            );
             console.log('[POS Modal] Backend response:', response);
+
+            if (cancelled) {
+              return;
+            }
 
             if (response && response.id) {
               if (isSessionActive(response) && isSessionOwnedByCurrentUser(response)) {
@@ -689,12 +718,19 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               // If /active returns another user's session, check active_list for current user's session.
               console.warn('[POS Modal] Backend active session belongs to another user. Resolving current-user session from active_list.');
               try {
-                const activeListResponse = await authFetch.fetch<any>(`/sessions/sessions/active_list/?branch_id=${branchIdInt}`);
+                const activeListResponse = await authFetch.fetch<any>(
+                  `/sessions/sessions/active_list/?branch_id=${branchIdInt}`,
+                  { timeoutMs: POS_SESSION_LOOKUP_TIMEOUT_MS }
+                );
                 const activeList = Array.isArray(activeListResponse)
                   ? activeListResponse
                   : Array.isArray(activeListResponse?.results)
                   ? activeListResponse.results
                   : [];
+
+                if (cancelled) {
+                  return;
+                }
 
                 const ownSession = activeList.find(
                   (session: any) => isSessionActive(session) && isSessionOwnedByCurrentUser(session)
@@ -734,6 +770,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         console.log('[POS Modal] Offline - using cached active session.');
       }
 
+      if (cancelled) {
+        return;
+      }
+
       if (backendConfirmedNoSessionForCurrentUser) {
         try {
           await closeStaleLocalActiveSessions();
@@ -746,35 +786,50 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         return;
       }
 
-      // Fallback to IndexedDB
-      try {
-        console.log('[POS Modal] Falling back to IndexedDB for active session');
-        const dbSession = await findLocalActiveSession(!shouldTryBackendSessionLookup);
-        
-        if (dbSession) {
-          console.log('[POS Modal] Found active session in IndexedDB:', dbSession.id);
-          setActiveSession(dbSession);
-          setIsUsingCachedBranchSession(!isSessionOwnedByCurrentUser(dbSession) && !shouldTryBackendSessionLookup);
-        } else {
-          console.log('[POS Modal] No active session found in IndexedDB');
-          setActiveSession(null);
-          setIsUsingCachedBranchSession(false);
+      if (!immediateLocalSession) {
+        // Fallback to IndexedDB after backend errors/timeouts.
+        try {
+          console.log('[POS Modal] Falling back to IndexedDB for active session');
+          const dbSession = await findLocalActiveSession(!shouldTryBackendSessionLookup);
+
+          if (cancelled) {
+            return;
+          }
+
+          if (dbSession) {
+            console.log('[POS Modal] Found active session in IndexedDB:', dbSession.id);
+            setActiveSession(dbSession);
+            setIsUsingCachedBranchSession(!isSessionOwnedByCurrentUser(dbSession) && !shouldTryBackendSessionLookup);
+          } else {
+            console.log('[POS Modal] No active session found in IndexedDB');
+            setActiveSession(null);
+            setIsUsingCachedBranchSession(false);
+          }
+        } catch (error) {
+          console.error('[POS Modal] Error fetching from IndexedDB:', error);
+          if (!cancelled) {
+            setActiveSession(null);
+            setIsUsingCachedBranchSession(false);
+          }
         }
-      } catch (error) {
-        console.error('[POS Modal] Error fetching from IndexedDB:', error);
-        setActiveSession(null);
-        setIsUsingCachedBranchSession(false);
       }
 
-      setIsLoadingSession(false);
+      if (!cancelled) {
+        setIsLoadingSession(false);
+      }
     };
 
     // Fetch session when modal opens
     if (isOpen) {
-      fetchActiveSession();
+      void fetchActiveSession();
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [
     user?.uid,
+    user?.email,
     branchId,
     isOpen,
     closeStaleLocalActiveSessions,

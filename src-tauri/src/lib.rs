@@ -8,8 +8,8 @@ use tauri::Manager;
 #[cfg(not(target_os = "android"))]
 use tauri::{AppHandle, Listener, PhysicalSize, Size, WebviewWindow};
 
-mod printer;
 mod backend;
+mod printer;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PersistedSessionSnapshot {
@@ -99,10 +99,7 @@ fn os_serial_code() -> &'static str {
 }
 
 fn generate_device_serial() -> String {
-    let uuid = uuid::Uuid::new_v4()
-        .simple()
-        .to_string()
-        .to_uppercase();
+    let uuid = uuid::Uuid::new_v4().simple().to_string().to_uppercase();
     format!("HANDY-{}-{}", os_serial_code(), &uuid[..16])
 }
 
@@ -123,7 +120,8 @@ fn get_device_identity(
         }
     }
 
-    let device_serial = sanitize_device_serial(preferred_serial).unwrap_or_else(generate_device_serial);
+    let device_serial =
+        sanitize_device_serial(preferred_serial).unwrap_or_else(generate_device_serial);
     let payload = PersistedDeviceIdentity {
         device_serial: device_serial.clone(),
     };

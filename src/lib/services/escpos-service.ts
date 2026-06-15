@@ -351,6 +351,7 @@ class ESCPOSService {
       const text = tempDiv.innerText;
       const lines = text.split('\n');
       let inHeader = true;
+      let printedQr = false;
 
       for (const rawLine of lines) {
         const line = rawLine.trim();
@@ -371,9 +372,15 @@ class ESCPOSService {
 
         escPos += this.setAlignment(shouldCenter ? 'center' : 'left');
         escPos += this.printText(line.substring(0, this.config.charPerLine));
+
+        if (!printedQr && qrPayload && /^Scan Here/i.test(line)) {
+          escPos += this.setAlignment('center');
+          escPos += this.printQRCode(qrPayload);
+          printedQr = true;
+        }
       }
 
-      if (qrPayload) {
+      if (qrPayload && !printedQr) {
         escPos += this.setAlignment('center');
         escPos += this.printQRCode(qrPayload);
       }

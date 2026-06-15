@@ -5,10 +5,9 @@ use tauri::command;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::GetLastError;
 use windows::Win32::Graphics::Printing::{
-    ClosePrinter, EndDocPrinter, EndPagePrinter, EnumPrintersW, GetDefaultPrinterW,
-    OpenPrinterW, StartDocPrinterW, StartPagePrinter, WritePrinter, DOC_INFO_1W,
-    PRINTER_ATTRIBUTE_WORK_OFFLINE, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_HANDLE,
-    PRINTER_INFO_4W,
+    ClosePrinter, EndDocPrinter, EndPagePrinter, EnumPrintersW, GetDefaultPrinterW, OpenPrinterW,
+    StartDocPrinterW, StartPagePrinter, WritePrinter, DOC_INFO_1W, PRINTER_ATTRIBUTE_WORK_OFFLINE,
+    PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_HANDLE, PRINTER_INFO_4W,
 };
 
 #[derive(serde::Serialize, Clone)]
@@ -101,23 +100,33 @@ fn enumerate_printers() -> Result<Vec<WinPrinterEntry>, String> {
         let mut bytes_needed: u32 = 0;
         let mut count: u32 = 0;
 
-        let _ = EnumPrintersW(flags, PCWSTR::null(), 4, None, &mut bytes_needed, &mut count);
+        let _ = EnumPrintersW(
+            flags,
+            PCWSTR::null(),
+            4,
+            None,
+            &mut bytes_needed,
+            &mut count,
+        );
 
         if bytes_needed == 0 {
             return Ok(Vec::new());
         }
 
         let mut buffer = vec![0u8; bytes_needed as usize];
-        if let Err(err) =
-            EnumPrintersW(flags, PCWSTR::null(), 4, Some(buffer.as_mut_slice()), &mut bytes_needed, &mut count)
-        {
+        if let Err(err) = EnumPrintersW(
+            flags,
+            PCWSTR::null(),
+            4,
+            Some(buffer.as_mut_slice()),
+            &mut bytes_needed,
+            &mut count,
+        ) {
             return Err(format!("EnumPrintersW failed: {}", err));
         }
 
-        let entries = std::slice::from_raw_parts(
-            buffer.as_ptr() as *const PRINTER_INFO_4W,
-            count as usize,
-        );
+        let entries =
+            std::slice::from_raw_parts(buffer.as_ptr() as *const PRINTER_INFO_4W, count as usize);
 
         let mut printers = Vec::new();
         for entry in entries {
@@ -162,7 +171,10 @@ fn resolve_windows_printer_name(printer_id: &str) -> Result<String, String> {
     }
 
     if is_vid_pid_id(trimmed) {
-        return Err("USB VID:PID printing is not supported on Windows. Configure a system printer instead.".to_string());
+        return Err(
+            "USB VID:PID printing is not supported on Windows. Configure a system printer instead."
+                .to_string(),
+        );
     }
 
     if lower.starts_with("win:") {

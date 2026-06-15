@@ -22,6 +22,8 @@ pub fn html_to_escpos(html: &str, line_width: usize, horizontal_offset: usize) -
     let printable_text = html_to_printable_text(html, line_width);
     let mut emphasized_company_name = false;
     let mut allow_company_name_detection = true;
+    let qr_payload = extract_qr_payload(html);
+    let mut has_qr = false;
 
     for line in printable_text.lines() {
         let trimmed = line.trim();
@@ -54,12 +56,20 @@ pub fn html_to_escpos(html: &str, line_width: usize, horizontal_offset: usize) -
 
         data.extend_from_slice(line_with_offset.as_bytes());
         data.extend_from_slice(b"\n");
+
+        if !has_qr && lower.starts_with("scan here for receipt details") {
+            if let Some(payload) = qr_payload.as_deref() {
+                append_qr_code(&mut data, payload, horizontal_offset, line_width);
+                has_qr = true;
+            }
+        }
     }
 
-    let mut has_qr = false;
-    if let Some(qr_payload) = extract_qr_payload(html) {
-        append_qr_code(&mut data, &qr_payload, horizontal_offset, line_width);
-        has_qr = true;
+    if !has_qr {
+        if let Some(payload) = qr_payload.as_deref() {
+            append_qr_code(&mut data, payload, horizontal_offset, line_width);
+            has_qr = true;
+        }
     }
 
     append_feed_and_cut(&mut data, has_qr);
@@ -458,6 +468,9 @@ fn infer_section(line: &str, current: ReceiptSection) -> ReceiptSection {
     if lower.is_empty() {
         return current;
     }
+    if is_legal_footer_line(&lower) {
+        return ReceiptSection::Footer;
+    }
     if lower.contains("*** copy #") || is_copy_marker_line(&lower) {
         return ReceiptSection::Copy;
     }
@@ -537,6 +550,13 @@ fn infer_section(line: &str, current: ReceiptSection) -> ReceiptSection {
     }
 }
 
+fn is_legal_footer_line(lower: &str) -> bool {
+    (lower.starts_with("date:") && lower.contains("time:"))
+        || lower.starts_with("scan here for receipt details")
+        || lower.starts_with("mra qr pending")
+        || lower.starts_with("*** end of legal receipt")
+}
+
 fn format_line_by_section(
     line: &str,
     section: ReceiptSection,
@@ -552,6 +572,10 @@ fn format_line_by_section(
     }
 
     if is_dotted_rule(trimmed) || is_section_heading(trimmed) {
+        return Some(center_text(trimmed, line_width));
+    }
+
+    if section == ReceiptSection::Footer {
         return Some(center_text(trimmed, line_width));
     }
 
@@ -613,10 +637,6 @@ fn format_line_by_section(
 
     if section == ReceiptSection::Totals && looks_like_amount(trimmed) {
         return Some(align_left_right("", trimmed, line_width));
-    }
-
-    if section == ReceiptSection::Footer {
-        return Some(center_text(trimmed, line_width));
     }
 
     if section == ReceiptSection::Company {
@@ -736,6 +756,20 @@ fn normalize_receipt_text_with_width(raw: &str, line_width: usize) -> String {
 }
 
 fn extract_qr_payload(html: &str) -> Option<String> {
+    for attr in [
+        "data-eis-qr-payload",
+        "data-qr-payload",
+        "data-eis-validation-url",
+    ] {
+        if let Some(value) = extract_attribute_value(html, attr) {
+            let decoded = decode_html_entities(&value);
+            let payload = decoded.trim();
+            if !payload.is_empty() {
+                return Some(payload.to_string());
+            }
+        }
+    }
+
     for quote in ['"', '\''] {
         let needle = format!("src={}", quote);
         let mut offset = 0usize;
@@ -750,6 +784,29 @@ fn extract_qr_payload(html: &str) -> Option<String> {
 
             if let Some(payload) = extract_qr_payload_from_src(src) {
                 return Some(payload);
+            }
+
+            offset = start + end + 1;
+        }
+    }
+
+    None
+}
+
+fn extract_attribute_value(html: &str, attr_name: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let needle = format!("{}={}", attr_name, quote);
+        let mut offset = 0usize;
+
+        while let Some(found) = html[offset..].find(&needle) {
+            let start = offset + found + needle.len();
+            let tail = &html[start..];
+            let Some(end) = tail.find(quote) else {
+                break;
+            };
+            let value = tail[..end].trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
             }
 
             offset = start + end + 1;
@@ -850,5 +907,57 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.contains("TOTAL:") && line.ends_with("Rs 75.00")));
+    }
+
+    #[test]
+    fn extracts_qr_payload_from_receipt_wrapper_attribute() {
+        let html = r#"<div id="receipt-printable-area" data-eis-qr-payload="https://dev-eis-portal.mra.mw/ReceiptValidation/Validate/CuQ-D-JY4P-D?tin=70267581&amp;mode=online"><p>Receipt</p></div>"#;
+        let payload = extract_qr_payload(html);
+
+        assert_eq!(
+            payload.as_deref(),
+            Some("https://dev-eis-portal.mra.mw/ReceiptValidation/Validate/CuQ-D-JY4P-D?tin=70267581&mode=online")
+        );
+    }
+
+    #[test]
+    fn centers_legal_receipt_footer_from_date_time_line() {
+        let raw = "TOTAL:\tMWK 250.00\nDATE: 2026-05-23 TIME: 12:33:37\nScan Here For Receipt Details\n*** END OF LEGAL RECEIPT ***\nTHANK YOU!";
+        let normalized = normalize_receipt_text_with_width(raw, DEFAULT_RECEIPT_LINE_WIDTH);
+        let lines: Vec<&str> = normalized.lines().collect();
+
+        assert!(lines.iter().any(|line| line.starts_with("TOTAL:")));
+        for expected in [
+            "DATE: 2026-05-23 TIME: 12:33:37",
+            "Scan Here For Receipt Details",
+            "*** END OF LEGAL RECEIPT ***",
+        ] {
+            let line = lines
+                .iter()
+                .find(|line| line.trim() == expected)
+                .unwrap_or_else(|| panic!("missing centered footer line: {}", expected));
+            assert!(
+                line.starts_with(' '),
+                "footer line was not centered: {}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn prints_qr_between_scan_instruction_and_legal_receipt_end() {
+        let payload = "https://dev-eis-portal.mra.mw/ReceiptValidation/Validate/CuQ-D-JY4P-D";
+        let html = format!(
+            r#"<div id="receipt-printable-area" data-eis-qr-payload="{payload}"><p>DATE: 2026-05-23 TIME: 12:33:37</p><p>Scan Here For Receipt Details</p><p>*** END OF LEGAL RECEIPT ***</p></div>"#
+        );
+        let bytes = html_to_escpos(&html, DEFAULT_RECEIPT_LINE_WIDTH, 0);
+        let rendered = String::from_utf8_lossy(&bytes);
+
+        let scan_index = rendered.find("Scan Here For Receipt Details").unwrap();
+        let payload_index = rendered.find(payload).unwrap();
+        let end_index = rendered.find("*** END OF LEGAL RECEIPT ***").unwrap();
+
+        assert!(scan_index < payload_index);
+        assert!(payload_index < end_index);
     }
 }

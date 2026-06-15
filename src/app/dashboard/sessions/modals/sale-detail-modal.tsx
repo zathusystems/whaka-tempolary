@@ -639,7 +639,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         const receiptElement = document.getElementById('receipt-printable-area');
-        const printContents = receiptElement?.innerHTML;
+        const printContents = receiptElement?.outerHTML || receiptElement?.innerHTML;
 
         if (!printContents || printContents.trim().length === 0) {
           console.error('Receipt content not found or empty');

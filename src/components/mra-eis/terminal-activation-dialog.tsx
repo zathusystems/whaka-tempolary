@@ -29,6 +29,7 @@ import {
 } from '@/lib/device-identity';
 
 const EIS_TERMINAL_ACTIVATION_CHANGED_EVENT = 'handypos-eis-terminal-activation-changed';
+const ACTIVATION_RELOAD_DELAY_MS = 900;
 
 const CONFIGURED_POS_NAME = (
   process.env.NEXT_PUBLIC_MRA_EIS_POS_NAME ||
@@ -146,6 +147,7 @@ export function TerminalActivationDialog({
       const terminalStatus = String(response?.status || response?.terminal?.status || '').toLowerCase();
       const activationWasDryRun = Boolean(activationResult?.dry_run);
       const activationError = activationResult?.error;
+      const shouldReloadAfterActivation = terminalStatus === 'active' && !activationWasDryRun && !activationError;
 
       onActivated?.(response);
       window.dispatchEvent(new Event(EIS_TERMINAL_ACTIVATION_CHANGED_EVENT));
@@ -165,9 +167,15 @@ export function TerminalActivationDialog({
           : activationError
             ? activationError
             : terminalStatus === 'active'
-              ? 'This device can now perform MRA EIS fiscal actions for the selected branch.'
+              ? 'This device can now perform MRA EIS fiscal actions for the selected branch. Reloading the app now.'
               : 'MRA activation was submitted. Refresh terminal status if it remains pending.',
       });
+
+      if (shouldReloadAfterActivation && typeof window !== 'undefined') {
+        window.setTimeout(() => {
+          window.location.reload();
+        }, ACTIVATION_RELOAD_DELAY_MS);
+      }
     } catch (error: any) {
       toast({
         variant: 'destructive',

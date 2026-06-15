@@ -914,7 +914,11 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     }
 
     if (isBrowserOffline()) {
-      setMraProductSyncError('Server connection unavailable: using cached MRA products and stored EIS configurations.');
+      if (!hasCachedInventory) {
+        setMraProductSyncError('Server unavailable. Connect to the POS server once to download MRA products and EIS configurations for this device.');
+      } else {
+        setMraProductSyncError(null);
+      }
       return;
     }
 
@@ -961,33 +965,32 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       );
 
       if (response?.fresh === false && response?.error) {
-        toast({
-          variant: 'destructive',
-          title: 'MRA config refresh failed',
-          description: String(response.error),
-        });
+        console.warn('[POS Modal] MRA config refresh failed:', response.error);
+        if (!hasCachedInventory) {
+          setMraProductSyncError(String(response.error));
+        }
       } else if (response?.refreshed) {
+        setMraProductSyncError(null);
         toast({
           title: 'New MRA configs downloaded',
           description: 'Latest EIS taxpayer, terminal, product, and tax settings are now stored locally.',
         });
       }
     } catch (error: any) {
-      console.error('[POS Modal] Failed to ensure fresh MRA configurations:', error);
-      toast({
-        variant: 'destructive',
-        title: 'MRA config refresh failed',
-        description: error?.message || 'Could not download latest EIS configurations.',
-      });
+      console.warn('[POS Modal] Failed to ensure fresh MRA configurations:', error);
+      if (!hasCachedInventory) {
+        setMraProductSyncError(error?.message || 'Could not download latest EIS configurations.');
+      }
     }
-  }, [branchId, business?.id, eisEnabled, isBrowserOffline, toast]);
+  }, [branchId, business?.id, eisEnabled, hasCachedInventory, isBrowserOffline, toast]);
 
   const syncProductsFromMra = useCallback(async (options?: { showSuccessToast?: boolean; showErrorToast?: boolean }) => {
     const showSuccessToast = options?.showSuccessToast !== false;
     const showErrorToast = options?.showErrorToast !== false;
 
     const fail = (title: string, description: string) => {
-      setMraProductSyncError(description);
+      const canUseCacheSilently = hasCachedInventory && !showErrorToast;
+      setMraProductSyncError(canUseCacheSilently ? null : description);
       if (showErrorToast) {
         toast({
           variant: 'destructive',
@@ -1003,7 +1006,9 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     }
 
     if (isBrowserOffline()) {
-      return fail('Server unavailable', 'Could not reach the POS server. POS is using cached MRA products for sales.');
+      return fail('Server unavailable', hasCachedInventory
+        ? 'Could not refresh from the POS server. POS is using cached MRA products for sales.'
+        : 'Could not reach the POS server. Connect once to download MRA products for this device.');
     }
 
     const normalizedBranchId = normalizeBranchId(branchId);
@@ -1038,6 +1043,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       }
 
       const reconciliationWarnings = syncResult.stockReconciliationWarnings || [];
+      setMraProductSyncError(null);
       if (reconciliationWarnings.length > 0) {
         const totalMissing = reconciliationWarnings.reduce(
           (sum, item) => sum + Number(item.missingBatchQuantity || 0),
@@ -1078,7 +1084,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     } finally {
       setIsSyncingMraProducts(false);
     }
-  }, [branchId, isBrowserOffline, toast]);
+  }, [branchId, hasCachedInventory, isBrowserOffline, toast]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -1111,7 +1117,11 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     mraProductAutoSyncRef.current = syncKey;
 
     if (isBrowserOffline()) {
-      setMraProductSyncError('Server connection unavailable: using cached MRA products for sales.');
+      if (!hasCachedInventory) {
+        setMraProductSyncError('Server unavailable. Connect once to download MRA products for this device.');
+      } else {
+        setMraProductSyncError(null);
+      }
       return;
     }
 
@@ -1122,7 +1132,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       if (cancelled) {
         return;
       }
-      await syncProductsFromMra({ showSuccessToast: false, showErrorToast: true });
+      await syncProductsFromMra({ showSuccessToast: false, showErrorToast: false });
     };
 
     void loadMraProductsOnOpen();
@@ -1130,7 +1140,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     return () => {
       cancelled = true;
     };
-  }, [branchId, business?.id, eisEnabled, ensureMraConfigurationFresh, isBrowserOffline, isOpen, syncProductsFromMra]);
+  }, [branchId, business?.id, eisEnabled, ensureMraConfigurationFresh, hasCachedInventory, isBrowserOffline, isOpen, syncProductsFromMra]);
 
   useEffect(() => {
     if (!isOpen || !branchId || (!eisEnabled && !blockSalesIfTaxMappingMissing)) {
@@ -2547,6 +2557,11 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       cartTax = taxRate > 0 ? (cartTotal / (1 + taxRate)) * taxRate : 0;
     }
 
+    const backendConnectionIssue = getBackendConnectionIssue({
+      isReachable: isBackendReachable,
+      error: backendReachabilityError,
+    });
+
     const posProps = {
       inventory: allInventory || [],
       displayItems: sellableItems || [],
@@ -2563,10 +2578,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       eisEnabled,
       blockSalesIfTaxMappingMissing,
       isEisInvoiceSubmissionBlocked: !isBackendReachable,
-      eisInvoiceSubmissionBlockedMessage: getBackendConnectionIssue({
-        isReachable: isBackendReachable,
-        error: backendReachabilityError,
-      }).description,
+      eisInvoiceSubmissionBlockedMessage: backendConnectionIssue.description,
     };
 
     switch (currentBusinessType) {
@@ -2588,6 +2600,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
   };
 
   const isOfflineAtRender = isBrowserOffline();
+  const backendConnectionIssue = getBackendConnectionIssue({
+    isReachable: isBackendReachable,
+    error: backendReachabilityError,
+  });
   const hasActiveBranchSession =
     Boolean(activeSession) &&
     isSessionActive(activeSession) &&
@@ -2609,7 +2625,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     const sessionStatusDescription = isLoadingSession
       ? 'Checking the local session cache so POS can open without internet.'
       : isOfflineAtRender
-        ? 'Could not reach the POS server. Connect to working internet to sync or open a POS session and submit EIS invoices. This device has no active cached session for this branch.'
+        ? `${backendConnectionIssue.description} This device has no active cached session for this branch.`
         : 'Start a session for this branch before taking sales.';
 
     return (
@@ -2645,7 +2661,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               <div className="flex shrink-0 items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-900 dark:border-yellow-800 dark:bg-yellow-950/30 dark:text-yellow-100">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
                 <span className="min-w-0 break-words">
-                  Could not reach the POS server. Connect to working internet to submit EIS invoices.
+                  {backendConnectionIssue.description}
                 </span>
               </div>
             )}
@@ -2719,7 +2735,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
             {!isSyncingMraProducts && mraProductSyncError && allInventory && (
               <div className="flex shrink-0 items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
-                <span className="min-w-0 break-words">Latest MRA product load failed: {mraProductSyncError}</span>
+                <span className="min-w-0 break-words">MRA product setup required: {mraProductSyncError}</span>
               </div>
             )}
             <div className="flex-1 overflow-hidden min-h-0">{renderPosForBusiness()}</div>

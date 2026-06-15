@@ -100,6 +100,7 @@ type TerminalActivationFormValues = z.infer<typeof terminalActivationSchema>;
 type InitialStockExportMode = 'all' | 'first_20' | 'custom';
 
 const EIS_TERMINAL_ACTIVATION_CHANGED_EVENT = 'handypos-eis-terminal-activation-changed';
+const ACTIVATION_RELOAD_DELAY_MS = 900;
 
 const INITIAL_STOCK_UPLOAD_HEADERS = [
   'BarCode',
@@ -1541,6 +1542,7 @@ export default function EISSettingsPage() {
         const activationResult = terminalData.activation_result;
         const activationWasDryRun = Boolean(activationResult?.dry_run);
         const activationError = activationResult?.error;
+        const shouldReloadAfterActivation = terminalData.status === 'active' && !activationWasDryRun && !activationError;
         const activationToastTitle = activationWasDryRun
           ? 'Activation Prepared Only'
           : activationError
@@ -1553,7 +1555,7 @@ export default function EISSettingsPage() {
           : activationError
             ? activationError
             : terminalData.status === 'active'
-              ? `Terminal ${terminalData.terminal_id} has been successfully activated.`
+              ? `Terminal ${terminalData.terminal_id} has been successfully activated. Reloading the app now.`
               : `Terminal ${terminalData.terminal_id} is pending activation confirmation.`;
         setTerminal(terminalData);
         setLastSubmitReconciliation(null);
@@ -1577,6 +1579,12 @@ export default function EISSettingsPage() {
           device_serial: deviceSerial,
           mac_address: macAddress,
         });
+
+        if (shouldReloadAfterActivation && typeof window !== 'undefined') {
+          window.setTimeout(() => {
+            window.location.reload();
+          }, ACTIVATION_RELOAD_DELAY_MS);
+        }
       }
     } catch (error: any) {
       console.error('Terminal activation error:', error);

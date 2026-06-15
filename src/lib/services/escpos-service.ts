@@ -290,7 +290,7 @@ class ESCPOSService {
    * Cut paper
    */
   private cutPaper(): string {
-    return this.GS + 'V' + '\x00'; // Partial cut
+    return this.ESC + 'd' + '\x07' + this.GS + 'V' + '\x00'; // Feed, then cut
   }
 
   /**

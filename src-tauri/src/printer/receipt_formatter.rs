@@ -167,9 +167,9 @@ fn append_company_name_banner(data: &mut Vec<u8>, name: &str, line_width: usize)
 }
 
 fn append_feed_and_cut(data: &mut Vec<u8>, has_qr: bool) {
-    // Keep feed short so the cutter triggers soon after the last printed block.
-    // QR codes still need a little trailing paper to avoid clipping.
-    let feed_lines: u8 = if has_qr { 3 } else { 2 };
+    // Feed enough paper for the legal footer to clear the cutter. Some thermal
+    // printers cut very close to the last rendered line, especially after QR.
+    let feed_lines: u8 = if has_qr { 7 } else { 5 };
     data.extend_from_slice(&[0x1B, 0x64, feed_lines]); // Print buffer and feed n lines
     data.extend_from_slice(b"\x1D\x56\x00"); // Full cut
 }

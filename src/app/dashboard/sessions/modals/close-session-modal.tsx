@@ -182,7 +182,7 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
         toast({
           variant: 'destructive',
           title: 'Print Failed',
-          description: `Could not print the ${SESSION_END_REPORT_TITLE.toLowerCase()}. Check the printer connection and try again.`,
+          description: 'Print failed.',
         });
         return;
       }

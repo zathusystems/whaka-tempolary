@@ -289,7 +289,7 @@ export function DashboardHeader({
           enabled: true,
           isOnline: false,
           checkedAt: new Date().toISOString(),
-          error: 'This device is not activated as an MRA EIS terminal for this branch.',
+          error: 'Activation required.',
         });
         return;
       }

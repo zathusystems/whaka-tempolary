@@ -1600,13 +1600,13 @@ export default function DashboardLayout({
   const isEisActivationPath = pathname.startsWith(EIS_ACTIVATION_PATH);
 
   const forceEisActivation = useCallback((reason?: string) => {
-    const message = reason || eisActivationGate.reason || 'Activate this device as an MRA EIS terminal before fiscal actions can be submitted.';
+    const message = reason || eisActivationGate.reason || 'Activate this device first.';
     const toastKey = `${activeBranchId || ''}:${message}`;
     if (activationGateToastRef.current !== toastKey) {
       activationGateToastRef.current = toastKey;
       toast({
         variant: 'destructive',
-        title: 'EIS terminal activation required',
+        title: 'Activation required',
         description: message,
       });
     }
@@ -1715,7 +1715,7 @@ export default function DashboardLayout({
 
     const handleActivationRequested = (event: Event) => {
       const customEvent = event as CustomEvent<{ reason?: string }>;
-      const reason = customEvent.detail?.reason || 'Activate this device before submitting MRA EIS fiscal actions.';
+      const reason = customEvent.detail?.reason || 'Activate this device first.';
       setEisActivationGate((previous) => ({
         ...previous,
         required: true,
@@ -1802,7 +1802,7 @@ export default function DashboardLayout({
 
       const currentDeviceSerial = getDeviceSerial();
       if (!currentDeviceSerial) {
-        failGate('This device has no local device serial. Restart the app and activate the terminal before issuing EIS receipts.');
+        failGate('Restart the app.');
         return;
       }
       const cachedActivatedTerminal = readCachedActivatedTerminal(
@@ -1831,7 +1831,7 @@ export default function DashboardLayout({
           return;
         }
 
-        failGate('MRA EIS is enabled, but this device is not activated as an active terminal for the selected branch. Enter a TAC to activate this device before using POS.');
+        failGate('Activate this device first.');
       } catch (error: any) {
         console.error('[Dashboard] Failed to verify EIS terminal activation:', error);
         if (cachedActivatedTerminal) {
@@ -1839,7 +1839,7 @@ export default function DashboardLayout({
           passGate();
           return;
         }
-        failGate(error?.message || "Could not verify this device's MRA terminal activation. Connect to the backend and activate this device before using POS.");
+        failGate('Activation check failed.');
       }
     };
 
@@ -1938,13 +1938,13 @@ export default function DashboardLayout({
         if (response?.fresh === false && response?.error) {
           toast({
             variant: 'destructive',
-            title: 'MRA config refresh failed',
-            description: String(response.error),
+            title: 'Config refresh failed',
+            description: 'Try again.',
           });
         } else if (response?.refreshed) {
           toast({
             title: 'New MRA configs downloaded',
-            description: 'Startup EIS config check downloaded the latest taxpayer, terminal, product, and tax settings.',
+            description: 'Latest EIS configs saved.',
           });
         }
       } catch (error: any) {
@@ -1954,8 +1954,8 @@ export default function DashboardLayout({
         console.error('[Dashboard] Startup MRA config check failed:', error);
         toast({
           variant: 'destructive',
-          title: 'MRA config refresh failed',
-          description: error?.message || 'Could not check latest EIS configurations at startup.',
+          title: 'Config refresh failed',
+          description: 'Try again.',
         });
       }
     };
@@ -2037,9 +2037,9 @@ export default function DashboardLayout({
                     <div className="flex min-w-0 items-start gap-3">
                       <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0" />
                       <div className="min-w-0">
-                        <p className="text-sm font-semibold">This device is not activated for MRA EIS fiscal actions</p>
+                        <p className="text-sm font-semibold">Activation required</p>
                         <p className="mt-1 text-sm">
-                          {eisActivationGate.reason || 'Management screens remain available. Activate this device before making EIS sales or submitting fiscal documents.'}
+                          {eisActivationGate.reason || 'Activate this device first.'}
                         </p>
                       </div>
                     </div>

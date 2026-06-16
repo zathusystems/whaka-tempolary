@@ -319,13 +319,13 @@ class AuthenticatedFetch {
 
     const userMessage = options.queued
       ? options.offline
-        ? 'Offline - request queued for retry'
-        : `Could not reach ${requestHost} - request queued for retry`
+        ? 'Offline. Will retry.'
+        : 'Server unreachable. Will retry.'
       : options.offline
         ? 'No internet connection.'
         : isTimeout
-          ? `Timed out while contacting ${requestHost}. Power or internet may be back, but the server connection is not ready yet. Please try again.`
-        : `Could not reach ${requestHost}. Your internet may still be connected, but the app could not contact the server. Check hotspot/VPN/DNS/server availability and try again.`;
+          ? 'POS server timed out.'
+        : 'POS server unreachable.';
 
     const wrapped = new Error(userMessage);
     (wrapped as any).isNetworkError = true;

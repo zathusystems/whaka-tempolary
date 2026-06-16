@@ -295,15 +295,15 @@ const resolveCompletedSaleSubmissionDisplay = (
       return {
         label: 'EIS Offline Queued',
         description: hasFiscalData
-          ? 'Offline fiscal receipt has a validation QR and is queued for MRA upload.'
-          : 'Offline receipt is saved locally and will upload to MRA when internet returns.',
+          ? 'Queued for MRA.'
+          : 'Will upload later.',
         tone: 'offline',
       };
     }
 
     return {
       label: 'EIS Online Pending',
-      description: 'Sale is saved and queued for immediate MRA submission in the background.',
+      description: 'Submitting to MRA.',
       tone: 'pending',
     };
   }
@@ -311,12 +311,12 @@ const resolveCompletedSaleSubmissionDisplay = (
   return isBrowserOnline
     ? {
         label: 'Online Sale',
-        description: 'Sale is saved locally and can sync to the backend now.',
+        description: 'Ready to submit.',
         tone: 'accepted',
       }
     : {
         label: 'Offline Sale',
-        description: 'Sale is saved locally and will sync when internet returns.',
+        description: 'Will sync later.',
         tone: 'offline',
       };
 };
@@ -721,7 +721,7 @@ const PaymentDialog = ({
     eisEnabled,
     blockSalesIfTaxMappingMissing,
     isEisInvoiceSubmissionBlocked = false,
-    eisInvoiceSubmissionBlockedMessage = 'Could not reach the POS server. Connect to working internet before completing the sale.',
+    eisInvoiceSubmissionBlockedMessage = 'POS server unreachable.',
     branchId,
     onConfigurePrinter,
 }: {
@@ -784,8 +784,8 @@ const PaymentDialog = ({
     const saleConnectivityDescription = isEisInvoiceSubmissionBlocked
         ? eisInvoiceSubmissionBlockedMessage
         : shouldUseEisTaxMappings
-            ? 'Sale will be submitted to MRA EIS immediately.'
-            : 'Sale will be submitted to the POS server immediately.';
+            ? 'Submits to MRA.'
+            : 'Submits to POS server.';
     const taxMethodSummary = useMemo(() => {
         const methods = new Set<'inclusive' | 'exclusive'>();
         Object.values(productTaxMappings).forEach((mapping) => {
@@ -1603,7 +1603,7 @@ const PaymentDialog = ({
                 if (!hasFiscalReceiptPrintData(activeOrder)) {
                     toast({
                         title: 'Preparing Fiscal Receipt',
-                        description: 'Waiting for the fiscal invoice number and MRA validation QR...',
+                        description: 'Preparing receipt...',
                     });
 
                     const latestOrder = await waitForFiscalReceiptData(activeOrder);
@@ -1612,7 +1612,7 @@ const PaymentDialog = ({
                         toast({
                             variant: 'destructive',
                             title: 'Fiscal Receipt Pending',
-                            description: 'Fiscal invoice number or MRA validation URL is not ready yet. Please try printing again in a moment.',
+                            description: 'Try again shortly.',
                         });
                         return false;
                     }
@@ -1725,13 +1725,13 @@ const PaymentDialog = ({
 
             console.warn('Print failed');
             const failedDescription = failedResult?.timedOut
-                ? 'Printer did not respond in time. Check printer connection and try again.'
-                : 'Failed to send receipt to printer. Please try again.';
+                ? 'Printer timed out.'
+                : 'Print failed.';
             toast({
                 variant: 'destructive',
                 title: failedResult?.timedOut ? 'Print Timed Out' : 'Print Failed',
                 description: printedCopies > 0
-                    ? `${printedCopies} receipt${printedCopies > 1 ? 's were' : ' was'} printed, then printing stopped. ${failedDescription}`
+                    ? `${printedCopies} printed. ${failedDescription}`
                     : failedDescription,
             });
             return false;
@@ -1740,7 +1740,7 @@ const PaymentDialog = ({
             toast({
                 variant: 'destructive',
                 title: 'Print Error',
-                description: error instanceof Error ? error.message : 'An unknown error occurred',
+                description: 'Print failed.',
             });
             return false;
         } finally {
@@ -1779,7 +1779,7 @@ const PaymentDialog = ({
                 toast({
                     variant: 'destructive',
                     title: 'MRA Receipt Not Ready',
-                    description: 'Fiscal invoice number or MRA validation URL is not ready yet. Try again after EIS sync completes.',
+                    description: 'Try again shortly.',
                 });
                 return;
             }
@@ -1788,7 +1788,7 @@ const PaymentDialog = ({
                 toast({
                     variant: 'destructive',
                     title: 'Receipt Not Ready',
-                    description: 'Receipt details are still pending. Try again after sync completes.',
+                    description: 'Try again shortly.',
                 });
                 return;
             }
@@ -2351,9 +2351,9 @@ const PaymentDialog = ({
 
                 {shouldEnforceTaxMapping && unmappedProducts.length > 0 && (
                     <div className="rounded-lg border border-red-200 bg-red-50 dark:bg-red-950/20 p-3">
-                        <h4 className="text-sm font-semibold mb-2 text-red-900 dark:text-red-100">⚠️ Unmapped / Inactive Mappings</h4>
+                        <h4 className="text-sm font-semibold mb-2 text-red-900 dark:text-red-100">Mapping required</h4>
                         <p className="text-xs text-red-800 dark:text-red-200 mb-2">
-                            The following products are missing mapping or not yet approved/synced and cannot be sold:
+                            Fix these products first:
                         </p>
                         <ul className="text-xs text-red-800 dark:text-red-200 space-y-1">
                             {unmappedProducts.map((productName, idx) => (
@@ -2361,7 +2361,7 @@ const PaymentDialog = ({
                             ))}
                         </ul>
                         <p className="text-xs text-red-700 dark:text-red-300 mt-2 font-medium">
-                            Please map these items, approve/sync mappings, or remove them from cart before proceeding.
+                            Map or remove them.
                         </p>
                     </div>
                 )}
@@ -2455,7 +2455,7 @@ export const GenericPos = ({
   eisEnabled = false,
   blockSalesIfTaxMappingMissing = false,
   isEisInvoiceSubmissionBlocked = false,
-  eisInvoiceSubmissionBlockedMessage = 'Could not reach the POS server. Connect to working internet before completing the sale.',
+  eisInvoiceSubmissionBlockedMessage = 'POS server unreachable.',
   branchId,
 }: PosProps) => {
   const [isPaymentDialogOpen, setPaymentDialogOpen] = useState(false);

@@ -52,11 +52,6 @@ type TerminalActivationDialogProps = {
   onActivated?: (terminal: any) => void;
 };
 
-const formatActivationDryRunReason = (reason?: string): string => {
-  const normalized = String(reason || '').trim().replace(/_/g, ' ');
-  return normalized || 'MRA HTTP calls are disabled or dry-run mode is active';
-};
-
 const resolveDeviceMacAddress = (): string => {
   return normalizeDeviceMacAddress(getDeviceMacAddress()) || DEFAULT_DEVICE_MAC_ADDRESS;
 };
@@ -110,7 +105,7 @@ export function TerminalActivationDialog({
       toast({
         variant: 'destructive',
         title: 'Branch required',
-        description: 'Select an active branch before activating this device.',
+        description: 'Select a branch first.',
       });
       return;
     }
@@ -120,7 +115,7 @@ export function TerminalActivationDialog({
       toast({
         variant: 'destructive',
         title: 'Device identity unavailable',
-        description: 'Restart the desktop app and try terminal activation again.',
+        description: 'Restart the app.',
       });
       return;
     }
@@ -163,12 +158,12 @@ export function TerminalActivationDialog({
               ? 'Terminal activated'
               : 'Terminal registered',
         description: activationWasDryRun
-          ? `This TAC was not sent to MRA because ${formatActivationDryRunReason(activationResult?.dry_run_reason)}.`
+          ? 'Activation prepared only.'
           : activationError
-            ? activationError
+            ? 'Activation failed.'
             : terminalStatus === 'active'
-              ? 'This device can now perform MRA EIS fiscal actions for the selected branch. Reloading the app now.'
-              : 'MRA activation was submitted. Refresh terminal status if it remains pending.',
+              ? 'Reloading app.'
+              : 'Activation submitted.',
       });
 
       if (shouldReloadAfterActivation && typeof window !== 'undefined') {
@@ -180,7 +175,7 @@ export function TerminalActivationDialog({
       toast({
         variant: 'destructive',
         title: 'Activation failed',
-        description: error?.message || 'Check the TAC and try again.',
+        description: 'Check the TAC.',
       });
     } finally {
       setIsActivating(false);
@@ -193,7 +188,7 @@ export function TerminalActivationDialog({
         <DialogHeader>
           <DialogTitle>Activate EIS Terminal</DialogTitle>
           <DialogDescription>
-            Enter the TAC issued by MRA for this installed device.
+            Enter the MRA TAC.
           </DialogDescription>
         </DialogHeader>
 

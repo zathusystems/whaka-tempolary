@@ -183,8 +183,8 @@ export function VoidModal({
       console.error('Error voiding sale:', error);
       toast({
         variant: 'destructive',
-        title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to void sale. Please try again.',
+        title: 'Void failed',
+        description: 'Try again.',
       });
     } finally {
       setIsLoading(false);

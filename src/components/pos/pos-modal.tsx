@@ -459,7 +459,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     // blocker here. Mapping readiness is enforced through approval/sync checks.
     const explicitReady = mapping.isReadyForSale ?? mapping.is_ready_for_sale;
     if (explicitReady === false) {
-      return `${productName} is not sale-ready for EIS. Refresh MRA products or review the mapping in settings.`;
+      return `${productName} is not EIS-ready.`;
     }
 
     return '';
@@ -970,7 +970,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
 
     if (isBrowserOffline()) {
       if (!hasCachedInventory) {
-        setMraProductSyncError('Server unavailable. Connect to the POS server once to download MRA products and EIS configurations for this device.');
+        setMraProductSyncError('Connect to sync products.');
       } else {
         setMraProductSyncError(null);
       }
@@ -1003,7 +1003,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       }
 
       if (!terminalId) {
-        throw new Error('Activate this device as the MRA EIS terminal for this branch before refreshing MRA configurations.');
+        throw new Error('Activate this device first.');
       }
 
       const params = new URLSearchParams({ business_id: String(business.id) });
@@ -1022,7 +1022,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       if (response?.fresh === false && response?.error) {
         console.warn('[POS Modal] MRA config refresh failed:', response.error);
         if (!hasCachedInventory) {
-          setMraProductSyncError(String(response.error));
+          setMraProductSyncError('Config refresh failed.');
         }
       } else if (response?.refreshed) {
         setMraProductSyncError(null);
@@ -1034,7 +1034,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     } catch (error: any) {
       console.warn('[POS Modal] Failed to ensure fresh MRA configurations:', error);
       if (!hasCachedInventory) {
-        setMraProductSyncError(error?.message || 'Could not download latest EIS configurations.');
+        setMraProductSyncError('Config refresh failed.');
       }
     }
   }, [branchId, business?.id, eisEnabled, hasCachedInventory, isBrowserOffline, toast]);
@@ -1057,18 +1057,18 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     };
 
     if (!branchId) {
-      return fail('Select a branch', 'Choose a branch before syncing MRA products.');
+      return fail('Select a branch', 'Select a branch first.');
     }
 
     if (isBrowserOffline()) {
       return fail('Server unavailable', hasCachedInventory
-        ? 'Could not refresh from the POS server. POS is using cached MRA products for sales.'
-        : 'Could not reach the POS server. Connect once to download MRA products for this device.');
+        ? 'Using cached products.'
+        : 'Connect to sync products.');
     }
 
     const normalizedBranchId = normalizeBranchId(branchId);
     if (!normalizedBranchId) {
-      return fail('Invalid branch', 'The current branch could not be resolved for MRA sync.');
+      return fail('Invalid branch', 'Select a valid branch.');
     }
 
     setIsSyncingMraProducts(true);
@@ -1081,7 +1081,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       const terminal = findCurrentDeviceTerminal(terminals, normalizedBranchId);
 
       if (!terminal?.id || String(terminal?.status || '').toLowerCase() !== 'active') {
-        throw new Error('Activate this device as the MRA EIS terminal for this branch before syncing MRA products.');
+        throw new Error('Activate this device first.');
       }
 
       const pullResponse = await authFetch.fetch<any>(
@@ -1135,7 +1135,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       return { ok: true };
     } catch (error: any) {
       console.error('[POS Modal] Failed to sync MRA products:', error);
-      return fail('MRA product sync failed', error?.message || 'Could not fetch products from MRA.');
+      return fail('MRA sync failed', 'Try again.');
     } finally {
       setIsSyncingMraProducts(false);
     }
@@ -1173,7 +1173,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
 
     if (isBrowserOffline()) {
       if (!hasCachedInventory) {
-        setMraProductSyncError('Server unavailable. Connect once to download MRA products for this device.');
+        setMraProductSyncError('Connect to sync products.');
       } else {
         setMraProductSyncError(null);
       }
@@ -1635,8 +1635,8 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
             console.error('[POS Modal] Error checking MRA mapping from API:', error);
             toast({
               variant: 'destructive',
-              title: 'Error',
-              description: 'Failed to verify MRA mapping for this product. Please try again.',
+              title: 'Mapping check failed',
+              description: 'Try again.',
             });
             return;
           }
@@ -1644,21 +1644,21 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         
         // Block sale if not ready for sale
         if (!isReadyForSale) {
-          let errorTitle = 'MRA Mapping Required';
-          let errorDescription = `${item.name} cannot be sold - MRA mapping issue.`;
+          let errorTitle = 'Mapping required';
+          let errorDescription = `${item.name}: mapping required.`;
           
           if (mappingStatus === 'pending') {
-            errorTitle = 'MRA Mapping Pending Approval';
-            errorDescription = `${item.name} has a pending MRA mapping. Go to Inventory → MRA Mappings to approve it.`;
+            errorTitle = 'Mapping pending';
+            errorDescription = `${item.name}: approve mapping.`;
           } else if (mappingStatus === 'unsynced') {
-            errorTitle = 'MRA Mapping Not Synced';
-            errorDescription = `${item.name} mapping is approved but not synced to MRA. Please sync it first.`;
+            errorTitle = 'Mapping not synced';
+            errorDescription = `${item.name}: sync mapping.`;
           } else if (mappingStatus === 'missing') {
-            errorTitle = 'MRA Mapping Missing';
-            errorDescription = `${item.name} has no MRA mapping. Go to Inventory → MRA Mappings to create one.`;
+            errorTitle = 'Mapping missing';
+            errorDescription = `${item.name}: map product.`;
           } else if (mappingStatus === 'taxpayer_incompatible') {
-            errorTitle = 'EIS Tax Setup Conflict';
-            errorDescription = mappingBlockReason || `${item.name} is approved in MRA but not sale-ready for this taxpayer.`;
+            errorTitle = 'Tax setup conflict';
+            errorDescription = mappingBlockReason || `${item.name}: tax setup conflict.`;
           }
           
           toast({
@@ -1673,8 +1673,8 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         console.error('[POS Modal] Unexpected error checking MRA mapping:', error);
         toast({
           variant: 'destructive',
-          title: 'Error',
-          description: 'Failed to verify MRA mapping for this product.',
+          title: 'Mapping check failed',
+          description: 'Try again.',
         });
         return;
       }
@@ -2586,7 +2586,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       : hasInventory
         ? 'Search to show products'
         : mraProductSyncError
-          ? 'No cached products for offline sale'
+          ? 'No cached products'
           : isSyncingMraProducts
             ? 'No cached products yet'
             : 'No products available';
@@ -2595,10 +2595,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       : hasInventory
         ? undefined
         : mraProductSyncError
-          ? 'This device has no local product cache. Connect once and sync MRA products before relying on offline sales.'
+          ? 'Connect to sync products.'
           : isSyncingMraProducts
-            ? 'Fetching products for first-time setup. If internet is unavailable, cached products from a previous sync are required for offline sales.'
-            : 'Sync MRA products once on this device before making offline sales.';
+            ? 'Syncing products...'
+            : 'Sync products first.';
 
     // Calculate tax using MRA mappings if EIS is enabled
     let cartTax = 0;
@@ -2675,12 +2675,12 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     const sessionStatusTitle = isLoadingSession
       ? 'Loading POS session'
       : isOfflineAtRender
-        ? 'Offline POS session not found'
+        ? 'No cached session'
         : 'Open a POS session first';
     const sessionStatusDescription = isLoadingSession
-      ? 'Checking the local session cache so POS can open without internet.'
+      ? 'Checking session...'
       : isOfflineAtRender
-        ? `${backendConnectionIssue.description} This device has no active cached session for this branch.`
+        ? backendConnectionIssue.description
         : 'Start a session for this branch before taking sales.';
 
     return (
@@ -2724,7 +2724,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               <div className="flex shrink-0 items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-900 dark:border-yellow-800 dark:bg-yellow-950/30 dark:text-yellow-100">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
                 <span className="min-w-0 break-words">
-                  Offline mode: using the latest cached active session for this branch because user identity cannot be confirmed until internet returns.
+                  Using cached session.
                 </span>
               </div>
             )}
@@ -2784,13 +2784,13 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
             {isSyncingMraProducts && allInventory && (
               <div className="flex shrink-0 items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span>{hasCachedInventory ? 'Loading latest MRA products...' : 'Trying to load MRA products for first-time setup...'}</span>
+                <span>{hasCachedInventory ? 'Refreshing MRA products...' : 'Syncing MRA products...'}</span>
               </div>
             )}
             {!isSyncingMraProducts && mraProductSyncError && allInventory && (
               <div className="flex shrink-0 items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
-                <span className="min-w-0 break-words">MRA product setup required: {mraProductSyncError}</span>
+                <span className="min-w-0 break-words">{mraProductSyncError}</span>
               </div>
             )}
             <div className="flex-1 overflow-hidden min-h-0">{renderPosForBusiness()}</div>

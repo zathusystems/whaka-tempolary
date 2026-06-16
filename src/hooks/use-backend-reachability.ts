@@ -81,22 +81,22 @@ export const getBackendConnectionIssue = (
   const browserOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
   if (browserOffline) {
     return {
-      title: 'Internet connection required',
-      description: 'This device appears to be offline. Connect to the internet before completing the sale so the POS server can issue and store the receipt.',
+      title: 'No internet connection',
+      description: 'Connect to the internet.',
     };
   }
 
   const error = String(state.error || '').trim();
   const lowerError = error.toLowerCase();
   const serverHint = lowerError.includes('timed out')
-    ? 'The POS server did not respond in time.'
+    ? 'POS server timed out.'
     : lowerError.includes('http')
-      ? 'The POS server responded with an error.'
-      : 'Your internet may be connected, but the POS server could not be reached.';
+      ? 'POS server error.'
+      : 'POS server unreachable.';
 
   return {
     title: 'POS server unavailable',
-    description: `${serverHint} Check server availability, DNS/VPN/hotspot settings, then try the sale again.${error ? ` (${error})` : ''}`,
+    description: serverHint,
   };
 };
 

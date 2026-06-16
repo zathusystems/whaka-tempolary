@@ -133,8 +133,8 @@ export function CreditNoteModal({
       console.error('Error creating credit note:', error);
       toast({
         variant: 'destructive',
-        title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to create credit note. Please try again.',
+        title: 'Credit note failed',
+        description: 'Try again.',
       });
     } finally {
       setIsLoading(false);

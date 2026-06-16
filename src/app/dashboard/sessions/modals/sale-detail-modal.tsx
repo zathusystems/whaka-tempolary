@@ -685,13 +685,13 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
       } else {
         console.warn('Print failed');
         const failedDescription = failedResult?.timedOut
-          ? 'Printer did not respond in time. Check printer connection and try again.'
-          : 'Failed to send receipt to printer. Please try again.';
+          ? 'Printer timed out.'
+          : 'Print failed.';
         toast({
           variant: 'destructive',
           title: failedResult?.timedOut ? 'Print Timed Out' : 'Print Failed',
           description: printedCopies > 0
-            ? `${printedCopies} receipt${printedCopies > 1 ? 's were' : ' was'} printed, then printing stopped. ${failedDescription}`
+            ? `${printedCopies} printed. ${failedDescription}`
             : failedDescription,
         });
       }
@@ -787,10 +787,10 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                           <p>MRA portal may not show the cancellation until the pending EIS void retry is accepted.</p>
                         )}
                         {voidEisIsFailed && (
-                          <p>Review the EIS correction record and retry queue before relying on the portal state.</p>
+                          <p>Retry EIS correction.</p>
                         )}
                         {voidEisIsConfirmed && (
-                          <p>The cancellation document was sent separately from the original fiscal receipt. Check portal correction or cancelled receipt records, not only the original sale row.</p>
+                          <p>Cancellation submitted separately.</p>
                         )}
                       </div>
                     ) : (

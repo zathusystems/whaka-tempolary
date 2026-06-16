@@ -113,8 +113,8 @@ export function DebitNoteModal({
       console.error('Error creating debit note:', error);
       toast({
         variant: 'destructive',
-        title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to create debit note. Please try again.',
+        title: 'Debit note failed',
+        description: 'Try again.',
       });
     } finally {
       setIsLoading(false);

@@ -924,8 +924,8 @@ export default function PosPage() {
             // If API fails and we're online, don't allow the sale
             toast({
               variant: 'destructive',
-              title: 'Error',
-              description: 'Failed to verify MRA mapping for this product. Please try again.',
+              title: 'Mapping check failed',
+              description: 'Try again.',
             });
             return;
           }
@@ -933,18 +933,18 @@ export default function PosPage() {
         
         // Block sale if not ready for sale
         if (!isReadyForSale) {
-          let errorTitle = 'MRA Mapping Required';
-          let errorDescription = `${item.name} cannot be sold - MRA mapping issue.`;
+          let errorTitle = 'Mapping required';
+          let errorDescription = `${item.name}: mapping required.`;
           
           if (mappingStatus === 'pending') {
-            errorTitle = 'MRA Mapping Pending Approval';
-            errorDescription = `${item.name} has a pending MRA mapping. Go to Inventory → MRA Mappings to approve it.`;
+            errorTitle = 'Mapping pending';
+            errorDescription = `${item.name}: approve mapping.`;
           } else if (mappingStatus === 'unsynced') {
-            errorTitle = 'MRA Mapping Not Synced';
-            errorDescription = `${item.name} mapping is approved but not synced to MRA. Please sync it first.`;
+            errorTitle = 'Mapping not synced';
+            errorDescription = `${item.name}: sync mapping.`;
           } else if (mappingStatus === 'missing') {
-            errorTitle = 'MRA Mapping Missing';
-            errorDescription = `${item.name} has no MRA mapping. Go to Inventory → MRA Mappings to create one.`;
+            errorTitle = 'Mapping missing';
+            errorDescription = `${item.name}: map product.`;
           }
           
           toast({
@@ -959,8 +959,8 @@ export default function PosPage() {
         console.error('[POS Page] Unexpected error checking MRA mapping:', error);
         toast({
           variant: 'destructive',
-          title: 'Error',
-          description: 'Failed to verify MRA mapping for this product.',
+          title: 'Mapping check failed',
+          description: 'Try again.',
         });
         return;
       }
@@ -1728,7 +1728,7 @@ export default function PosPage() {
               toast({
                 variant: 'destructive',
                 title: 'Legal Receipt Not Issued',
-                description: `${errorMessage}. Connect to the backend and retry sync before printing an EIS receipt.`,
+                description: 'Sync sale first.',
               });
             }
             return null;

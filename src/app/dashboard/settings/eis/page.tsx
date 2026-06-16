@@ -834,21 +834,6 @@ const getApiBranchId = (item: any): string => {
   return String(rawBranch ?? item?.branch_id ?? item?.branchId ?? '');
 };
 
-const formatActivationDryRunReason = (reason?: string): string => {
-  switch (reason) {
-    case 'dry_run_enabled':
-      return 'dry-run is enabled';
-    case 'live_submission_disabled':
-      return 'live submission is disabled';
-    case 'http_calls_disabled':
-      return 'HTTP calls are disabled';
-    case 'activation_call_failed':
-      return 'the activation call failed before reaching MRA';
-    default:
-      return reason || 'backend is not in live activation mode';
-  }
-};
-
 const formatReconciliationValue = (value: unknown): string => {
   if (Array.isArray(value)) {
     return value.map(formatReconciliationValue).filter(Boolean).join(', ');
@@ -1058,8 +1043,8 @@ export default function EISSettingsPage() {
 
     toast({
       variant: 'destructive',
-      title: 'EIS terminal activation required',
-      description: 'This business has MRA EIS enabled. Activate this device with its own TAC before using POS.',
+      title: 'Activation required',
+      description: 'Activate this device first.',
     });
   }, [activationRequired]);
 
@@ -1544,19 +1529,19 @@ export default function EISSettingsPage() {
         const activationError = activationResult?.error;
         const shouldReloadAfterActivation = terminalData.status === 'active' && !activationWasDryRun && !activationError;
         const activationToastTitle = activationWasDryRun
-          ? 'Activation Prepared Only'
+          ? 'Activation prepared'
           : activationError
-            ? 'Activation Needs Attention'
+            ? 'Activation failed'
             : terminalData.status === 'active'
-              ? 'Terminal Activated!'
-              : 'Terminal Registered';
+              ? 'Terminal activated'
+              : 'Terminal registered';
         const activationToastDescription = activationWasDryRun
-          ? `This TAC was not sent to MRA because ${formatActivationDryRunReason(activationResult?.dry_run_reason)}.`
+          ? 'Not sent to MRA.'
           : activationError
-            ? activationError
+            ? 'Check the TAC.'
             : terminalData.status === 'active'
-              ? `Terminal ${terminalData.terminal_id} has been successfully activated. Reloading the app now.`
-              : `Terminal ${terminalData.terminal_id} is pending activation confirmation.`;
+              ? 'Reloading app.'
+              : 'Activation submitted.';
         setTerminal(terminalData);
         setLastSubmitReconciliation(null);
         persistTerminalCache(branchId, terminalData);
@@ -1590,8 +1575,8 @@ export default function EISSettingsPage() {
       console.error('Terminal activation error:', error);
       toast({
         variant: 'destructive',
-        title: 'Activation Failed',
-        description: error.message || 'Failed to activate terminal. Please check your TAC and try again.',
+        title: 'Activation failed',
+        description: 'Check the TAC.',
       });
     } finally {
       setIsActivatingTerminal(false);
@@ -1618,7 +1603,7 @@ export default function EISSettingsPage() {
         toast({
           title: 'Terminal status refreshed',
           description: refreshedTerminal.health_check?.checked
-            ? `MRA ping reports ${refreshedTerminal.is_online ? 'online' : 'offline'}.`
+            ? `MRA is ${refreshedTerminal.is_online ? 'online' : 'offline'}.`
             : `Terminal is ${refreshedTerminal.status.replace('_', ' ')}.`,
         });
       }
@@ -1640,8 +1625,8 @@ export default function EISSettingsPage() {
     if (!terminal?.id) {
       toast({
         variant: 'destructive',
-        title: 'Terminal required',
-        description: 'Activate a terminal before checking MRA block status.',
+        title: 'Activation required',
+        description: 'Activate this device first.',
       });
       return;
     }
@@ -1666,18 +1651,18 @@ export default function EISSettingsPage() {
       }
 
       toast({
-        title: response?.is_blocked ? 'Terminal blocked' : 'Terminal block status checked',
+        title: response?.is_blocked ? 'Terminal blocked' : 'Block status checked',
         description: response?.is_blocked
-          ? (response?.blocking_status?.blocking_reason || 'MRA reports this terminal is blocked.')
-          : 'MRA does not currently report this terminal as blocked.',
+          ? 'Contact MRA.'
+          : 'Not blocked.',
         variant: response?.is_blocked ? 'destructive' : undefined,
       });
     } catch (error: any) {
       console.error('Check terminal block status error:', error);
       toast({
         variant: 'destructive',
-        title: 'Block status check failed',
-        description: error?.message || 'Could not check MRA terminal block status.',
+        title: 'Check failed',
+        description: 'Try again.',
       });
     } finally {
       setIsCheckingTerminalBlockStatus(false);
@@ -1688,8 +1673,8 @@ export default function EISSettingsPage() {
     if (!terminal?.id) {
       toast({
         variant: 'destructive',
-        title: 'Terminal required',
-        description: 'Activate a terminal before checking MRA last submissions.',
+        title: 'Activation required',
+        description: 'Activate this device first.',
       });
       return;
     }
@@ -1822,7 +1807,7 @@ export default function EISSettingsPage() {
       toast({
         variant: 'destructive',
         title: 'Reset failed',
-        description: error?.message || 'Could not reset this failed activation.',
+        description: 'Try again.',
       });
     } finally {
       setIsResettingTerminalActivation(false);
@@ -1834,8 +1819,8 @@ export default function EISSettingsPage() {
     if (!terminal) {
       toast({
         variant: 'destructive',
-        title: 'Terminal required',
-        description: 'Activate a terminal before syncing MRA configurations.',
+        title: 'Activation required',
+        description: 'Activate this device first.',
       });
       return;
     }
@@ -2090,7 +2075,7 @@ export default function EISSettingsPage() {
     options: { markAsMraSynced?: boolean } = {}
   ) => {
     if (!terminal?.id || !terminalIsActive) {
-      throw new Error('Activate this branch terminal before importing MRA initial stock.');
+      throw new Error('Activate this device first.');
     }
 
     if (!activeBranchId) {
@@ -2152,8 +2137,8 @@ export default function EISSettingsPage() {
     if (!terminal?.id || !terminalIsActive) {
       toast({
         variant: 'destructive',
-        title: 'Active terminal required',
-        description: 'Activate this branch terminal before pulling MRA approved products.',
+        title: 'Activation required',
+        description: 'Activate this device first.',
       });
       return;
     }
@@ -2162,7 +2147,7 @@ export default function EISSettingsPage() {
       toast({
         variant: 'destructive',
         title: 'Select a branch',
-        description: 'Choose the branch whose approved MRA products should be pulled.',
+        description: 'Select a branch first.',
       });
       return;
     }
@@ -2179,8 +2164,8 @@ export default function EISSettingsPage() {
       const syncResult = await syncInventoryFromBackend(activeBranchId);
 
       toast({
-        title: 'Approved products pulled',
-        description: `${response?.created ?? 0} created, ${response?.updated ?? 0} updated from MRA approved products. Local sync pulled ${syncResult.synced} inventory record${syncResult.synced === 1 ? '' : 's'}.`,
+        title: 'MRA products synced',
+        description: `${response?.created ?? 0} created, ${response?.updated ?? 0} updated.`,
       });
     } catch (error: any) {
       console.error('Pull approved MRA products error:', error);
@@ -2202,8 +2187,8 @@ export default function EISSettingsPage() {
     if (!terminal?.id || !terminalIsActive) {
       toast({
         variant: 'destructive',
-        title: 'Active terminal required',
-        description: 'Activate this branch terminal before creating MRA products.',
+        title: 'Activation required',
+        description: 'Activate this device first.',
       });
       return;
     }
@@ -2220,8 +2205,8 @@ export default function EISSettingsPage() {
       console.error('MRA product lookup load error:', error);
       toast({
         variant: 'destructive',
-        title: 'Product setup data failed',
-        description: error?.message || 'Could not load MRA HS codes or units of measure.',
+        title: 'Setup failed',
+        description: 'Try again.',
       });
     } finally {
       setIsLoadingProductLookups(false);
@@ -2232,8 +2217,8 @@ export default function EISSettingsPage() {
     if (!terminal?.id || !terminalIsActive) {
       toast({
         variant: 'destructive',
-        title: 'Active terminal required',
-        description: 'Activate this branch terminal before creating MRA products.',
+        title: 'Activation required',
+        description: 'Activate this device first.',
       });
       return;
     }
@@ -2247,8 +2232,8 @@ export default function EISSettingsPage() {
     if (!terminal?.id || !terminalIsActive) {
       toast({
         variant: 'destructive',
-        title: 'Active terminal required',
-        description: 'Activate this branch terminal before creating MRA products.',
+        title: 'Activation required',
+        description: 'Activate this device first.',
       });
       return;
     }
@@ -2288,7 +2273,7 @@ export default function EISSettingsPage() {
       const productCode = data?.barcode || data?.productId || payload.barcode || payload.name;
       toast({
         title: response?.dry_run ? 'MRA product prepared' : 'MRA product submitted',
-        description: `${productCode} was sent to MRA. Pull approved products after MRA returns it in the terminal site catalog before using it for sales.`,
+        description: `${productCode} sent to MRA.`,
       });
       setMraProductForm({ barcode: '', hsCode: '', name: '', description: '', uom: '' });
       setIsCreateProductModalOpen(false);
@@ -2296,8 +2281,8 @@ export default function EISSettingsPage() {
       console.error('MRA product creation error:', error);
       toast({
         variant: 'destructive',
-        title: 'MRA product submission failed',
-        description: error?.message || 'Could not create the product in MRA EIS.',
+        title: 'MRA product failed',
+        description: 'Try again.',
       });
     } finally {
       setIsSubmittingMraProduct(false);
@@ -2308,8 +2293,8 @@ export default function EISSettingsPage() {
     if (!terminal?.id || !terminalIsActive) {
       toast({
         variant: 'destructive',
-        title: 'Active terminal required',
-        description: 'Activate this branch terminal before preparing initial inventory for MRA.',
+        title: 'Activation required',
+        description: 'Activate this device first.',
       });
       return;
     }
@@ -2402,8 +2387,8 @@ export default function EISSettingsPage() {
     if (!terminal?.id || !terminalIsActive || !initialStockSubmissionPreview) {
       toast({
         variant: 'destructive',
-        title: 'Initial stock preview required',
-        description: 'Review the products before submitting initial inventory to MRA.',
+        title: 'Review required',
+        description: 'Review products first.',
       });
       return;
     }
@@ -2516,10 +2501,8 @@ export default function EISSettingsPage() {
           <div className="flex items-start gap-3">
             <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0" />
             <div className="space-y-1">
-              <p className="font-semibold">This device must be activated before POS can be used</p>
-              <p>
-                The selected business has MRA EIS enabled, but this install is not an active EIS terminal for the selected branch. Enter the TAC for this device in the terminal activation section.
-              </p>
+              <p className="font-semibold">Activation required</p>
+              <p>Activate this device first.</p>
             </div>
           </div>
         </div>
@@ -2537,7 +2520,7 @@ export default function EISSettingsPage() {
           <DialogHeader>
             <DialogTitle>Review Initial Stock Submission</DialogTitle>
             <DialogDescription>
-              Confirm the exact products and stock quantities before sending the initial inventory payload to MRA.
+              Review products and quantities.
             </DialogDescription>
           </DialogHeader>
 
@@ -2678,7 +2661,7 @@ export default function EISSettingsPage() {
           <DialogHeader>
             <DialogTitle>Create Product in MRA EIS</DialogTitle>
             <DialogDescription>
-              Submit a new product to MRA. It creates zero-quantity warehouse inventory, then you should pull approved products back into POS before selling it.
+              Submit a product to MRA.
             </DialogDescription>
           </DialogHeader>
 
@@ -3136,10 +3119,8 @@ export default function EISSettingsPage() {
 	                      <div className="flex items-start gap-2">
 	                        <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
 	                        <div>
-	                          <p className="font-semibold">This device is not activated for EIS sales</p>
-	                          <p className="text-xs mt-1">
-	                            The details above belong to a different activated device. Fiscal sales stay blocked here until this device is activated with its own TAC.
-	                          </p>
+                          <p className="font-semibold">Activation required</p>
+                          <p className="text-xs mt-1">Activate this device first.</p>
 	                        </div>
 	                      </div>
 	                    </div>
@@ -3151,9 +3132,7 @@ export default function EISSettingsPage() {
                         <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
                         <div>
                           <p className="font-semibold">Activation was prepared only</p>
-                          <p className="text-xs mt-1">
-                            MRA did not receive this TAC because {formatActivationDryRunReason(terminal.activation_result.dry_run_reason)}.
-                          </p>
+                          <p className="text-xs mt-1">Not sent to MRA.</p>
                         </div>
                       </div>
                     </div>
@@ -3402,9 +3381,9 @@ export default function EISSettingsPage() {
                 <div className="p-4 rounded-lg border border-amber-500/30 bg-amber-500/10 flex items-start gap-3">
                   <AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400 mt-0.5 flex-shrink-0" />
                   <div>
-                    <p className="font-semibold text-sm text-amber-900 dark:text-amber-300">No Terminal Found for This Branch</p>
+                    <p className="font-semibold text-sm text-amber-900 dark:text-amber-300">No terminal found</p>
                     <p className="text-sm text-amber-800 dark:text-amber-400 mt-1">
-                      Activate this device to start using MRA EIS for the selected branch.
+                      Activate this device first.
                     </p>
                   </div>
                 </div>
@@ -3418,7 +3397,7 @@ export default function EISSettingsPage() {
                         {terminal && !terminalDeviceMismatch ? 'Re-activation required' : 'Activation required'}
                       </p>
                       <p className="mt-1 text-sm text-sky-900 dark:text-sky-300">
-                        Enter the Terminal Activation Code from MRA to activate this device for EIS sales.
+                        Enter the TAC from MRA.
                       </p>
                     </div>
                     <Button

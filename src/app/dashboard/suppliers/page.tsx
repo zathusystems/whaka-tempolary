@@ -88,6 +88,56 @@ const normalizeBranchId = (value?: string | number | null): string => {
     return normalized;
 };
 
+const readBooleanFlag = (value: unknown): boolean | null => {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+        if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    }
+    return null;
+};
+
+const readJsonStorage = (key: string): any => {
+    if (typeof window === 'undefined') return null;
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return null;
+    }
+};
+
+const resolveCachedEisEnabled = (business?: any): boolean => {
+    const storedBusiness =
+        readJsonStorage('handy-pos-business') ||
+        readJsonStorage('handypos-business') ||
+        {};
+    const storedSettings = readJsonStorage('handypos-business-settings') || {};
+    const candidates = [
+        business?.enable_eis,
+        business?.enableEis,
+        business?.eis_enabled,
+        business?.eisEnabled,
+        storedBusiness?.enable_eis,
+        storedBusiness?.enableEis,
+        storedBusiness?.eis_enabled,
+        storedBusiness?.eisEnabled,
+        storedSettings?.enable_eis,
+        storedSettings?.enableEis,
+        storedSettings?.eis_enabled,
+        storedSettings?.eisEnabled,
+    ];
+
+    for (const value of candidates) {
+        const parsed = readBooleanFlag(value);
+        if (parsed !== null) return parsed;
+    }
+    return false;
+};
+
 const parseDateCandidate = (...values: unknown[]): Date | null => {
     for (const value of values) {
         if (value instanceof Date) {
@@ -187,25 +237,39 @@ const SupplierForm = ({
     defaultValues,
     activeBranchId,
     activeBusinessId,
+    isEisEnabled,
 }: {
     onFormSubmit: () => void,
     defaultValues?: Supplier,
     activeBranchId: string,
-    activeBusinessId?: string
+    activeBusinessId?: string,
+    isEisEnabled?: boolean,
 }) => {
     const { user, business } = useAuth();
     const { register, handleSubmit, reset, formState: { errors } } = useForm({ defaultValues });
 
     const onSubmit = async (data: {
         name: string;
+        contactPerson?: string;
         email?: string;
         phone?: string;
         address?: string;
         city?: string;
+        region?: string;
+        country?: string;
         supplierTin?: string;
         mraSupplierId?: string | number;
         vatRegistered?: boolean;
     }) => {
+        if (isEisEnabled) {
+            toast({
+                variant: 'destructive',
+                title: 'Suppliers are EIS managed',
+                description: 'Use Sync EIS Suppliers.',
+            });
+            return;
+        }
+
         if (!user) {
             toast({ variant: 'destructive', title: 'User not found' });
             return;
@@ -253,6 +317,9 @@ const SupplierForm = ({
                         phone: data.phone, 
                         address: data.address, 
                         city: data.city,
+                        contactPerson: data.contactPerson,
+                        region: data.region,
+                        country: data.country,
                         // MRA EIS Compliance Fields
                         supplierTin: data.supplierTin,
                         mraSupplierId,
@@ -276,60 +343,55 @@ const SupplierForm = ({
     return (
         <form onSubmit={handleSubmit(onSubmit)} className="grid gap-4 py-4">
             <div>
-                <Label htmlFor="name">Supplier Name</Label>
+                <Label htmlFor="name">Supplier Name*</Label>
                 <Input id="name" {...register("name", { required: "Supplier name is required" })} />
                 {errors.name && <p className="text-destructive text-sm mt-1">{errors.name.message as string}</p>}
             </div>
             <div>
-                <Label htmlFor="email">Email</Label>
+                <Label htmlFor="contactPerson">Contact Person*</Label>
+                <Input id="contactPerson" {...register("contactPerson", { required: "Contact person is required" })} />
+                {errors.contactPerson && <p className="text-destructive text-sm mt-1">{errors.contactPerson.message as string}</p>}
+            </div>
+            <div>
+                <Label htmlFor="email">Contact Email</Label>
                 <Input id="email" type="email" {...register("email")} />
             </div>
             <div>
-                <Label htmlFor="phone">Phone</Label>
-                <Input id="phone" {...register("phone")} />
+                <Label htmlFor="phone">Contact Phone*</Label>
+                <Input id="phone" {...register("phone", { required: "Contact phone is required" })} />
+                {errors.phone && <p className="text-destructive text-sm mt-1">{errors.phone.message as string}</p>}
             </div>
             <div>
-                <Label htmlFor="address">Address</Label>
-                <Input id="address" {...register("address")} />
+                <Label htmlFor="address">Address*</Label>
+                <Input id="address" {...register("address", { required: "Address is required" })} />
+                {errors.address && <p className="text-destructive text-sm mt-1">{errors.address.message as string}</p>}
             </div>
             <div>
-                <Label htmlFor="city">City</Label>
-                <Input id="city" {...register("city")} />
+                <Label htmlFor="city">City / Place of Business*</Label>
+                <Input id="city" {...register("city", { required: "City/place is required" })} />
+                {errors.city && <p className="text-destructive text-sm mt-1">{errors.city.message as string}</p>}
+            </div>
+            <div>
+                <Label htmlFor="region">Region / State</Label>
+                <Input id="region" {...register("region")} />
+            </div>
+            <div>
+                <Label htmlFor="country">Country*</Label>
+                <Input id="country" {...register("country", { required: "Country is required" })} />
+                {errors.country && <p className="text-destructive text-sm mt-1">{errors.country.message as string}</p>}
             </div>
             
             {/* MRA EIS Compliance Fields */}
             <div className="border-t pt-4 mt-4">
-                <h3 className="font-semibold text-sm mb-3">MRA EIS Compliance</h3>
+                <h3 className="font-semibold text-sm mb-3">Supplier Identity</h3>
 	                <div>
-	                    <Label htmlFor="supplierTin">Supplier TIN (Tax ID)</Label>
+	                    <Label htmlFor="supplierTin">Supplier TIN</Label>
 	                    <Input 
 	                        id="supplierTin" 
 	                        placeholder="e.g., 1234567890"
 	                        {...register("supplierTin")} 
 	                    />
-	                    <p className="text-xs text-muted-foreground mt-1">Supplier's Tax Identification Number for VAT reclaim</p>
 	                </div>
-	                <div className="mt-3">
-	                    <Label htmlFor="mraSupplierId">EIS Supplier ID</Label>
-	                    <Input
-	                        id="mraSupplierId"
-	                        type="number"
-	                        min="1"
-	                        placeholder="Assigned by EIS"
-	                        {...register("mraSupplierId")}
-	                    />
-	                </div>
-	                <div className="mt-3 flex items-center gap-2">
-	                    <input 
-	                        type="checkbox" 
-                        id="vatRegistered"
-                        {...register("vatRegistered")}
-                        className="h-4 w-4 rounded border-gray-300"
-                    />
-                    <Label htmlFor="vatRegistered" className="font-normal cursor-pointer">
-                        Supplier is VAT Registered
-                    </Label>
-                </div>
             </div>
             
             <DialogFooter>
@@ -340,7 +402,21 @@ const SupplierForm = ({
 };
 
 
-const SupplierListRow = ({ supplier, onView, onEdit, onDelete, activeBranchId }: { supplier: Supplier, onView: () => void, onEdit: () => void, onDelete: () => void, activeBranchId: string }) => {
+const SupplierListRow = ({
+    supplier,
+    onView,
+    onEdit,
+    onDelete,
+    activeBranchId,
+    isEisEnabled,
+}: {
+    supplier: Supplier,
+    onView: () => void,
+    onEdit: () => void,
+    onDelete: () => void,
+    activeBranchId: string,
+    isEisEnabled: boolean,
+}) => {
     const { format: formatCurrency } = useCurrency();
     
     // Get purchase history for this supplier
@@ -368,11 +444,12 @@ const SupplierListRow = ({ supplier, onView, onEdit, onDelete, activeBranchId }:
             </TableCell>
             <TableCell>
                 <div className="text-sm">
+                    {supplier.contactPerson && <p>{supplier.contactPerson}</p>}
                     {supplier.phone && <p>{supplier.phone}</p>}
                     {supplier.email && <p className="text-muted-foreground text-xs">{supplier.email}</p>}
                 </div>
             </TableCell>
-            <TableCell>{supplier.city || '-'}</TableCell>
+            <TableCell>{[supplier.city, supplier.region, supplier.country].filter(Boolean).join(', ') || '-'}</TableCell>
             <TableCell className="text-right">
                 <Badge variant={balanceDue > 0 ? 'destructive' : 'secondary'}>
                     {formatCurrency(balanceDue)}
@@ -390,12 +467,20 @@ const SupplierListRow = ({ supplier, onView, onEdit, onDelete, activeBranchId }:
                         <DropdownMenuItem onClick={onView}>
                             <History className="mr-2 h-4 w-4" /> View Details
                         </DropdownMenuItem>
-                        <DropdownMenuItem onClick={onEdit}>
-                            <Edit className="mr-2 h-4 w-4" /> Edit
-                        </DropdownMenuItem>
-                        <DropdownMenuItem className="text-destructive" onClick={onDelete}>
-                            <Trash2 className="mr-2 h-4 w-4" /> Delete
-                        </DropdownMenuItem>
+                        {isEisEnabled ? (
+                            <DropdownMenuItem disabled>
+                                <Badge variant="outline">EIS managed</Badge>
+                            </DropdownMenuItem>
+                        ) : (
+                            <>
+                                <DropdownMenuItem onClick={onEdit}>
+                                    <Edit className="mr-2 h-4 w-4" /> Edit
+                                </DropdownMenuItem>
+                                <DropdownMenuItem className="text-destructive" onClick={onDelete}>
+                                    <Trash2 className="mr-2 h-4 w-4" /> Delete
+                                </DropdownMenuItem>
+                            </>
+                        )}
                     </DropdownMenuContent>
                 </DropdownMenu>
             </TableCell>
@@ -919,16 +1004,28 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
                                         <p className="text-lg font-semibold mt-1">{supplier.name}</p>
                                     </div>
                                     <div>
-                                        <p className="text-sm font-medium text-muted-foreground">Email</p>
+                                        <p className="text-sm font-medium text-muted-foreground">Contact Person</p>
+                                        <p className="text-lg mt-1">{supplier.contactPerson || 'Not provided'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-medium text-muted-foreground">Contact Email</p>
                                         <p className="text-lg mt-1">{supplier.email || 'Not provided'}</p>
                                     </div>
                                     <div>
-                                        <p className="text-sm font-medium text-muted-foreground">Phone</p>
+                                        <p className="text-sm font-medium text-muted-foreground">Contact Phone</p>
                                         <p className="text-lg mt-1">{supplier.phone || 'Not provided'}</p>
                                     </div>
                                     <div>
-                                        <p className="text-sm font-medium text-muted-foreground">City</p>
+                                        <p className="text-sm font-medium text-muted-foreground">City / Place of Business</p>
                                         <p className="text-lg mt-1">{supplier.city || 'Not provided'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-medium text-muted-foreground">Region / State</p>
+                                        <p className="text-lg mt-1">{supplier.region || 'Not provided'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-medium text-muted-foreground">Country</p>
+                                        <p className="text-lg mt-1">{supplier.country || 'Not provided'}</p>
                                     </div>
                                     <div className="md:col-span-2">
                                         <p className="text-sm font-medium text-muted-foreground">Address</p>
@@ -1114,6 +1211,7 @@ export default function SuppliersPage() {
   const [businessId, setBusinessId] = useState<string>('');
   const [isSyncing, setIsSyncing] = useState(false);
   const [isMraSupplierSyncing, setIsMraSupplierSyncing] = useState(false);
+  const isEisEnabled = useMemo(() => resolveCachedEisEnabled(business), [business]);
 
   // Get active branch ID and business ID from auth context
   React.useEffect(() => {
@@ -1202,10 +1300,13 @@ export default function SuppliersPage() {
             id: backendSupplier.id,
             businessId: businessId,
             name: backendSupplier.name,
+            contactPerson: backendSupplier.contact_person || backendSupplier.contactPerson || '',
             email: backendSupplier.email || '',
             phone: backendSupplier.phone || '',
             address: backendSupplier.address || '',
             city: backendSupplier.city || '',
+            region: backendSupplier.region || backendSupplier.region_state || backendSupplier.regionState || backendSupplier.state || '',
+            country: backendSupplier.country || '',
 	            // MRA EIS Compliance Fields
 	            supplierTin: backendSupplier.supplier_tin || '',
 	            mraSupplierId: backendSupplier.mra_supplier_id || undefined,
@@ -1277,11 +1378,20 @@ export default function SuppliersPage() {
   }, [businessId]);
 
   const handleEdit = (supplier: Supplier) => {
+    if (isEisEnabled) {
+      toast({ title: 'Suppliers are EIS managed', description: 'Use Sync EIS Suppliers.' });
+      return;
+    }
     setEditingSupplier(supplier);
     setAddFormOpen(true);
   };
   
   const handleDelete = async (id: string) => {
+    if (isEisEnabled) {
+      toast({ title: 'Suppliers are EIS managed', description: 'Use Sync EIS Suppliers.' });
+      return;
+    }
+
     if (confirm('Are you sure you want to delete this supplier? This action cannot be undone.')) {
         if (user) {
           await deleteSupplier(
@@ -1321,10 +1431,13 @@ export default function SuppliersPage() {
           id: backendSupplier.id,
           businessId,
           name: backendSupplier.name,
+          contactPerson: backendSupplier.contact_person || backendSupplier.contactPerson || '',
           email: backendSupplier.email || '',
           phone: backendSupplier.phone || '',
           address: backendSupplier.address || '',
           city: backendSupplier.city || '',
+          region: backendSupplier.region || backendSupplier.region_state || backendSupplier.regionState || backendSupplier.state || '',
+          country: backendSupplier.country || '',
           supplierTin: backendSupplier.supplier_tin || '',
           mraSupplierId: backendSupplier.mra_supplier_id || undefined,
           vatRegistered: backendSupplier.vat_registered || false,
@@ -1367,10 +1480,13 @@ export default function SuppliersPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Suppliers</h1>
           <p className="text-muted-foreground">
-            Manage your product suppliers and their information.
+            {isEisEnabled
+              ? 'Suppliers are managed by MRA EIS.'
+              : 'Manage your product suppliers and their information.'}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+          {isEisEnabled && <Badge variant="outline">EIS managed</Badge>}
           <Button
             type="button"
             variant="outline"
@@ -1384,29 +1500,32 @@ export default function SuppliersPage() {
             )}
             Sync EIS Suppliers
           </Button>
-          <Dialog open={isAddFormOpen} onOpenChange={handleAddFormOpenChange}>
-            <DialogTrigger asChild>
-                <Button>
-                    <PlusCircle className="mr-2 h-4 w-4" /> Add Supplier
-                </Button>
-            </DialogTrigger>
-            <DialogContent className="sm:max-w-[425px] max-h-[90vh] flex flex-col">
-                <DialogHeader>
-                    <DialogTitle>{editingSupplier ? 'Edit Supplier' : 'Add New Supplier'}</DialogTitle>
-                    <DialogDescription>
-                        {editingSupplier ? 'Update the details for this supplier.' : 'Add a new supplier to your list.'}
-                    </DialogDescription>
-                </DialogHeader>
-                <div className="overflow-y-auto flex-1 pr-4">
-                    <SupplierForm 
-                        onFormSubmit={() => handleAddFormOpenChange(false)} 
-                        defaultValues={editingSupplier}
-                        activeBranchId={activeBranchId}
-                        activeBusinessId={businessId}
-                    />
-                </div>
-            </DialogContent>
-          </Dialog>
+          {!isEisEnabled && (
+            <Dialog open={isAddFormOpen} onOpenChange={handleAddFormOpenChange}>
+              <DialogTrigger asChild>
+                  <Button>
+                      <PlusCircle className="mr-2 h-4 w-4" /> Add Supplier
+                  </Button>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-[425px] max-h-[90vh] flex flex-col">
+                  <DialogHeader>
+                      <DialogTitle>{editingSupplier ? 'Edit Supplier' : 'Add New Supplier'}</DialogTitle>
+                      <DialogDescription>
+                          {editingSupplier ? 'Update the details for this supplier.' : 'Add a new supplier to your list.'}
+                      </DialogDescription>
+                  </DialogHeader>
+                  <div className="overflow-y-auto flex-1 pr-4">
+                      <SupplierForm
+                          onFormSubmit={() => handleAddFormOpenChange(false)}
+                          defaultValues={editingSupplier}
+                          activeBranchId={activeBranchId}
+                          activeBusinessId={businessId}
+                          isEisEnabled={isEisEnabled}
+                      />
+                  </div>
+              </DialogContent>
+            </Dialog>
+          )}
         </div>
       </div>
       
@@ -1421,7 +1540,7 @@ export default function SuppliersPage() {
               <TableRow>
                 <TableHead>Supplier Name</TableHead>
                 <TableHead>Contact</TableHead>
-                <TableHead>City</TableHead>
+                <TableHead>Place</TableHead>
                 <TableHead className="text-right">Balance Due</TableHead>
                 <TableHead className="text-right">Total Purchases</TableHead>
                 <TableHead className="w-[50px] text-right">Actions</TableHead>
@@ -1436,6 +1555,7 @@ export default function SuppliersPage() {
                   onEdit={() => handleEdit(supplier)}
                   onDelete={() => handleDelete(supplier.id)}
                   activeBranchId={activeBranchId}
+                  isEisEnabled={isEisEnabled}
                 />
               ))}
             </TableBody>

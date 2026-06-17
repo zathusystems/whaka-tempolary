@@ -87,6 +87,8 @@ export interface Supplier {
     phone?: string;
     address?: string;
     city?: string;
+    region?: string;
+    country?: string;
     
     // MRA Compliance Fields
     supplierTin?: string; // Supplier's Tax Identification Number

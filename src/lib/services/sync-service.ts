@@ -2256,10 +2256,13 @@ class SyncService {
             const mraSupplierId = supplier.mraSupplierId ?? supplier.mra_supplier_id;
             await db.suppliers.put({
               ...supplier,
+              contactPerson: supplier.contactPerson ?? supplier.contact_person,
               supplierTin: supplier.supplierTin ?? supplier.supplier_tin,
               mraSupplierId,
               mra_supplier_id: mraSupplierId,
               vatRegistered: supplier.vatRegistered ?? supplier.vat_registered,
+              region: supplier.region ?? supplier.region_state ?? supplier.regionState ?? supplier.state,
+              country: supplier.country,
               businessId: String(supplier.businessId || businessId || '').trim() || undefined,
               _dirty: false,
               _synced_at: new Date().toISOString()

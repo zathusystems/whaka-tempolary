@@ -24,6 +24,58 @@ const resolveStoredBusinessId = (): string => {
   return fallbackBusinessId ? String(fallbackBusinessId) : '';
 };
 
+const readJsonStorage = (key: string): any => {
+  if (typeof window === 'undefined') return null;
+  const raw = localStorage.getItem(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+};
+
+const readBooleanFlag = (value: unknown): boolean | null => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  }
+  return null;
+};
+
+const isEisEnabledForCurrentBusiness = (): boolean => {
+  const storedBusiness =
+    readJsonStorage('handy-pos-business') ||
+    readJsonStorage('handypos-business') ||
+    {};
+  const storedSettings = readJsonStorage('handypos-business-settings') || {};
+  const candidates = [
+    storedBusiness?.enable_eis,
+    storedBusiness?.enableEis,
+    storedBusiness?.eis_enabled,
+    storedBusiness?.eisEnabled,
+    storedSettings?.enable_eis,
+    storedSettings?.enableEis,
+    storedSettings?.eis_enabled,
+    storedSettings?.eisEnabled,
+  ];
+
+  for (const value of candidates) {
+    const parsed = readBooleanFlag(value);
+    if (parsed !== null) return parsed;
+  }
+  return false;
+};
+
+const assertLocalSupplierWriteAllowed = () => {
+  if (isEisEnabledForCurrentBusiness()) {
+    throw new Error('Suppliers are managed by MRA EIS. Use Sync EIS Suppliers.');
+  }
+};
+
 /**
  * Offline-first supplier CRUD service
  * Marks items as dirty for sync via Sync Service
@@ -44,6 +96,8 @@ export async function createSupplier(
   businessId?: string
 ): Promise<Supplier> {
   try {
+    assertLocalSupplierWriteAllowed();
+
     // Generate UUID locally - this same ID will be used on backend
     const id = uuidv4();
     
@@ -107,6 +161,8 @@ export async function updateSupplier(
   branchId: string
 ): Promise<void> {
   try {
+    assertLocalSupplierWriteAllowed();
+
     // 1. Update local database immediately with sync flag
     const updatesWithSync = {
       ...updates,
@@ -155,6 +211,8 @@ export async function deleteSupplier(
   branchId: string
 ): Promise<void> {
   try {
+    assertLocalSupplierWriteAllowed();
+
     // 1. Delete from local database immediately
     await db.suppliers.delete(supplierId);
 

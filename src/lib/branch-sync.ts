@@ -1,6 +1,8 @@
 'use client';
 
 import { authFetch } from '@/lib/auth-fetch';
+import { isWarehouseBranchId, WAREHOUSE_BRANCH_ID } from '@/lib/branch-context';
+import { syncSessionSnapshotToDesktopStore } from '@/lib/desktop-session-store';
 
 const LOCAL_STORAGE_KEYS = {
   BRANCHES: 'handypos-branches',
@@ -12,6 +14,19 @@ export type StoredBranch = {
   id: string;
   name: string;
   address: string;
+  backendId?: string;
+  mraBranchCode?: string;
+  mra_branch_code?: string;
+  mraSiteId?: string;
+  mra_site_id?: string;
+  mraSiteName?: string;
+  mra_site_name?: string;
+  mraTerminalId?: string;
+  mra_terminal_id?: string;
+  mraTerminalPosition?: number | null;
+  mra_terminal_position?: number | null;
+  isEisWarehouse?: boolean;
+  is_eis_warehouse?: boolean;
 };
 
 const toTrimmedString = (value: unknown): string => String(value ?? '').trim();
@@ -19,6 +34,7 @@ const toTrimmedString = (value: unknown): string => String(value ?? '').trim();
 const getBranchIdCandidates = (value: unknown): string[] => {
   const normalized = toTrimmedString(value);
   if (!normalized) return [];
+  if (isWarehouseBranchId(normalized)) return [WAREHOUSE_BRANCH_ID];
 
   const candidates = new Set<string>([normalized]);
   const numericMatch = normalized.match(/\d+/)?.[0];
@@ -42,10 +58,29 @@ const normalizeStoredBranch = (branch: any): StoredBranch | null => {
     return null;
   }
 
+  const explicitBackendId = toTrimmedString(
+    branch?.backendId ?? branch?.backend_id ?? branch?.pk
+  );
+  const brnMatch = /^BRN-(\d+)$/i.exec(id);
+  const backendId = explicitBackendId || (/^\d+$/.test(id) ? id : brnMatch?.[1] || '');
+
   return {
     id,
+    backendId: backendId || undefined,
     name: toTrimmedString(branch?.name) || 'Branch',
     address: toTrimmedString(branch?.address),
+    mraBranchCode: toTrimmedString(branch?.mraBranchCode ?? branch?.mra_branch_code),
+    mra_branch_code: toTrimmedString(branch?.mra_branch_code ?? branch?.mraBranchCode),
+    mraSiteId: toTrimmedString(branch?.mraSiteId ?? branch?.mra_site_id),
+    mra_site_id: toTrimmedString(branch?.mra_site_id ?? branch?.mraSiteId),
+    mraSiteName: toTrimmedString(branch?.mraSiteName ?? branch?.mra_site_name),
+    mra_site_name: toTrimmedString(branch?.mra_site_name ?? branch?.mraSiteName),
+    mraTerminalId: toTrimmedString(branch?.mraTerminalId ?? branch?.mra_terminal_id),
+    mra_terminal_id: toTrimmedString(branch?.mra_terminal_id ?? branch?.mraTerminalId),
+    mraTerminalPosition: branch?.mraTerminalPosition ?? branch?.mra_terminal_position ?? null,
+    mra_terminal_position: branch?.mra_terminal_position ?? branch?.mraTerminalPosition ?? null,
+    isEisWarehouse: Boolean(branch?.isEisWarehouse ?? branch?.is_eis_warehouse ?? false),
+    is_eis_warehouse: Boolean(branch?.is_eis_warehouse ?? branch?.isEisWarehouse ?? false),
   };
 };
 
@@ -77,6 +112,10 @@ const chooseActiveBranchId = (branches: StoredBranch[], preferredBranchId?: stri
   ];
 
   for (const candidate of candidates) {
+    if (isWarehouseBranchId(candidate)) {
+      return WAREHOUSE_BRANCH_ID;
+    }
+
     const matchedBranch = branches.find((branch) => matchesBranchId(branch.id, candidate));
     if (matchedBranch) {
       return matchedBranch.id;
@@ -121,6 +160,7 @@ export const persistBranchesToStorage = (
   if (activeBranchId) {
     window.dispatchEvent(new CustomEvent('branchChanged', { detail: { branchId: activeBranchId } }));
   }
+  void syncSessionSnapshotToDesktopStore();
 
   return { branches, activeBranchId };
 };
@@ -138,7 +178,11 @@ export async function syncBusinessBranchesFromServer(
   const businessResponse = await authFetch.fetch<any>(`/business/businesses/${businessId}/`, {
     timeoutMs: options.timeoutMs,
   });
-  let rawBranches = extractBranchesFromBusinessResponse(businessResponse);
+  let rawBranches: any[] = [];
+
+  if (rawBranches.length === 0) {
+    rawBranches = extractBranchesFromBusinessResponse(businessResponse);
+  }
 
   if (rawBranches.length === 0) {
     const branchesResponse = await authFetch.fetch<any>(`/business/businesses/${businessId}/branches/`, {

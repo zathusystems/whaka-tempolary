@@ -1,7 +1,7 @@
 {
-  "name": "Mwaka POS",
-  "short_name": "Mwaka POS",
-  "description": "Mwaka POS - Offline-First POS and Inventory System",
+  "name": "HandyPOS",
+  "short_name": "HandyPOS",
+  "description": "HandyPOS - Offline-First POS and Inventory System",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#ffffff",

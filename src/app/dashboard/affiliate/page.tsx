@@ -316,7 +316,7 @@ export default function AffiliatePage() {
                                 </li>
                                 <li className="flex gap-3">
                                     <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-semibold">3</span>
-                                    <span>Earn commissions when they subscribe to Mwaka POS</span>
+                                    <span>Earn commissions when they subscribe to HandyPOS</span>
                                 </li>
                                 <li className="flex gap-3">
                                     <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-semibold">4</span>
@@ -710,7 +710,7 @@ export default function AffiliatePage() {
                                     <HandyPosLogo className="h-24 w-24" />
                                 </div>
                                 <div className="space-y-2">
-                                    <h3 className="font-semibold">Mwaka POS Logo</h3>
+                                    <h3 className="font-semibold">HandyPOS Logo</h3>
                                     <p className="text-sm text-muted-foreground">Use this logo for any marketing material you create.</p>
                                     <Button><Download className="mr-2 h-4 w-4" /> Download Logo Pack</Button>
                                 </div>
@@ -725,11 +725,11 @@ export default function AffiliatePage() {
                             <CardContent className="grid gap-4 sm:grid-cols-2">
                                 <MarketingCopyCard
                                     title="Short Tweet / Post"
-                                    content="Managing a small business? 💼 Mwaka POS is a game-changer for inventory and sales, and it works offline! Check it out. #POS #SmallBiz #Inventory"
+                                    content="Managing a small business? 💼 HandyPOS is a game-changer for inventory and sales, and it works offline! Check it out. #POS #SmallBiz #Inventory"
                                 />
                                 <MarketingCopyCard
                                     title="Email/Blog Snippet"
-                                    content="Looking for a point-of-sale system that doesn't quit when your internet does? I've been using Mwaka POS, and its offline-first approach is incredibly reliable for managing sales and inventory. It's designed for small businesses and is surprisingly powerful. Highly recommended for any retail or restaurant owner."
+                                    content="Looking for a point-of-sale system that doesn't quit when your internet does? I've been using HandyPOS, and its offline-first approach is incredibly reliable for managing sales and inventory. It's designed for small businesses and is surprisingly powerful. Highly recommended for any retail or restaurant owner."
                                 />
                             </CardContent>
                         </Card>

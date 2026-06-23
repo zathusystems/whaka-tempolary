@@ -51,8 +51,14 @@ import { Receipt } from './receipt';
 import { PrinterConfigModal } from './printer-config-modal';
 import { db } from '@/lib/db';
 import { useToast } from '@/hooks/use-toast';
-import { getOfflineBusinessProfile } from '@/lib/business-profile';
-import { PRINTER_CONFIG_UPDATED_EVENT, type PrinterSettings } from '@/lib/services/printer-service';
+import { getOfflineBusinessProfile, resolveOfflineBusinessId } from '@/lib/business-profile';
+import {
+  PRINTER_CONFIG_UPDATED_EVENT,
+  normalizePrinterPaperWidth,
+  type PrinterConfig,
+  type PrinterPaperWidth,
+  type PrinterSettings,
+} from '@/lib/services/printer-service';
 import { getNextReceiptCopyNumber, markReceiptPrinted } from '@/lib/services/receipt-copy-service';
 import { safeLocalStorageGetItem } from '@/lib/safe-local-storage';
 import { formatInventoryQuantity } from '@/lib/quantity-format';
@@ -78,6 +84,7 @@ export interface PosProps {
   cart: CartItem[];
   onAddToCart: (item: InventoryItem, quantity?: number, price?: number) => void | Promise<void>;
   onUpdateQuantity: (itemId: string, quantity: number) => void;
+  onApplyDiscount?: (itemId: string, discount: AppliedDiscount | null) => void;
   onClearCart: () => void;
   onCheckout: (paymentMethod: PaymentMethod, tip: number, buyerDetails?: BuyerDetails) => Promise<Order | null>;
   productIcon?: React.ReactNode;
@@ -96,6 +103,91 @@ type ReceiptDisplaySettings = {
   showQRCode: boolean;
   showItemDetails: boolean;
   showTaxBreakdown: boolean;
+};
+
+type DiscountRule = {
+  id: string;
+  name: string;
+  discount_type?: 'percentage' | 'fixed';
+  discountType?: 'percentage' | 'fixed';
+  value: number | string;
+  applies_to?: 'all' | 'products' | 'categories';
+  appliesTo?: 'all' | 'products' | 'categories';
+  product_ids?: string[];
+  productIds?: string[];
+  categories?: string[];
+  is_active?: boolean;
+  isActive?: boolean;
+};
+
+export type AppliedDiscount = {
+  ruleId: string;
+  name: string;
+  type: 'percentage' | 'fixed';
+  value: number;
+};
+
+const toFiniteNumber = (value: unknown, fallback = 0): number => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const getCartDiscount = (item: CartItem): AppliedDiscount | null => {
+  const ruleId = String((item as any).discountRuleId || (item as any).discount_rule_id || '').trim();
+  const name = String((item as any).discountName || (item as any).discount_name || '').trim();
+  const rawType = String((item as any).discountType || (item as any).discount_type || '').trim().toLowerCase();
+  const type = rawType === 'fixed' ? 'fixed' : rawType === 'percentage' ? 'percentage' : '';
+  const value = toFiniteNumber((item as any).discountValue ?? (item as any).discount_value, 0);
+  if (!ruleId || !type || value <= 0) return null;
+  return { ruleId, name, type, value };
+};
+
+const calculateDiscountAmount = (lineAmount: number, discount?: AppliedDiscount | null): number => {
+  const base = Math.max(0, toFiniteNumber(lineAmount, 0));
+  if (!discount) return 0;
+  const value = Math.max(0, toFiniteNumber(discount.value, 0));
+  const amount = discount.type === 'percentage' ? base * value / 100 : value;
+  return Math.min(base, Math.round(amount * 100) / 100);
+};
+
+const resolveCartDiscountAmount = (item: CartItem): number => {
+  const explicit = toFiniteNumber((item as any).discountAmount ?? (item as any).discount_amount, NaN);
+  const lineAmount = resolveCartLineTotal(item);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.min(lineAmount, explicit);
+  return calculateDiscountAmount(lineAmount, getCartDiscount(item));
+};
+
+const normalizeDiscountRule = (rule: any): DiscountRule | null => {
+  const id = String(rule?.id || '').trim();
+  const name = String(rule?.name || '').trim();
+  const type = String(rule?.discount_type ?? rule?.discountType ?? '').trim().toLowerCase();
+  const value = toFiniteNumber(rule?.value, 0);
+  if (!id || !name || !['percentage', 'fixed'].includes(type) || value <= 0) return null;
+  return {
+    id,
+    name,
+    discount_type: type as DiscountRule['discount_type'],
+    value,
+    applies_to: String(rule?.applies_to ?? rule?.appliesTo ?? 'all').trim().toLowerCase() as DiscountRule['applies_to'],
+    product_ids: Array.isArray(rule?.product_ids) ? rule.product_ids.map(String) : Array.isArray(rule?.productIds) ? rule.productIds.map(String) : [],
+    categories: Array.isArray(rule?.categories) ? rule.categories.map(String) : [],
+    is_active: Boolean(rule?.is_active ?? rule?.isActive ?? true),
+  };
+};
+
+const discountAppliesToItem = (rule: DiscountRule, item: CartItem): boolean => {
+  const appliesTo = rule.applies_to ?? rule.appliesTo ?? 'all';
+  if (appliesTo === 'all') return true;
+  if (appliesTo === 'products') {
+    const productIds = (rule.product_ids ?? rule.productIds ?? []).map(String);
+    const itemIds = [item.id, item.inventoryItemId, (item as any).inventory_item_id].map((value) => String(value || '').trim());
+    return itemIds.some((id) => id && productIds.includes(id));
+  }
+  if (appliesTo === 'categories') {
+    const categories = (rule.categories ?? []).map((value) => String(value || '').trim().toLowerCase());
+    return categories.includes(String(item.category || '').trim().toLowerCase());
+  }
+  return false;
 };
 
 const DEFAULT_RECEIPT_DISPLAY_SETTINGS: ReceiptDisplaySettings = {
@@ -565,6 +657,17 @@ const formatTaxConditionLabel = (
   return `${formatTaxTypeLabel(taxType)} • N/A`;
 };
 
+const toFiniteMoneyNumber = (value: unknown, fallback = 0): number => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const resolveCartLineTotal = (item: CartItem): number => {
+  const price = Math.max(0, toFiniteMoneyNumber(item.price, 0));
+  const quantity = Math.max(0, toFiniteMoneyNumber(item.quantity, 0));
+  return item.isVariablePrice ? price : price * quantity;
+};
+
 const ProductCard = ({
   item,
   onAddToCart,
@@ -623,17 +726,24 @@ const ProductCard = ({
 const CartItemView = ({
   item,
   onUpdateQuantity,
+  onApplyDiscount,
   currencyFormatter,
   taxDetail,
   showTaxStatus,
+  discountRules = [],
 }: {
   item: CartItem;
   onUpdateQuantity: (itemId: string, quantity: number) => void;
+  onApplyDiscount?: (itemId: string, discount: AppliedDiscount | null) => void;
   currencyFormatter: (amount: number) => string;
   taxDetail?: CartItemTaxDetail;
   showTaxStatus?: boolean;
+  discountRules?: DiscountRule[];
 }) => {
-  const total = item.isVariablePrice ? item.price : item.price * item.quantity;
+  const total = resolveCartLineTotal(item);
+  const appliedDiscount = getCartDiscount(item);
+  const discountAmount = resolveCartDiscountAmount(item);
+  const discountedTotal = Math.max(0, total - discountAmount);
   const isVariable = item.isVariablePrice;
   const taxRateLabel = taxDetail && Number.isFinite(taxDetail.rate) ? `${taxDetail.rate.toFixed(2)}%` : '0%';
   const taxMethodLabel =
@@ -687,7 +797,7 @@ const CartItemView = ({
       )}
       <div className="flex w-32 flex-col items-end gap-1 text-right">
         <div className="flex items-center gap-2">
-          <p className="font-semibold">{currencyFormatter(total)}</p>
+          <p className="font-semibold">{currencyFormatter(discountedTotal)}</p>
           <Button
             size="icon"
             variant="ghost"
@@ -703,7 +813,46 @@ const CartItemView = ({
             {taxStatusLabel}: <span className="font-medium text-foreground">{currencyFormatter(taxDetail.amount)}</span>
           </p>
         )}
+        {discountAmount > 0 && (
+          <p className="text-[11px] text-green-700 dark:text-green-500">
+            Discount: -{currencyFormatter(discountAmount)}
+          </p>
+        )}
       </div>
+      {onApplyDiscount && discountRules.length > 0 && (
+        <div className="col-span-3">
+          <select
+            value={appliedDiscount?.ruleId || ''}
+            onChange={(event) => {
+              const selected = discountRules.find((rule) => rule.id === event.target.value);
+              if (!selected) {
+                onApplyDiscount(item.id, null);
+                return;
+              }
+              const type = (selected.discount_type ?? selected.discountType) === 'fixed' ? 'fixed' : 'percentage';
+              onApplyDiscount(item.id, {
+                ruleId: selected.id,
+                name: selected.name,
+                type,
+                value: toFiniteNumber(selected.value, 0),
+              });
+            }}
+            className="h-8 w-full rounded-md border bg-background px-2 text-xs"
+          >
+            <option value="">No discount</option>
+            {discountRules.map((rule) => {
+              const type = (rule.discount_type ?? rule.discountType) === 'fixed' ? 'fixed' : 'percentage';
+              const value = toFiniteNumber(rule.value, 0);
+              const label = type === 'percentage' ? `${value}%` : currencyFormatter(value);
+              return (
+                <option key={rule.id} value={rule.id}>
+                  {rule.name} ({label})
+                </option>
+              );
+            })}
+          </select>
+        </div>
+      )}
     </div>
   );
 };
@@ -805,7 +954,6 @@ const PaymentDialog = ({
         }
         return 'N/A';
     }, [productTaxMappings, shouldUseEisTaxMappings, defaultTaxRateDecimal]);
-
     useEffect(() => {
         setStep('payment');
         setCompletedOrder(null);
@@ -1111,9 +1259,9 @@ const PaymentDialog = ({
                             console.warn('[PaymentDialog] Failed to fetch mapping for cart item:', preferredMappingKey, fetchError);
                         }
                     }
-                    const lineAmount = cartItem.isVariablePrice
-                        ? Number(cartItem.price || 0)
-                        : Number(cartItem.price || 0) * Number(cartItem.quantity || 0);
+                    const lineAmountBeforeDiscount = resolveCartLineTotal(cartItem);
+                    const discountAmount = resolveCartDiscountAmount(cartItem);
+                    const lineAmount = Math.max(0, lineAmountBeforeDiscount - discountAmount);
                     let itemTax = 0;
                     let itemNet = lineAmount;
                     let itemGross = lineAmount;
@@ -1402,6 +1550,78 @@ const PaymentDialog = ({
             .join(' · ');
     }, [receiptStyleTaxBreakdown]);
 
+    const validateBuyerTinBeforeCheckout = async (buyerDetails: BuyerDetails | undefined): Promise<boolean> => {
+        const tin = String(buyerDetails?.tin || '').trim();
+        const authorizationCode = String(buyerDetails?.authorizationCode || '').trim();
+        if (!shouldUseEisTaxMappings || (!tin && !authorizationCode)) {
+            return true;
+        }
+
+        const businessId = resolveOfflineBusinessId();
+        if (!businessId) {
+            toast({
+                variant: 'destructive',
+                title: 'Cannot validate buyer TIN',
+            });
+            return false;
+        }
+
+        try {
+            if (tin) {
+                const tinResult = await authFetch.fetch<any>(
+                    `/mra-eis/utilities/check-tin-authorization/?business_id=${encodeURIComponent(businessId)}`,
+                    {
+                        method: 'POST',
+                        body: JSON.stringify({ tin }),
+                    }
+                );
+
+                if (tinResult?.tin_exists === false) {
+                    toast({
+                        variant: 'destructive',
+                        title: 'Buyer TIN not found',
+                    });
+                    return false;
+                }
+
+                if (tinResult?.requires_authorization_code && !authorizationCode) {
+                    toast({
+                        variant: 'destructive',
+                        title: 'Authorization code required',
+                    });
+                    return false;
+                }
+            }
+
+            if (authorizationCode) {
+                const authResult = await authFetch.fetch<any>(
+                    `/mra-eis/utilities/validate-authorization-code/?business_id=${encodeURIComponent(businessId)}`,
+                    {
+                        method: 'POST',
+                        body: JSON.stringify({ authorizationCode }),
+                    }
+                );
+
+                if (authResult?.checked && authResult?.is_valid === false) {
+                    toast({
+                        variant: 'destructive',
+                        title: 'Invalid authorization code',
+                    });
+                    return false;
+                }
+            }
+
+            return true;
+        } catch (error: any) {
+            toast({
+                variant: 'destructive',
+                title: 'Buyer validation failed',
+                description: error?.message || 'Check buyer details.',
+            });
+            return false;
+        }
+    };
+
     const handlePayment = async (method: PaymentMethod) => {
         if (isProcessingPayment) {
             return;
@@ -1429,6 +1649,10 @@ const PaymentDialog = ({
                 vat5CertificateNumber,
                 vat5Quantity: typeof vat5Quantity === 'number' ? vat5Quantity : Number.parseFloat(String(vat5Quantity || '')),
             });
+            const buyerIsValid = await validateBuyerTinBeforeCheckout(buyerDetails);
+            if (!buyerIsValid) {
+                return;
+            }
             const order = await onCheckout(method, 0, buyerDetails);
             if (order) {
                 const normalizedCashPaid =
@@ -1486,11 +1710,12 @@ const PaymentDialog = ({
     const [isReceiptPreviewOpen, setIsReceiptPreviewOpen] = useState(false);
     const [isPreparingReceiptPreview, setIsPreparingReceiptPreview] = useState(false);
     const [hasDefaultPrinter, setHasDefaultPrinter] = useState<boolean | null>(null);
-    const [receiptPaperWidth, setReceiptPaperWidth] = useState<'80mm' | '58mm'>('80mm');
+    const [receiptPaperWidth, setReceiptPaperWidth] = useState<PrinterPaperWidth>('80mm');
     const [receiptDisplaySettings, setReceiptDisplaySettings] = useState<ReceiptDisplaySettings>(DEFAULT_RECEIPT_DISPLAY_SETTINGS);
     const [receiptCopyNumber, setReceiptCopyNumber] = useState(1);
     const isPrintBusy = isPrinting || isAutoPrintRunning;
     const autoPrintOrderRef = useRef<string | null>(null);
+    const cashDrawerOpenedOrderRef = useRef<string | null>(null);
     const printJobLockRef = useRef(false);
     const onCloseRef = useRef(onClose);
 
@@ -1501,6 +1726,7 @@ const PaymentDialog = ({
     useEffect(() => {
         setHasDefaultPrinter(null);
         autoPrintOrderRef.current = null;
+        cashDrawerOpenedOrderRef.current = null;
         setReceiptPaperWidth('80mm');
         setReceiptDisplaySettings(DEFAULT_RECEIPT_DISPLAY_SETTINGS);
         setReceiptCopyNumber(1);
@@ -1511,12 +1737,12 @@ const PaymentDialog = ({
     const applyPrinterSettingsToReceipt = useCallback(
         (
             settings?: Partial<PrinterSettings> | null,
-            fallbackPaperWidth: '80mm' | '58mm' = '80mm'
-        ): '80mm' | '58mm' => {
-            const resolvedPaperWidth: '80mm' | '58mm' =
-                settings?.receiptPaperWidth === '58mm' || settings?.receiptPaperWidth === '80mm'
-                    ? settings.receiptPaperWidth
-                    : fallbackPaperWidth;
+            fallbackPaperWidth: PrinterPaperWidth = '80mm'
+        ): PrinterPaperWidth => {
+            const resolvedPaperWidth = normalizePrinterPaperWidth(
+                settings?.receiptPaperWidth,
+                fallbackPaperWidth
+            );
 
             setReceiptPaperWidth(resolvedPaperWidth);
             setReceiptDisplaySettings({
@@ -1542,9 +1768,42 @@ const PaymentDialog = ({
         setHasDefaultPrinter(!!defaultPrinter);
         applyPrinterSettingsToReceipt(
             currentSettings,
-            (defaultPrinter?.paperWidth as '80mm' | '58mm') || '80mm'
+            normalizePrinterPaperWidth(defaultPrinter?.paperWidth)
         );
     }, [activeBranchId, applyPrinterSettingsToReceipt]);
+
+    const maybeOpenCashDrawerForSale = useCallback(
+        async (
+            orderToOpen: Order,
+            settings: PrinterSettings,
+            defaultPrinter: PrinterConfig | null
+        ): Promise<void> => {
+            const orderId = String((orderToOpen as any)?.id ?? '').trim();
+            const paymentMethod = String((orderToOpen as any)?.paymentMethod ?? (orderToOpen as any)?.payment_method ?? '').trim().toLowerCase();
+
+            if (!orderId || paymentMethod !== 'cash' || !settings.openCashDrawerOnCashSale || !defaultPrinter) {
+                return;
+            }
+
+            if (cashDrawerOpenedOrderRef.current === orderId) {
+                return;
+            }
+
+            try {
+                const { unifiedPrintingService } = await import('@/lib/services/unified-printing-service');
+                const result = await unifiedPrintingService.openCashDrawer(defaultPrinter);
+                if (result.success) {
+                    cashDrawerOpenedOrderRef.current = orderId;
+                    return;
+                }
+
+                console.warn('[CashDrawer]', result.message);
+            } catch (error) {
+                console.warn('[CashDrawer] Failed to open cash drawer:', error);
+            }
+        },
+        []
+    );
 
     const waitForFiscalReceiptData = useCallback(
         async (orderToPrint: Order, timeoutMs: number = 15000): Promise<Order> => {
@@ -1629,7 +1888,7 @@ const PaymentDialog = ({
             ]);
             const selectedPaperWidth = applyPrinterSettingsToReceipt(
                 settings,
-                (defaultPrinter?.paperWidth as '80mm' | '58mm') || '80mm'
+                normalizePrinterPaperWidth(defaultPrinter?.paperWidth)
             );
             
             if (!defaultPrinter) {
@@ -1685,7 +1944,7 @@ const PaymentDialog = ({
                     printerId: defaultPrinter.id,
                     copies: 1,
                     paperSize: selectedPaperWidth,
-                    printerPaperSize: defaultPrinter.paperWidth as '80mm' | '58mm',
+                    printerPaperSize: normalizePrinterPaperWidth(defaultPrinter.paperWidth),
                 };
 
                 // Never keep the UI busy forever if native printing hangs.
@@ -1713,6 +1972,7 @@ const PaymentDialog = ({
 
             const isCompleteSuccess = printedCopies === copiesToPrint && failedResult === null;
             if (isCompleteSuccess) {
+                await maybeOpenCashDrawerForSale(activeOrder, settings, defaultPrinter);
                 const printedTypeLabel = startingCopyNumber > 1 ? 'Receipt copy printed' : 'Original receipt printed';
                 toast({
                     title: 'Print Successful',
@@ -1747,7 +2007,7 @@ const PaymentDialog = ({
             setIsPrinting(false);
             printJobLockRef.current = false;
         }
-    }, [activeBranchId, toast, applyPrinterSettingsToReceipt, completedOrder, eisEnabled, waitForFiscalReceiptData]);
+    }, [activeBranchId, toast, applyPrinterSettingsToReceipt, completedOrder, eisEnabled, maybeOpenCashDrawerForSale, waitForFiscalReceiptData]);
 
     const handleViewMraReceipt = useCallback(async () => {
         const activeOrder = completedOrder as Order | null;
@@ -2447,6 +2707,7 @@ export const GenericPos = ({
   cart,
   onAddToCart,
   onUpdateQuantity,
+  onApplyDiscount,
   onClearCart,
   onCheckout,
   productIcon = <Package className="h-8 w-8 text-muted-foreground" />,
@@ -2461,6 +2722,7 @@ export const GenericPos = ({
   const [isPaymentDialogOpen, setPaymentDialogOpen] = useState(false);
   const [showPrinterConfig, setShowPrinterConfig] = useState(false);
   const [paymentSessionId, setPaymentSessionId] = useState(0);
+  const [discountRules, setDiscountRules] = useState<DiscountRule[]>([]);
   const { format: formatCurrency } = useCurrency();
   const shouldUseEisTaxMappings = Boolean(eisEnabled);
   const shouldEnforceTaxMapping = shouldUseEisTaxMappings && blockSalesIfTaxMappingMissing === true;
@@ -2477,6 +2739,42 @@ export const GenericPos = ({
   const taxLabel = defaultTaxRate ? `${defaultTaxRate.name} (${defaultTaxRate.rate}%)` : 'Tax';
 
   const mraMappings = useLiveQuery(() => db.mraMappings.toArray());
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadDiscountRules = async () => {
+      try {
+        const params = new URLSearchParams({ active: 'true' });
+        if (branchId) {
+          params.set('branch_id', normalizeBranchIdentifier(branchId));
+        }
+        const response = await authFetch.fetch<any>(`/sessions/discounts/?${params.toString()}`);
+        const rows = Array.isArray(response)
+          ? response
+          : Array.isArray(response?.results)
+            ? response.results
+            : [];
+        const normalized = rows
+          .map(normalizeDiscountRule)
+          .filter((rule): rule is DiscountRule => Boolean(rule));
+        if (!cancelled) {
+          setDiscountRules(normalized);
+        }
+      } catch (error) {
+        console.warn('[POS] Failed to load discount rules:', error);
+        if (!cancelled) {
+          setDiscountRules([]);
+        }
+      }
+    };
+
+    void loadDiscountRules();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [branchId]);
 
   // Log all MRA mappings and their status for debugging
   useEffect(() => {
@@ -2562,9 +2860,9 @@ export const GenericPos = ({
         localMapping = mappingByItemId.get(fallbackInventoryItemId);
       }
 
-      const lineAmount = cartItem.isVariablePrice
-        ? Number(cartItem.price || 0)
-        : Number(cartItem.price || 0) * Number(cartItem.quantity || 0);
+      const lineAmountBeforeDiscount = resolveCartLineTotal(cartItem);
+      const discountAmount = resolveCartDiscountAmount(cartItem);
+      const lineAmount = Math.max(0, lineAmountBeforeDiscount - discountAmount);
       let itemTax = 0;
       let itemNet = lineAmount;
       let itemGross = lineAmount;
@@ -2953,9 +3251,11 @@ export const GenericPos = ({
             key={item.id}
             item={item}
             onUpdateQuantity={onUpdateQuantity}
+            onApplyDiscount={onApplyDiscount}
             currencyFormatter={formatCurrency}
             taxDetail={cartSummary.perItemTax[String(item.id)]}
             showTaxStatus={shouldUseEisTaxMappings}
+            discountRules={discountRules.filter((rule) => discountAppliesToItem(rule, item))}
           />
         ))}
       </div>
@@ -2969,6 +3269,14 @@ export const GenericPos = ({
           <span className="flex-shrink-0 text-muted-foreground">Subtotal (Excl VAT)</span>
           <span className="flex-shrink-0 text-right">{formatCurrency(subtotal)}</span>
         </div>
+        {cart.some((item) => resolveCartDiscountAmount(item) > 0) && (
+          <div className="flex w-full items-center justify-between gap-2">
+            <span className="flex-shrink-0 text-muted-foreground">Discount</span>
+            <span className="flex-shrink-0 text-right text-green-700 dark:text-green-500">
+              -{formatCurrency(cart.reduce((sum, item) => sum + resolveCartDiscountAmount(item), 0))}
+            </span>
+          </div>
+        )}
         <div className="flex w-full items-center justify-between gap-2">
           <span className="flex-shrink-0 text-muted-foreground">{cartTaxLabel}</span>
           <span className="flex-shrink-0 text-right font-semibold text-green-600">{formatCurrency(tax)}</span>

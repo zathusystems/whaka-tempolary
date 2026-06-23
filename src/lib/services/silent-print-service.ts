@@ -1,5 +1,10 @@
 'use client';
 
+import {
+  normalizePrinterPaperWidth,
+  type PrinterPaperWidth,
+} from './printer-service';
+
 /**
  * Silent Print Service
  * Handles silent printing by sending directly to printer without dialog
@@ -10,8 +15,8 @@ export interface SilentPrintOptions {
   printerName?: string;
   printerId?: string;
   copies?: number;
-  paperSize?: '80mm' | '58mm';
-  printerPaperSize?: '80mm' | '58mm';
+  paperSize?: PrinterPaperWidth;
+  printerPaperSize?: PrinterPaperWidth;
   timeout?: number;
 }
 
@@ -120,8 +125,8 @@ class SilentPrintService {
     htmlContent: string,
     printerId: string,
     copies: number,
-    paperSize: '80mm' | '58mm',
-    printerPaperSize: '80mm' | '58mm'
+    paperSize: PrinterPaperWidth,
+    printerPaperSize: PrinterPaperWidth
   ): Promise<boolean> {
     try {
       const invoke = await this.getTauriInvoke();
@@ -276,7 +281,7 @@ class SilentPrintService {
     htmlContent: string,
     printerName: string,
     copies: number,
-    paperSize: '80mm' | '58mm'
+    paperSize: PrinterPaperWidth
   ): Promise<boolean> {
     try {
       const electron = (window as any).electron || (window as any).require('electron');
@@ -306,12 +311,12 @@ class SilentPrintService {
   private async printViaAutoSubmit(
     htmlContent: string,
     copies: number,
-    paperSize: '80mm' | '58mm'
+    paperSize: PrinterPaperWidth
   ): Promise<boolean> {
     try {
       console.log('[SilentPrint] Using browser auto-submit method');
 
-      const printWidth = paperSize === '58mm' ? '58mm' : '80mm';
+      const printWidth = normalizePrinterPaperWidth(paperSize);
 
       for (let i = 0; i < copies; i++) {
         const printWindow = window.open('', '', 'width=800,height=600');
@@ -390,12 +395,12 @@ class SilentPrintService {
   private async printViaIframe(
     htmlContent: string,
     copies: number,
-    paperSize: '80mm' | '58mm'
+    paperSize: PrinterPaperWidth
   ): Promise<boolean> {
     try {
       console.log('[SilentPrint] Using iframe print fallback');
 
-      const printWidth = paperSize === '58mm' ? '58mm' : '80mm';
+      const printWidth = normalizePrinterPaperWidth(paperSize);
 
       for (let i = 0; i < copies; i++) {
         const iframe = document.createElement('iframe');

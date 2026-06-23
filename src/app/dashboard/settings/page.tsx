@@ -779,6 +779,7 @@ export default function BusinessSettingsPage() {
           fuelPumps: resolvedFuelPumps,
         })
       );
+      window.dispatchEvent(new Event('handypos-business-settings-changed'));
 
       // Step 3: Attempt to sync with backend
       const isOnline = authFetch.getOnlineStatus();

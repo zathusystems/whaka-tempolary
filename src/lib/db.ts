@@ -214,6 +214,16 @@ export interface OrderItem {
     notes?: string;
     // Per-item pricing (MRA Compliance - Immutable snapshot)
     price?: number; // Unit price at time of sale
+    discountRuleId?: string;
+    discount_rule_id?: string;
+    discountName?: string;
+    discount_name?: string;
+    discountType?: 'percentage' | 'fixed' | string;
+    discount_type?: 'percentage' | 'fixed' | string;
+    discountValue?: number;
+    discount_value?: number;
+    discountAmount?: number;
+    discount_amount?: number;
     // Per-item tax information (MRA Compliance - Immutable snapshot)
     tax_rate?: number; // Tax rate percentage (e.g., 16.50 for 16.5%)
     taxRate?: number; // Alias for tax_rate (camelCase)
@@ -243,6 +253,10 @@ export interface Order {
     items: OrderItem[];
     status: 'New' | 'Preparing' | 'Ready' | 'Completed' | 'Voided' | 'Cancelled' | 'Refunded' | 'Partially Refunded';
     subtotal: number;
+    discountAmount?: number;
+    discount_amount?: number;
+    discountMetadata?: Record<string, any>;
+    discount_metadata?: Record<string, any>;
     total: number;
     tax?: number; // Tax amount for this order (legacy field)
     tip?: number; // Tip amount for this order
@@ -672,6 +686,16 @@ export interface CartItem extends InventoryItem {
     inventoryItemId: string;
     branchId: string;
     savedAt?: string;
+    discountRuleId?: string;
+    discount_rule_id?: string;
+    discountName?: string;
+    discount_name?: string;
+    discountType?: 'percentage' | 'fixed' | string;
+    discount_type?: 'percentage' | 'fixed' | string;
+    discountValue?: number;
+    discount_value?: number;
+    discountAmount?: number;
+    discount_amount?: number;
 }
 
 export interface MRAMapping {

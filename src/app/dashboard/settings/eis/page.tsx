@@ -648,6 +648,9 @@ interface TerminalHealthCheck {
   response?: unknown;
   error?: string;
   checked_at?: string;
+  server_time?: string | null;
+  server_time_raw?: string | null;
+  server_time_source?: string | null;
 }
 
 interface Terminal {
@@ -967,8 +970,9 @@ const normalizeLastSubmitReconciliation = (payload: any): LastSubmitReconciliati
 const CONFIGURED_POS_NAME = (
   process.env.NEXT_PUBLIC_MRA_EIS_POS_NAME ||
   process.env.NEXT_PUBLIC_POS_NAME ||
-  'Handy POS'
-).trim() || 'Handy POS';
+  process.env.NEXT_PUBLIC_APP_NAME ||
+  'HandyPOS'
+).trim() || 'HandyPOS';
 
 const normalizeMacAddress = (value?: string | null): string => {
   return normalizeDeviceMacAddress(value) || DEFAULT_DEVICE_MAC_ADDRESS;
@@ -1185,6 +1189,7 @@ export default function EISSettingsPage() {
       next.businessId = String(business.id);
     }
     localStorage.setItem('handypos-business-settings', JSON.stringify(next));
+    window.dispatchEvent(new Event('handypos-business-settings-changed'));
   }, [business?.id]);
 
   const persistTerminalCache = useCallback((branchId: string, value: Terminal | null) => {
@@ -1600,11 +1605,16 @@ export default function EISSettingsPage() {
       }
 
       if (!options?.silent) {
+        const serverTime = formatMraServerTime(
+          refreshedTerminal.health_check?.server_time || refreshedTerminal.health_check?.server_time_raw
+        );
         toast({
-          title: 'Terminal status refreshed',
-          description: refreshedTerminal.health_check?.checked
-            ? `MRA is ${refreshedTerminal.is_online ? 'online' : 'offline'}.`
-            : `Terminal is ${refreshedTerminal.status.replace('_', ' ')}.`,
+          title: refreshedTerminal.is_online ? 'MRA server is up' : 'MRA server is offline',
+          description: serverTime
+            ? `Server time ${serverTime}.`
+            : refreshedTerminal.health_check?.checked
+              ? `MRA is ${refreshedTerminal.is_online ? 'online' : 'offline'}.`
+              : `Terminal is ${refreshedTerminal.status.replace('_', ' ')}.`,
         });
       }
     } catch (error: any) {
@@ -1725,6 +1735,12 @@ export default function EISSettingsPage() {
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) return 'N/A';
     return parsed.toLocaleString();
+  };
+
+  const formatMraServerTime = (value?: string | null) => {
+    if (!value) return '';
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString();
   };
 
   useEffect(() => {
@@ -3080,6 +3096,11 @@ export default function EISSettingsPage() {
                       {terminal.health_check?.checked_at && (
                         <p className="text-xs text-muted-foreground">
                           MRA ping {formatTimestamp(terminal.health_check.checked_at)}
+                        </p>
+                      )}
+                      {(terminal.health_check?.server_time || terminal.health_check?.server_time_raw) && (
+                        <p className="text-xs text-muted-foreground">
+                          Server time {formatMraServerTime(terminal.health_check.server_time || terminal.health_check.server_time_raw)}
                         </p>
                       )}
                     </div>

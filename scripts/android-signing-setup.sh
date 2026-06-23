@@ -49,7 +49,7 @@ if [[ ! -f "$KEYSTORE_FILE" ]]; then
     -validity 10000 \
     -storepass "$STORE_PASSWORD" \
     -keypass "$KEY_PASSWORD" \
-    -dname "CN=Mwaka POS, OU=POS, O=Mwaka POS, L=Lilongwe, ST=Central, C=MW"
+    -dname "CN=HandyPOS, OU=POS, O=HandyPOS, L=Lilongwe, ST=Central, C=MW"
 else
   if [[ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ]]; then
     echo "Existing Android keystore found, but ANDROID_KEYSTORE_PASSWORD is not set."

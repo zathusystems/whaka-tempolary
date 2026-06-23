@@ -38,6 +38,103 @@ export class UnifiedPrintingService {
     }
   }
 
+  async openCashDrawer(printer: PrinterConfig): Promise<{ success: boolean; message: string }> {
+    try {
+      const nativeResult = await this.openCashDrawerViaNative(printer);
+      if (nativeResult.success) {
+        return nativeResult;
+      }
+
+      if (nativeResult.message !== 'Native drawer command unavailable.') {
+        console.warn('[UnifiedPrinting] Native cash drawer unavailable:', nativeResult.message);
+      }
+
+      if (printer.connectionType !== 'bluetooth' && !String(printer.id || '').toLowerCase().startsWith('bt:')) {
+        return {
+          success: false,
+          message: nativeResult.message || 'Cash drawer is not available for this printer.',
+        };
+      }
+
+      if (!escPosService.supportsWebBluetooth()) {
+        return {
+          success: false,
+          message: 'Web Bluetooth API not supported for cash drawer.',
+        };
+      }
+
+      if (!escPosService.isConnected()) {
+        const device = await escPosService.requestDevice();
+        if (!device) {
+          return {
+            success: false,
+            message: 'No printer selected for cash drawer.',
+          };
+        }
+        await escPosService.connect(device);
+        await escPosService.initialize();
+      }
+
+      await escPosService.pulseCashDrawer();
+      return {
+        success: true,
+        message: 'Cash drawer opened.',
+      };
+    } catch (error) {
+      console.error('[UnifiedPrinting] Cash drawer error:', error);
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Cash drawer failed.',
+      };
+    }
+  }
+
+  private async openCashDrawerViaNative(printer: PrinterConfig): Promise<{ success: boolean; message: string }> {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      if (typeof invoke !== 'function') {
+        return {
+          success: false,
+          message: 'Native drawer command unavailable.',
+        };
+      }
+
+      const printerId = String(printer.id || printer.name || '').trim();
+      if (!printerId) {
+        return {
+          success: false,
+          message: 'Printer ID is missing.',
+        };
+      }
+
+      const result = await invoke('open_cash_drawer', { printerId });
+      if (result === true || result === 'success') {
+        return {
+          success: true,
+          message: 'Cash drawer opened.',
+        };
+      }
+
+      return {
+        success: false,
+        message: String(result || 'Cash drawer failed.'),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || '');
+      if (message.toLowerCase().includes('unknown command') || message.toLowerCase().includes('not found')) {
+        return {
+          success: false,
+          message: 'Native drawer command unavailable.',
+        };
+      }
+
+      return {
+        success: false,
+        message: message || 'Cash drawer failed.',
+      };
+    }
+  }
+
   /**
    * Use native/system silent printing path (USB/Network/CUPS Bluetooth queues)
    */
@@ -218,11 +315,12 @@ export class UnifiedPrintingService {
    * Test print to verify printer works
    */
   async testPrint(printer: PrinterConfig): Promise<{ success: boolean; message: string }> {
+    const testWidth = printer.paperWidth || '80mm';
     const testReceipt = `
-      <div style="font-family: monospace; width: 80mm; padding: 10mm;">
+      <div style="font-family: monospace; width: ${testWidth}; padding: 4mm;">
         <div style="text-align: center; margin-bottom: 10mm;">
           <h2 style="margin: 0;">TEST RECEIPT</h2>
-          <p style="margin: 0; font-size: 0.8em;">Mwaka POS System</p>
+          <p style="margin: 0; font-size: 0.8em;">HandyPOS System</p>
         </div>
         <div style="border-top: 1px dashed; border-bottom: 1px dashed; padding: 5mm 0; margin: 5mm 0;">
           <div style="display: flex; justify-content: space-between; font-size: 0.9em;">
@@ -250,7 +348,7 @@ export class UnifiedPrintingService {
         </div>
         <div style="text-align: center; margin-top: 10mm; font-size: 0.8em;">
           <p>Thank you for your business!</p>
-          <p>Powered by Mwaka POS</p>
+          <p>Powered by HandyPOS</p>
         </div>
       </div>
     `;

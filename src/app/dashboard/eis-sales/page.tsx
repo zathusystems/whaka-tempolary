@@ -81,6 +81,8 @@ type Terminal = {
     checked?: boolean;
     is_online?: boolean;
     checked_at?: string;
+    server_time?: string | null;
+    server_time_raw?: string | null;
     error?: string;
   } | null;
 };
@@ -338,6 +340,12 @@ const resolveOrderSearchText = (order: Order): string => {
 const formatDateTime = (value: Date | null): string => {
   if (!value || Number.isNaN(value.getTime())) return 'N/A';
   return format(value, 'PPpp');
+};
+
+const formatServerTime = (value?: string | null): string => {
+  if (!value) return '';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? String(value) : formatDateTime(parsed);
 };
 
 const formatReconciliationValue = (value: unknown): string => {
@@ -967,6 +975,9 @@ export default function EisSalesAuditPage() {
                     {terminal.is_online === true ? 'MRA Online' : terminal.is_online === false ? 'MRA Offline' : isLoadingTerminal ? 'Checking MRA' : 'MRA status unavailable'}
                   </Badge>
                   {terminal.health_check?.checked_at && <span>Ping {formatDateTime(new Date(terminal.health_check.checked_at))}</span>}
+                  {(terminal.health_check?.server_time || terminal.health_check?.server_time_raw) && (
+                    <span>Server time {formatServerTime(terminal.health_check.server_time || terminal.health_check.server_time_raw)}</span>
+                  )}
                   {terminal.pending_offline_invoices ? <span>{terminal.pending_offline_invoices} pending offline</span> : null}
                 </div>
               )}

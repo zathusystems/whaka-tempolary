@@ -34,7 +34,8 @@ const ACTIVATION_RELOAD_DELAY_MS = 900;
 const CONFIGURED_POS_NAME = (
   process.env.NEXT_PUBLIC_MRA_EIS_POS_NAME ||
   process.env.NEXT_PUBLIC_POS_NAME ||
-  'Handy POS'
+  process.env.NEXT_PUBLIC_APP_NAME ||
+  'HandyPOS'
 ).trim();
 
 const activationSchema = z.object({

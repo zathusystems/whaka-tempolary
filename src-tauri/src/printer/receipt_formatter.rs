@@ -1,14 +1,26 @@
 // Shared receipt formatter used by desktop and Android print paths.
 // Keep this module platform-neutral so both targets produce matching ESC/POS output.
 
-pub const DEFAULT_RECEIPT_LINE_WIDTH: usize = 42;
-pub const COMPACT_RECEIPT_LINE_WIDTH: usize = 28;
+pub const RECEIPT_LINE_WIDTH_30MM: usize = 16;
+pub const RECEIPT_LINE_WIDTH_40MM: usize = 21;
+pub const RECEIPT_LINE_WIDTH_50MM: usize = 25;
+pub const RECEIPT_LINE_WIDTH_58MM: usize = 28;
+pub const RECEIPT_LINE_WIDTH_80MM: usize = 42;
+pub const DEFAULT_RECEIPT_LINE_WIDTH: usize = RECEIPT_LINE_WIDTH_80MM;
+pub const COMPACT_RECEIPT_LINE_WIDTH: usize = RECEIPT_LINE_WIDTH_58MM;
 
 pub fn resolve_line_width(paper_size: Option<&str>) -> usize {
     match paper_size.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if value == "30mm" || value == "30" => RECEIPT_LINE_WIDTH_30MM,
+        Some(value) if value == "40mm" || value == "40" => RECEIPT_LINE_WIDTH_40MM,
+        Some(value) if value == "50mm" || value == "50" => RECEIPT_LINE_WIDTH_50MM,
         Some(value) if value == "58mm" || value == "58" => COMPACT_RECEIPT_LINE_WIDTH,
         _ => DEFAULT_RECEIPT_LINE_WIDTH,
     }
+}
+
+pub fn cash_drawer_pulse() -> Vec<u8> {
+    b"\x1B@\x1Bp\x00\x19\xFA".to_vec()
 }
 
 // HTML -> ESC/POS conversion with basic layout preservation.

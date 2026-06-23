@@ -41,6 +41,7 @@ import { syncInventoryFromBackend } from '@/lib/services/inventory-sync';
 import { isTauriApp } from '@/lib/tauri-init';
 import { logAuditAction } from '@/lib/audit';
 import { warmBranchMraMappingCache } from '@/lib/mra-mapping-cache';
+import { isWarehouseBranchId } from '@/lib/branch-context';
 
 export type CartItem = InventoryItem & {
   quantity: number;
@@ -48,6 +49,16 @@ export type CartItem = InventoryItem & {
   notes?: string;
   // Preserve original inventory item ID for cart entries that need a unique line ID.
   inventoryItemId?: string;
+  discountRuleId?: string;
+  discount_rule_id?: string;
+  discountName?: string;
+  discount_name?: string;
+  discountType?: 'percentage' | 'fixed' | string;
+  discount_type?: 'percentage' | 'fixed' | string;
+  discountValue?: number;
+  discount_value?: number;
+  discountAmount?: number;
+  discount_amount?: number;
 };
 export type PaymentMethod = Order['paymentMethod'];
 
@@ -291,6 +302,20 @@ const toPositiveNumber = (value: unknown, fallback = 0): number => {
 const toNonNegativeNumber = (value: unknown, fallback = 0): number => {
   const parsed = toFiniteNumber(value, fallback);
   return parsed >= 0 ? parsed : fallback;
+};
+
+const resolveCartLineTotal = (cartItem: CartItem): number => {
+  const price = toNonNegativeNumber(cartItem.price, 0);
+  const quantity = toPositiveNumber(cartItem.quantity, 0);
+  return cartItem.isVariablePrice ? price : price * quantity;
+};
+
+const formatStockQuantity = (value: unknown): string => {
+  const quantity = toNonNegativeNumber(value, 0);
+  if (Math.abs(quantity - Math.round(quantity)) < 0.0001) {
+    return String(Math.round(quantity));
+  }
+  return quantity.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
 };
 
 const resolvePurchaseVatAmount = (batch: any, grossTotal: number): number => {
@@ -597,7 +622,7 @@ export default function PosPage() {
 
   // Sync inventory and MRA mappings from backend when page loads
   useEffect(() => {
-    if (activeBranchId) {
+    if (activeBranchId && !isWarehouseBranchId(activeBranchId)) {
       console.log('[POS Page] Syncing inventory and MRA mappings for branch:', activeBranchId);
       syncInventoryFromBackend(activeBranchId).then(result => {
         console.log('[POS Page] Inventory sync result:', result);
@@ -773,6 +798,74 @@ export default function PosPage() {
     return matchedInventoryId || rawId;
   };
 
+  const findInventoryItemById = (inventoryItemId: string): InventoryItem | undefined => {
+    const normalizedId = String(inventoryItemId || '').trim();
+    if (!normalizedId) return undefined;
+    return allInventory?.find((inventoryItem) => String(inventoryItem.id) === normalizedId);
+  };
+
+  const getStockTargetsForSaleLine = (item: InventoryItem, quantity: number) => {
+    const requestedQuantity = toPositiveNumber(quantity, 0);
+    if (requestedQuantity <= 0) return [];
+
+    if (item.itemType === 'sellable' && item.isProduced && Array.isArray(item.recipe) && item.recipe.length > 0) {
+      return item.recipe
+        .map((recipeItem: any) => {
+          const ingredientId = String(recipeItem?.ingredientId || recipeItem?.ingredient_id || recipeItem?.id || '').trim();
+          const perUnitQuantity = toPositiveNumber(recipeItem?.quantity, 0);
+          if (!ingredientId || perUnitQuantity <= 0) return null;
+          return {
+            id: ingredientId,
+            name: String(recipeItem?.name || '').trim(),
+            quantity: perUnitQuantity * requestedQuantity,
+          };
+        })
+        .filter(Boolean) as Array<{ id: string; name: string; quantity: number }>;
+    }
+
+    return [{ id: String(item.id), name: item.name, quantity: requestedQuantity }];
+  };
+
+  const getCartStockIssues = (cartSnapshot: CartItem[]) => {
+    const requirements = new Map<string, { name: string; quantity: number }>();
+
+    for (const cartItem of cartSnapshot) {
+      const inventoryItemId = resolveInventoryItemId(cartItem);
+      const inventoryItem = findInventoryItemById(inventoryItemId) || cartItem;
+      const targets = getStockTargetsForSaleLine(inventoryItem, cartItem.quantity);
+
+      for (const target of targets) {
+        const existing = requirements.get(target.id) || { name: target.name, quantity: 0 };
+        requirements.set(target.id, {
+          name: existing.name || target.name,
+          quantity: existing.quantity + target.quantity,
+        });
+      }
+    }
+
+    const issues: string[] = [];
+    requirements.forEach((requirement, targetId) => {
+      const inventoryItem = findInventoryItemById(targetId);
+      const available = toNonNegativeNumber(inventoryItem?.stockUnits, 0);
+      if (!inventoryItem || requirement.quantity > available + 0.0001) {
+        const name = inventoryItem?.name || requirement.name || 'Product';
+        issues.push(
+          `${name}: ${formatStockQuantity(available)} available, ${formatStockQuantity(requirement.quantity)} requested.`
+        );
+      }
+    });
+
+    return issues;
+  };
+
+  const showStockIssueToast = (issue: string) => {
+    toast({
+      variant: 'destructive',
+      title: 'Insufficient stock',
+      description: issue,
+    });
+  };
+
   const handleAddToCart = async (item: InventoryItem, quantity: number = 1, price?: number, notes?: string, takeOrderId?: string) => {
     if (blockSalesIfTaxMappingMissing) {
       // ALWAYS check if product has APPROVED AND SYNCED MRA mapping
@@ -822,7 +915,7 @@ export default function PosPage() {
         }
         
         // If not ready locally, try API to get latest status
-        if (!isReadyForSale && isBrowserOnline) {
+        if (!isReadyForSale && isBackendReachable) {
           try {
             const backendBranchId = normalizeBranchId(activeBranchId);
             let mappings: any[] = [];
@@ -968,40 +1061,47 @@ export default function PosPage() {
       console.log('[POS Page] Tax mapping enforcement disabled, skipping MRA mapping validation for:', item.name);
     }
 
-    setCart((prevCart) => {
-      const existingItemIndex = prevCart.findIndex((cartItem) => {
-        const inventoryItemId = String(cartItem.inventoryItemId || cartItem.id);
-        return inventoryItemId === String(item.id) && !cartItem.notes;
-      });
-      
-      const itemPrice = price !== undefined ? price : (item.price || 0);
-      const effectiveQuantity = quantity;
-
-      if (existingItemIndex > -1 && !item.isVariablePrice && !notes) {
-        const newCart = [...prevCart];
-        newCart[existingItemIndex].quantity += effectiveQuantity;
-        return newCart;
-      } else {
-        const cartLineId = (!item.isVariablePrice && !notes)
-          ? item.id
-          : `${item.id}::cart::${Date.now()}`;
-        const cartItem: CartItem = {
-          ...item,
-          id: cartLineId,
-          inventoryItemId: item.id,
-          quantity: effectiveQuantity,
-          price: itemPrice,
-          notes,
-        };
-        
-        // Track take order ID if this item came from a take order
-        if (takeOrderId && !takeOrderIdsInCart.includes(takeOrderId)) {
-          setTakeOrderIdsInCart(prev => [...prev, takeOrderId]);
-        }
-        
-        return [...prevCart, cartItem];
-      }
+    const existingItemIndex = cart.findIndex((cartItem) => {
+      const inventoryItemId = String(cartItem.inventoryItemId || cartItem.id);
+      return inventoryItemId === String(item.id) && !cartItem.notes;
     });
+
+    const itemPrice = price !== undefined ? price : (item.price || 0);
+    const effectiveQuantity = toPositiveNumber(quantity, 1);
+    let nextCart: CartItem[];
+
+    if (existingItemIndex > -1 && !item.isVariablePrice && !notes) {
+      nextCart = cart.map((cartItem, index) => (
+        index === existingItemIndex
+          ? { ...cartItem, quantity: cartItem.quantity + effectiveQuantity }
+          : cartItem
+      ));
+    } else {
+      const cartLineId = (!item.isVariablePrice && !notes)
+        ? item.id
+        : `${item.id}::cart::${Date.now()}`;
+      const cartItem: CartItem = {
+        ...item,
+        id: cartLineId,
+        inventoryItemId: item.id,
+        quantity: effectiveQuantity,
+        price: itemPrice,
+        notes,
+      };
+      nextCart = [...cart, cartItem];
+    }
+
+    const stockIssues = getCartStockIssues(nextCart);
+    if (stockIssues.length > 0) {
+      showStockIssueToast(stockIssues[0]);
+      return;
+    }
+
+    setCart(nextCart);
+
+    if (takeOrderId && !takeOrderIdsInCart.includes(takeOrderId)) {
+      setTakeOrderIdsInCart(prev => [...prev, takeOrderId]);
+    }
 
     // Provide immediate tactile feedback after a successful add-to-cart action.
     if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
@@ -1010,14 +1110,27 @@ export default function PosPage() {
   };
   
   const handleUpdateQuantity = (itemId: string, newQuantity: number) => {
+    const nextCart = newQuantity <= 0
+      ? cart.filter((cartItem) => cartItem.id !== itemId)
+      : cart.map((cartItem) =>
+          cartItem.id === itemId
+            ? {
+                ...cartItem,
+                quantity: newQuantity,
+              }
+            : cartItem
+        );
+
+    const stockIssues = getCartStockIssues(nextCart);
+    if (stockIssues.length > 0) {
+      showStockIssueToast(stockIssues[0]);
+      return;
+    }
+
     if (newQuantity <= 0) {
-      setCart((prevCart) => prevCart.filter((cartItem) => cartItem.id !== itemId));
+      setCart(nextCart);
     } else {
-      setCart((prevCart) =>
-        prevCart.map((cartItem) =>
-          cartItem.id === itemId ? { ...cartItem, quantity: newQuantity } : cartItem
-        )
-      );
+      setCart(nextCart);
     }
   };
 
@@ -1061,8 +1174,21 @@ export default function PosPage() {
   const handleCreateOrder = async (paymentMethod: PaymentMethod, tip: number, buyerDetails?: BuyerDetails): Promise<Order | null> => {
     void tip;
     const appliedTip = 0;
+    if (isWarehouseBranchId(activeBranchId)) {
+      toast({
+        variant: 'destructive',
+        title: 'Warehouse selected',
+        description: 'Switch to a branch to make sales.',
+      });
+      return null;
+    }
     if (!cart.length) {
       toast({ variant: 'destructive', title: 'Cart is empty' });
+      return null;
+    }
+    const cartStockIssues = getCartStockIssues(cart);
+    if (cartStockIssues.length > 0) {
+      showStockIssueToast(cartStockIssues[0]);
       return null;
     }
     const reachability = await checkBackendConnectionNow(true);
@@ -1187,9 +1313,7 @@ export default function PosPage() {
     const computedLineItems = cart.map((cartItem) => {
       const quantity = toPositiveNumber(cartItem.quantity, 0);
       const unitPriceRaw = toNonNegativeNumber(cartItem.price, 0);
-      const lineAmount = cartItem.isVariablePrice
-        ? unitPriceRaw
-        : unitPriceRaw * quantity;
+      const lineAmount = resolveCartLineTotal(cartItem);
 
       let lineTax = 0;
       let lineNet = lineAmount;
@@ -1294,142 +1418,156 @@ export default function PosPage() {
     try {
       await db.transaction('rw', db.inventory, db.orders, db.sessions, db.purchaseHistory, async () => {
         // 1. Decrement stock using FIFO
-        
         for (const cartItem of cart) {
-            const originalItemId = resolveInventoryItemId(cartItem);
-            const originalItem = await db.inventory
+          const originalItemId = resolveInventoryItemId(cartItem);
+          const originalItem = await db.inventory
+            .where('branchId')
+            .equals(activeBranchId)
+            .filter(i => String(i.id) === String(originalItemId))
+            .first();
+
+          if (!originalItem) {
+            throw new Error(`Inventory item not found for sale line ${originalItemId}.`);
+          }
+
+          const cartQuantity = toPositiveNumber(cartItem.quantity, 0);
+          if (cartQuantity <= 0) {
+            throw new Error(`Invalid quantity for ${cartItem.name}.`);
+          }
+
+          const itemsToDecrement = (
+            originalItem.itemType === 'sellable' &&
+            originalItem.isProduced &&
+            originalItem.recipe?.length
+          )
+            ? originalItem.recipe
+                .map(ri => {
+                  const ingredientId = String(ri?.ingredientId || '');
+                  const ingredientQty = toPositiveNumber(ri?.quantity, 0);
+                  return {
+                    id: ingredientId,
+                    quantity: ingredientQty * cartQuantity,
+                  };
+                })
+                .filter(entry => entry.id && entry.quantity > 0)
+            : [{ id: originalItemId, quantity: cartQuantity }];
+
+          for (const itemToDecrement of itemsToDecrement) {
+            let quantityToDecrement = toPositiveNumber(itemToDecrement.quantity, 0);
+            if (quantityToDecrement <= 0) {
+              console.warn('[Order] Skipping invalid item decrement quantity:', itemToDecrement);
+              continue;
+            }
+
+            const inventoryItemToUpdate = await db.inventory
               .where('branchId')
               .equals(activeBranchId)
-              .filter(i => String(i.id) === String(originalItemId))
+              .filter(item => String(item.id) === String(itemToDecrement.id))
               .first();
 
-            if (!originalItem) {
-              console.warn('[Order] Item not found in inventory for stock decrement:', originalItemId);
-              continue;
+            if (!inventoryItemToUpdate) {
+              throw new Error(`Inventory item not found for ${itemToDecrement.id}.`);
             }
 
-            const cartQuantity = toPositiveNumber(cartItem.quantity, 0);
-            if (cartQuantity <= 0) {
-              console.warn('[Order] Invalid cart quantity for stock decrement:', cartItem.quantity);
-              continue;
+            let batches = await db.purchaseHistory
+              .where({ branchId: activeBranchId, productId: itemToDecrement.id as any })
+              .and(batch => (batch.quantityRemaining || 0) > 0)
+              .toArray();
+
+            // Fallback handles string/number mismatches for product IDs.
+            if (batches.length === 0) {
+              batches = await db.purchaseHistory
+                .where('branchId')
+                .equals(activeBranchId)
+                .filter(batch =>
+                  String(batch.productId) === String(itemToDecrement.id) &&
+                  (batch.quantityRemaining || 0) > 0
+                )
+                .toArray();
             }
 
-            const itemsToDecrement = (originalItem.itemType === 'sellable' && originalItem.isProduced && originalItem.recipe?.length)
-                ? originalItem.recipe
-                    .map(ri => {
-                      const ingredientId = String(ri?.ingredientId || '');
-                      const ingredientQty = toPositiveNumber(ri?.quantity, 0);
-                      return {
-                        id: ingredientId,
-                        quantity: ingredientQty * cartQuantity,
-                      };
-                    })
-                    .filter(entry => entry.id && entry.quantity > 0)
-                : [{ id: originalItemId, quantity: cartQuantity }];
-            
-            for (const itemToDecrement of itemsToDecrement) {
-                let quantityToDecrement = toPositiveNumber(itemToDecrement.quantity, 0);
-                if (quantityToDecrement <= 0) {
-                  console.warn('[Order] Skipping invalid item decrement quantity:', itemToDecrement);
-                  continue;
-                }
-                const inventoryItemToUpdate = await db.inventory
-                  .where('branchId')
-                  .equals(activeBranchId)
-                  .filter(item => String(item.id) === String(itemToDecrement.id))
-                  .first();
+            const sortedBatches = batches.sort(
+              (a, b) => new Date(a.receivedDate).getTime() - new Date(b.receivedDate).getTime()
+            );
 
-                if (!inventoryItemToUpdate) {
-                  console.warn('[Order] Inventory item not found for stock decrement:', itemToDecrement.id);
-                  continue;
-                }
-
-                let batches = await db.purchaseHistory
-                  .where({ branchId: activeBranchId, productId: itemToDecrement.id as any })
-                  .and(batch => (batch.quantityRemaining || 0) > 0)
-                  .toArray();
-
-                // Fallback handles string/number mismatches for product IDs.
-                if (batches.length === 0) {
-                  batches = await db.purchaseHistory
-                    .where('branchId')
-                    .equals(activeBranchId)
-                    .filter(batch =>
-                      String(batch.productId) === String(itemToDecrement.id) &&
-                      (batch.quantityRemaining || 0) > 0
-                    )
-                    .toArray();
-                }
-
-                const sortedBatches = batches.sort(
-                  (a, b) => new Date(a.receivedDate).getTime() - new Date(b.receivedDate).getTime()
-                );
-
-                let totalDecrementedFromBatches = 0;
-                for (const batch of sortedBatches) {
-                    if (quantityToDecrement <= 0) break;
-
-                    const batchQuantityRemaining = toNonNegativeNumber(batch.quantityRemaining, 0);
-                    if (batchQuantityRemaining <= 0) continue;
-
-                    const decrementAmount = Math.min(quantityToDecrement, batchQuantityRemaining);
-                    if (!Number.isFinite(decrementAmount) || decrementAmount <= 0) continue;
-                    
-                    await db.purchaseHistory.update(batch.id!, {
-                        quantityRemaining: Math.max(0, batchQuantityRemaining - decrementAmount),
-                        _dirty: true,
-                        _operation: 'update'
-                    });
-
-                    // Add to order COGS
-                    const netUnitCost = resolveNetUnitCostFromBatch(batch);
-                    orderCogs += decrementAmount * netUnitCost;
-                    
-                    quantityToDecrement -= decrementAmount;
-                    totalDecrementedFromBatches += decrementAmount;
-                }
-
-                // If batches are missing/partial, deduct remaining quantity directly from inventory.
-                let fallbackInventoryDecrement = 0;
-                if (quantityToDecrement > 0) {
-                    const currentItemStock = toNonNegativeNumber(inventoryItemToUpdate.stockUnits, 0);
-                    const availableAfterBatch = Math.max(
-                      0,
-                      currentItemStock - totalDecrementedFromBatches
-                    );
-                    fallbackInventoryDecrement = Math.min(quantityToDecrement, availableAfterBatch);
-                    quantityToDecrement -= fallbackInventoryDecrement;
-
-                    if (fallbackInventoryDecrement > 0) {
-                      orderCogs += fallbackInventoryDecrement * toNonNegativeNumber(inventoryItemToUpdate.cost, 0);
-                    }
-                }
-
-                const totalInventoryDecrement = totalDecrementedFromBatches + fallbackInventoryDecrement;
-                if (totalInventoryDecrement > 0) {
-                    const currentStock = toNonNegativeNumber(inventoryItemToUpdate.stockUnits, 0);
-                    const newStock = Math.max(0, currentStock - totalInventoryDecrement);
-                    const reorderLevel = inventoryItemToUpdate.reorderLevel || 0;
-                    const status = newStock <= 0
-                      ? 'Out of Stock'
-                      : newStock <= reorderLevel
-                        ? 'Low Stock'
-                        : 'In Stock';
-
-                    await db.inventory.update(inventoryItemToUpdate.id, {
-                        stockUnits: newStock,
-                        status,
-                        _dirty: true,
-                        _operation: 'update'
-                    });
-
-                    console.log('[Sync] Updated inventory item stock after sale:', inventoryItemToUpdate.id, 'decremented:', totalInventoryDecrement, 'new stock:', newStock);
-                }
-
-                if (quantityToDecrement > 0) {
-                  console.warn('[Order] Sale consumed more stock than tracked quantity for item:', itemToDecrement.id, 'remaining unmet quantity:', quantityToDecrement);
-                }
+            const availableBatchQuantity = sortedBatches.reduce(
+              (sum, batch) => sum + toNonNegativeNumber(batch.quantityRemaining, 0),
+              0
+            );
+            const availableQuantity = sortedBatches.length > 0
+              ? availableBatchQuantity
+              : toNonNegativeNumber(inventoryItemToUpdate.stockUnits, 0);
+            if (quantityToDecrement > availableQuantity + 0.0001) {
+              throw new Error(
+                `Insufficient stock: ${inventoryItemToUpdate.name} has ${formatStockQuantity(availableQuantity)}, ` +
+                `requested ${formatStockQuantity(quantityToDecrement)}.`
+              );
             }
+
+            let totalDecrementedFromBatches = 0;
+            for (const batch of sortedBatches) {
+              if (quantityToDecrement <= 0) break;
+
+              const batchQuantityRemaining = toNonNegativeNumber(batch.quantityRemaining, 0);
+              if (batchQuantityRemaining <= 0) continue;
+
+              const decrementAmount = Math.min(quantityToDecrement, batchQuantityRemaining);
+              if (!Number.isFinite(decrementAmount) || decrementAmount <= 0) continue;
+
+              await db.purchaseHistory.update(batch.id!, {
+                quantityRemaining: Math.max(0, batchQuantityRemaining - decrementAmount),
+                _dirty: true,
+                _operation: 'update',
+              });
+
+              const netUnitCost = resolveNetUnitCostFromBatch(batch);
+              orderCogs += decrementAmount * netUnitCost;
+
+              quantityToDecrement -= decrementAmount;
+              totalDecrementedFromBatches += decrementAmount;
+            }
+
+            // If batches are missing/partial, deduct remaining quantity directly from inventory.
+            let fallbackInventoryDecrement = 0;
+            if (quantityToDecrement > 0) {
+              const currentItemStock = toNonNegativeNumber(inventoryItemToUpdate.stockUnits, 0);
+              const availableAfterBatch = Math.max(
+                0,
+                currentItemStock - totalDecrementedFromBatches
+              );
+              fallbackInventoryDecrement = Math.min(quantityToDecrement, availableAfterBatch);
+              quantityToDecrement -= fallbackInventoryDecrement;
+
+              if (fallbackInventoryDecrement > 0) {
+                orderCogs += fallbackInventoryDecrement * toNonNegativeNumber(inventoryItemToUpdate.cost, 0);
+              }
+            }
+
+            const totalInventoryDecrement = totalDecrementedFromBatches + fallbackInventoryDecrement;
+            if (totalInventoryDecrement > 0) {
+              const currentStock = toNonNegativeNumber(inventoryItemToUpdate.stockUnits, 0);
+              const newStock = Math.max(0, currentStock - totalInventoryDecrement);
+              const reorderLevel = inventoryItemToUpdate.reorderLevel || 0;
+              const status = newStock <= 0
+                ? 'Out of Stock'
+                : newStock <= reorderLevel
+                  ? 'Low Stock'
+                  : 'In Stock';
+
+              await db.inventory.update(inventoryItemToUpdate.id, {
+                stockUnits: newStock,
+                status,
+                _dirty: true,
+                _operation: 'update',
+              });
+
+              console.log('[Sync] Updated inventory item stock after sale:', inventoryItemToUpdate.id, 'decremented:', totalInventoryDecrement, 'new stock:', newStock);
+            }
+
+            if (quantityToDecrement > 0) {
+              console.warn('[Order] Sale consumed more stock than tracked quantity for item:', itemToDecrement.id, 'remaining unmet quantity:', quantityToDecrement);
+            }
+          }
         }
 
         // 2. Create the order with UUID
@@ -1714,9 +1852,7 @@ export default function PosPage() {
               toast({
                 variant: 'destructive',
                 title: eisEnabled ? 'Legal Receipt Not Issued' : 'Sale Not Synced',
-                description: eisEnabled
-                  ? `${errorMessage}. No EIS receipt was printed because MRA fiscal details are missing.`
-                  : errorMessage,
+                description: errorMessage,
               });
               return null;
             }
@@ -1872,6 +2008,29 @@ export default function PosPage() {
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       )
+  }
+
+  if (isWarehouseBranchId(activeBranchId)) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Card className="w-full max-w-md text-center">
+          <CardHeader>
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
+              <AlertTriangle />
+            </div>
+            <CardTitle className="mt-4 text-xl">Warehouse Selected</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-muted-foreground">
+              Switch to a branch to make sales.
+            </p>
+            <Button className="mt-6" onClick={() => router.push('/dashboard/inventory')}>
+              View Warehouse Stock
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
   }
 
   if (!activeSession) {

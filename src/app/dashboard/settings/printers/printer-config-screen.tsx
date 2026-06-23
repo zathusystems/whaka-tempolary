@@ -30,7 +30,13 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { printerService, type PrinterConfig, type PrinterSettings } from '@/lib/services/printer-service';
+import {
+  printerService,
+  SUPPORTED_PRINTER_PAPER_WIDTHS,
+  normalizePrinterPaperWidth,
+  type PrinterConfig,
+  type PrinterSettings,
+} from '@/lib/services/printer-service';
 import { printerDiscoveryService, type DiscoveredPrinter } from '@/lib/services/printer-discovery-service';
 import { unifiedPrintingService } from '@/lib/services/unified-printing-service';
 
@@ -167,6 +173,28 @@ export function PrinterConfigScreen() {
         variant: 'destructive',
         title: 'Error',
         description: 'Failed to update printer',
+      });
+    }
+  };
+
+  const handlePrinterPaperWidthChange = async (printerId: string, value: string) => {
+    try {
+      const printer = printers.find(p => p.id === printerId);
+      if (!printer) return;
+
+      const updated: PrinterConfig = {
+        ...printer,
+        paperWidth: normalizePrinterPaperWidth(value),
+        updatedAt: new Date().toISOString(),
+      };
+      await printerService.savePrinterConfig(updated);
+      setPrinters(printers.map(p => (p.id === printerId ? updated : p)));
+    } catch (error) {
+      console.error('Error updating printer width:', error);
+      toast({
+        variant: 'destructive',
+        title: 'Error',
+        description: 'Failed to update printer width',
       });
     }
   };
@@ -347,6 +375,7 @@ export function PrinterConfigScreen() {
                                   isEnabled: true,
                                   autoprint: true,
                                   printCopies: 1,
+                                  openCashDrawerOnCashSale: false,
                                   createdAt: new Date().toISOString(),
                                   updatedAt: new Date().toISOString(),
                                 };
@@ -491,7 +520,7 @@ export function PrinterConfigScreen() {
               {printers.map((printer) => (
                 <div
                   key={printer.id}
-                  className="flex items-center justify-between rounded-lg border p-4"
+                  className="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between"
                 >
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
@@ -511,7 +540,22 @@ export function PrinterConfigScreen() {
                       {printer.type.charAt(0).toUpperCase() + printer.type.slice(1)} • {printer.paperWidth}
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Select
+                      value={printer.paperWidth}
+                      onValueChange={(value) => handlePrinterPaperWidthChange(printer.id, value)}
+                    >
+                      <SelectTrigger className="h-9 w-[112px]">
+                        <SelectValue placeholder="Width" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {SUPPORTED_PRINTER_PAPER_WIDTHS.map((width) => (
+                          <SelectItem key={width} value={width}>
+                            {width}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     <Switch
                       checked={printer.isEnabled}
                       onCheckedChange={(checked) =>
@@ -576,7 +620,7 @@ export function PrinterConfigScreen() {
                   onValueChange={(value) =>
                     setSettings({
                       ...settings,
-                      receiptPaperWidth: value === '58mm' ? '58mm' : '80mm',
+                      receiptPaperWidth: normalizePrinterPaperWidth(value),
                     })
                   }
                 >
@@ -584,12 +628,15 @@ export function PrinterConfigScreen() {
                     <SelectValue placeholder="Select receipt width" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="80mm">80mm (Standard)</SelectItem>
-                    <SelectItem value="58mm">58mm (Compact)</SelectItem>
+                    {SUPPORTED_PRINTER_PAPER_WIDTHS.map((width) => (
+                      <SelectItem key={width} value={width}>
+                        {width}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
                 <p className="text-sm text-muted-foreground mt-1">
-                  Controls receipt layout width. 58mm works on 80mm printers with side margins.
+                  Controls receipt layout width. Match the roll width used for certification tests.
                 </p>
               </div>
 
@@ -612,6 +659,25 @@ export function PrinterConfigScreen() {
                 <p className="text-sm text-muted-foreground mt-1">
                   Number of receipt copies to print per sale
                 </p>
+              </div>
+
+              <div className="flex items-center justify-between gap-4 border-t pt-4">
+                <div className="space-y-1">
+                  <Label htmlFor="cash-drawer-on-cash-sale">Cash Drawer</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Open ESC/POS cash drawer after successful cash receipt print.
+                  </p>
+                </div>
+                <Switch
+                  id="cash-drawer-on-cash-sale"
+                  checked={settings.openCashDrawerOnCashSale}
+                  onCheckedChange={(checked) =>
+                    setSettings({
+                      ...settings,
+                      openCashDrawerOnCashSale: checked,
+                    })
+                  }
+                />
               </div>
             </div>
 

@@ -308,11 +308,12 @@ fn center_window_stable(app: AppHandle, label: &'static str) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    println!("[Tauri] Starting Mwaka POS application");
+    println!("[Tauri] Starting HandyPOS application");
 
     let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
         printer::get_printers,
         printer::print_receipt,
+        printer::open_cash_drawer,
         save_session_snapshot,
         load_session_snapshot,
         clear_session_snapshot,

@@ -150,6 +150,35 @@ pub fn print_receipt(
     Ok("success".into())
 }
 
+#[command]
+pub fn open_cash_drawer(printer_id: String) -> Result<String, String> {
+    let printer_id = printer_id.trim().to_string();
+    let drawer_data = super::receipt_formatter::cash_drawer_pulse();
+
+    if let Some(queue_name) = printer_id.strip_prefix("cups:") {
+        print_to_cups(queue_name, &drawer_data, 1)?;
+        return Ok("success".into());
+    }
+
+    if let Some(address) = printer_id.strip_prefix("bt:") {
+        print_to_paired_bluetooth(address, &drawer_data, 1)?;
+        return Ok("success".into());
+    }
+
+    let parts: Vec<&str> = printer_id.split(':').collect();
+    if parts.len() != 2 {
+        return Err(
+            "Invalid printer ID format. Expected USB id (vvvv:pppp), cups:<queue>, or bt:<MAC>"
+                .to_string(),
+        );
+    }
+
+    let vid = u16::from_str_radix(parts[0], 16).map_err(|_| "Invalid vendor ID")?;
+    let pid = u16::from_str_radix(parts[1], 16).map_err(|_| "Invalid product ID")?;
+    print_to_usb(vid, pid, &drawer_data)?;
+    Ok("success".into())
+}
+
 fn ensure_single_default(printers: &mut [PrinterInfo]) {
     if printers.is_empty() {
         return;

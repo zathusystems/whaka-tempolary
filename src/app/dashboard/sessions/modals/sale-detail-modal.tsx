@@ -19,7 +19,12 @@ import { useAuth } from '@/hooks/use-auth';
 import { authFetch } from '@/lib/auth-fetch';
 import { useToast } from '@/hooks/use-toast';
 import { getOfflineBusinessProfile } from '@/lib/business-profile';
-import { PRINTER_CONFIG_UPDATED_EVENT, type PrinterSettings } from '@/lib/services/printer-service';
+import {
+  PRINTER_CONFIG_UPDATED_EVENT,
+  normalizePrinterPaperWidth,
+  type PrinterPaperWidth,
+  type PrinterSettings,
+} from '@/lib/services/printer-service';
 import { getNextReceiptCopyNumber, markReceiptPrinted } from '@/lib/services/receipt-copy-service';
 import {
   Dialog,
@@ -277,7 +282,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
   const [isPrinting, setIsPrinting] = useState(false);
   const [businessSettings, setBusinessSettings] = useState<Business | null>(null);
   const [inventoryUnitById, setInventoryUnitById] = useState<Record<string, string>>({});
-  const [receiptPaperWidth, setReceiptPaperWidth] = useState<'80mm' | '58mm'>('80mm');
+  const [receiptPaperWidth, setReceiptPaperWidth] = useState<PrinterPaperWidth>('80mm');
   const [receiptCopyNumber, setReceiptCopyNumber] = useState(1);
   const [receiptDisplaySettings, setReceiptDisplaySettings] = useState({
     showHeader: true,
@@ -290,10 +295,12 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
   const applyPrinterSettingsToReceipt = useCallback(
     (
       settings?: Partial<PrinterSettings> | null,
-      fallbackPaperWidth: '80mm' | '58mm' = '80mm'
-    ): '80mm' | '58mm' => {
-      const resolvedPaperWidth: '80mm' | '58mm' =
-        settings?.receiptPaperWidth === '58mm' ? '58mm' : fallbackPaperWidth;
+      fallbackPaperWidth: PrinterPaperWidth = '80mm'
+    ): PrinterPaperWidth => {
+      const resolvedPaperWidth = normalizePrinterPaperWidth(
+        settings?.receiptPaperWidth,
+        fallbackPaperWidth
+      );
 
       setReceiptPaperWidth(resolvedPaperWidth);
       setReceiptDisplaySettings({
@@ -319,7 +326,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
 
     applyPrinterSettingsToReceipt(
       printerSettings,
-      (defaultPrinter?.paperWidth as '80mm' | '58mm') || '80mm'
+      normalizePrinterPaperWidth(defaultPrinter?.paperWidth)
     );
   }, [applyPrinterSettingsToReceipt]);
 
@@ -378,7 +385,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
           if (isMounted) {
             applyPrinterSettingsToReceipt(
               printerSettings,
-              (defaultPrinter?.paperWidth as '80mm' | '58mm') || '80mm'
+              normalizePrinterPaperWidth(defaultPrinter?.paperWidth)
             );
           }
         })
@@ -599,7 +606,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
       ]);
       const selectedPaperWidth = applyPrinterSettingsToReceipt(
         settings,
-        (defaultPrinter?.paperWidth as '80mm' | '58mm') || '80mm'
+        normalizePrinterPaperWidth(defaultPrinter?.paperWidth)
       );
       
       if (!defaultPrinter) {
@@ -653,7 +660,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
             printerId: defaultPrinter.id,
             copies: 1,
             paperSize: selectedPaperWidth,
-            printerPaperSize: defaultPrinter.paperWidth as '80mm' | '58mm',
+            printerPaperSize: normalizePrinterPaperWidth(defaultPrinter.paperWidth),
           }).then((success) => ({ success, timedOut: false })),
           new Promise<{ success: false; timedOut: true }>((resolve) =>
             setTimeout(() => resolve({ success: false, timedOut: true }), 20000)

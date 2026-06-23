@@ -51,10 +51,13 @@ import {
 import { toast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/use-auth';
 import { authFetch } from '@/lib/auth-fetch';
+import { syncBusinessBranchesFromServer, type StoredBranch } from '@/lib/branch-sync';
+import { syncSessionSnapshotToDesktopStore } from '@/lib/desktop-session-store';
 
 const LOCAL_STORAGE_KEYS = {
     BRANCHES: 'handypos-branches',
     ACTIVE_BRANCH: 'handypos-active-branch',
+    CURRENT_BRANCH: 'handypos-current-branch-id',
 };
 
 const branchSchema = z.object({
@@ -62,9 +65,40 @@ const branchSchema = z.object({
     name: z.string().min(2, 'Branch name is required.'),
     address: z.string().min(5, 'Address is required.'),
     backendId: z.string().optional(), // Track backend ID separately
+    mraBranchCode: z.string().optional(),
+    mra_branch_code: z.string().optional(),
+    mraSiteId: z.string().optional(),
+    mra_site_id: z.string().optional(),
+    mraSiteName: z.string().optional(),
+    mra_site_name: z.string().optional(),
+    mraTerminalId: z.string().optional(),
+    mra_terminal_id: z.string().optional(),
+    mraTerminalPosition: z.coerce.number().optional().nullable(),
+    mra_terminal_position: z.coerce.number().optional().nullable(),
+    isEisWarehouse: z.boolean().optional(),
+    is_eis_warehouse: z.boolean().optional(),
 });
 
 type Branch = z.infer<typeof branchSchema>;
+
+const toBranchModel = (branch: StoredBranch): Branch => ({
+    id: branch.id,
+    backendId: branch.backendId,
+    name: branch.name,
+    address: branch.address,
+    mraBranchCode: branch.mraBranchCode || branch.mra_branch_code || '',
+    mra_branch_code: branch.mra_branch_code || branch.mraBranchCode || '',
+    mraSiteId: branch.mraSiteId || branch.mra_site_id || '',
+    mra_site_id: branch.mra_site_id || branch.mraSiteId || '',
+    mraSiteName: branch.mraSiteName || branch.mra_site_name || '',
+    mra_site_name: branch.mra_site_name || branch.mraSiteName || '',
+    mraTerminalId: branch.mraTerminalId || branch.mra_terminal_id || '',
+    mra_terminal_id: branch.mra_terminal_id || branch.mraTerminalId || '',
+    mraTerminalPosition: branch.mraTerminalPosition ?? branch.mra_terminal_position ?? null,
+    mra_terminal_position: branch.mra_terminal_position ?? branch.mraTerminalPosition ?? null,
+    isEisWarehouse: Boolean(branch.isEisWarehouse ?? branch.is_eis_warehouse ?? false),
+    is_eis_warehouse: Boolean(branch.is_eis_warehouse ?? branch.isEisWarehouse ?? false),
+});
 
 const BranchForm = ({
   onFormSubmit,
@@ -77,7 +111,15 @@ const BranchForm = ({
 }) => {
   const form = useForm<Branch>({
     resolver: zodResolver(branchSchema),
-    defaultValues: defaultValues || { name: '', address: '' },
+    defaultValues: defaultValues || {
+        name: '',
+        address: '',
+        mraSiteId: '',
+        mraSiteName: '',
+        mraTerminalId: '',
+        mraTerminalPosition: null,
+        isEisWarehouse: false,
+    },
   });
 
   const onSubmit = (data: Branch) => {
@@ -114,6 +156,89 @@ const BranchForm = ({
                     </FormItem>
                 )}
             />
+            <div className="rounded-md border p-3">
+                <p className="mb-3 text-sm font-medium">EIS Mapping</p>
+                <div className="grid gap-3">
+                    <FormField
+                        control={form.control}
+                        name="mraSiteId"
+                        render={({ field }) => (
+                            <FormItem>
+                                <FormLabel>MRA Site ID</FormLabel>
+                                <FormControl>
+                                    <Input placeholder="MRA site ID" {...field} value={field.value || ''} disabled={isSubmitting} />
+                                </FormControl>
+                                <FormMessage />
+                            </FormItem>
+                        )}
+                    />
+                    <FormField
+                        control={form.control}
+                        name="mraSiteName"
+                        render={({ field }) => (
+                            <FormItem>
+                                <FormLabel>MRA Site Name</FormLabel>
+                                <FormControl>
+                                    <Input placeholder="MRA site name" {...field} value={field.value || ''} disabled={isSubmitting} />
+                                </FormControl>
+                                <FormMessage />
+                            </FormItem>
+                        )}
+                    />
+                    <div className="grid gap-3 sm:grid-cols-2">
+                        <FormField
+                            control={form.control}
+                            name="mraTerminalId"
+                            render={({ field }) => (
+                                <FormItem>
+                                    <FormLabel>Terminal ID</FormLabel>
+                                    <FormControl>
+                                        <Input placeholder="MRA terminal ID" {...field} value={field.value || ''} disabled={isSubmitting} />
+                                    </FormControl>
+                                    <FormMessage />
+                                </FormItem>
+                            )}
+                        />
+                        <FormField
+                            control={form.control}
+                            name="mraTerminalPosition"
+                            render={({ field }) => (
+                                <FormItem>
+                                    <FormLabel>Terminal Position</FormLabel>
+                                    <FormControl>
+                                        <Input
+                                            inputMode="numeric"
+                                            placeholder="Position"
+                                            value={field.value ?? ''}
+                                            onChange={(event) => field.onChange(event.target.value ? Number(event.target.value) : null)}
+                                            disabled={isSubmitting}
+                                        />
+                                    </FormControl>
+                                    <FormMessage />
+                                </FormItem>
+                            )}
+                        />
+                    </div>
+                    <FormField
+                        control={form.control}
+                        name="isEisWarehouse"
+                        render={({ field }) => (
+                            <FormItem>
+                                <label className="flex items-center gap-2 text-sm">
+                                    <input
+                                        type="checkbox"
+                                        checked={Boolean(field.value)}
+                                        onChange={(event) => field.onChange(event.target.checked)}
+                                        disabled={isSubmitting}
+                                    />
+                                    EIS warehouse/location
+                                </label>
+                                <FormMessage />
+                            </FormItem>
+                        )}
+                    />
+                </div>
+            </div>
             <DialogFooter>
                 <Button type="submit" disabled={isSubmitting}>
                     {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
@@ -183,17 +308,15 @@ export default function BranchesSettingsPage() {
             setIsLoading(true);
             console.log('[DEBUG BRANCHES] Loading branches for business:', business.id);
             
-            // Try to load from backend
-            const response = await authFetch.fetch(`/business/businesses/${business.id}/branches/`);
-            console.log('[DEBUG BRANCHES] Loaded branches from backend:', response);
-            
-            // Transform backend response to local format
-            const transformedBranches = response.map((branch: any) => ({
-                id: `BRN-${branch.id}`, // Use local ID format
-                backendId: String(branch.id), // Store backend ID
-                name: branch.name,
-                address: branch.address,
-            }));
+            const storedActiveBranch = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
+            const syncResult = await syncBusinessBranchesFromServer(
+                String(business.id),
+                storedActiveBranch || undefined,
+                { timeoutMs: 15000 }
+            );
+            console.log('[DEBUG BRANCHES] Loaded branches from backend:', syncResult.rawBranches);
+
+            const transformedBranches = syncResult.branches.map(toBranchModel);
             
             setBranches(transformedBranches);
             localStorage.setItem(LOCAL_STORAGE_KEYS.BRANCHES, JSON.stringify(transformedBranches));
@@ -238,6 +361,13 @@ export default function BranchesSettingsPage() {
                 phone: '',
                 email: '',
                 is_active: true,
+                mra_site_id: data.mraSiteId || data.mra_site_id || '',
+                mra_site_name: data.mraSiteName || data.mra_site_name || '',
+                mra_branch_code: data.mraSiteId || data.mra_site_id || data.mraBranchCode || data.mra_branch_code || '',
+                mra_terminal_id: data.mraTerminalId || data.mra_terminal_id || '',
+                mra_terminal_position: data.mraTerminalPosition ?? data.mra_terminal_position ?? null,
+                is_eis_warehouse: Boolean(data.isEisWarehouse ?? data.is_eis_warehouse ?? false),
+                eis_mapping_source: data.mraSiteId || data.mra_site_id ? 'manual' : '',
             };
 
             if (editingBranch && editingBranch.id) {
@@ -266,7 +396,14 @@ export default function BranchesSettingsPage() {
                 }
 
                 const updatedBranches = branches.map(b => 
-                    b.id === editingBranch.id ? {...data, id: b.id, backendId: b.backendId} : b
+                    b.id === editingBranch.id ? toBranchModel({
+                        ...b,
+                        ...data,
+                        id: b.id || editingBranch.id || '',
+                        backendId: b.backendId,
+                        name: data.name || b.name || '',
+                        address: data.address || b.address || '',
+                    }) : b
                 );
                 setBranches(updatedBranches);
                 localStorage.setItem(LOCAL_STORAGE_KEYS.BRANCHES, JSON.stringify(updatedBranches));
@@ -290,12 +427,11 @@ export default function BranchesSettingsPage() {
                         body: JSON.stringify(payload),
                     });
 
-                    newBranch = {
-                        id: `BRN-${response.id}`,
+                    newBranch = toBranchModel({
+                        ...response,
+                        id: String(response.id),
                         backendId: String(response.id),
-                        name: response.name,
-                        address: response.address,
-                    };
+                    });
                     console.log('[DEBUG BRANCHES] Branch created on backend:', response);
                 } catch (error) {
                     console.error('[DEBUG BRANCHES] Error creating on backend:', error);
@@ -307,11 +443,12 @@ export default function BranchesSettingsPage() {
                         offline: true,
                     }).catch(() => {});
 
-                    newBranch = {
+                    newBranch = toBranchModel({
+                        ...data,
                         id: `BRN-${Date.now()}`,
-                        name: data.name,
-                        address: data.address,
-                    };
+                        name: data.name || 'New Branch',
+                        address: data.address || '',
+                    });
                 }
 
                 const updatedBranches = [...branches, newBranch];
@@ -424,15 +561,15 @@ export default function BranchesSettingsPage() {
         }
 
         localStorage.setItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH, branch.id);
+        localStorage.setItem(LOCAL_STORAGE_KEYS.CURRENT_BRANCH, branch.id);
         setActiveBranchId(branch.id);
         window.dispatchEvent(new CustomEvent('branchChanged', { detail: { branchId: branch.id } }));
+        void syncSessionSnapshotToDesktopStore();
 
         toast({
             title: 'Branch Switched',
             description: `Switched to "${branch.name}".`,
         });
-
-        window.location.reload();
     };
     
     const handleBranchModalOpenChange = (open: boolean) => {
@@ -477,6 +614,7 @@ export default function BranchesSettingsPage() {
                         <TableRow>
                             <TableHead>Branch Name</TableHead>
                             <TableHead>Address</TableHead>
+                            <TableHead>EIS Mapping</TableHead>
                             <TableHead className="w-16"><span className="sr-only">Actions</span></TableHead>
                         </TableRow>
                     </TableHeader>
@@ -500,6 +638,17 @@ export default function BranchesSettingsPage() {
                                     </div>
                                 </TableCell>
                                 <TableCell className="text-muted-foreground">{branch.address}</TableCell>
+                                <TableCell>
+                                    {(branch.mraSiteId || branch.mra_site_id) ? (
+                                        <div className="space-y-1 text-xs">
+                                            <span className="inline-flex rounded-full bg-green-100 px-2 py-0.5 font-medium text-green-700">Mapped</span>
+                                            <div className="text-muted-foreground">{branch.mraSiteId || branch.mra_site_id}</div>
+                                            {(branch.isEisWarehouse || branch.is_eis_warehouse) && <div className="font-medium">Warehouse</div>}
+                                        </div>
+                                    ) : (
+                                        <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">Unmapped</span>
+                                    )}
+                                </TableCell>
                                 <TableCell>
                                     <DropdownMenu>
                                         <DropdownMenuTrigger asChild>
@@ -532,7 +681,7 @@ export default function BranchesSettingsPage() {
                             </TableRow>
                         )) : (
                             <TableRow>
-                                <TableCell colSpan={3} className="h-24 text-center">
+                                <TableCell colSpan={4} className="h-24 text-center">
                                     No branches found. Click "New Branch" to add your first one.
                                 </TableCell>
                             </TableRow>

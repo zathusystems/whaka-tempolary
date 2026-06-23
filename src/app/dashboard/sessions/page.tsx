@@ -74,6 +74,7 @@ import {
   toProductCategorySummaryRows,
   type ProductReportingCategory,
 } from '@/lib/session-product-report';
+import { normalizePrinterPaperWidth } from '@/lib/services/printer-service';
 import {
   StartSessionForm,
   CloseSessionForm,
@@ -637,8 +638,7 @@ const ZReportTab = ({ session }: { session: Session }) => {
                 return;
             }
 
-            const selectedPaperSize: '80mm' | '58mm' =
-                printerSettings.receiptPaperWidth === '58mm' ? '58mm' : '80mm';
+            const selectedPaperSize = normalizePrinterPaperWidth(printerSettings.receiptPaperWidth);
 
             const htmlContent = buildZReportPrintHtml({
                 session,
@@ -654,7 +654,7 @@ const ZReportTab = ({ session }: { session: Session }) => {
                 printerId: defaultPrinter.id,
                 copies: 1,
                 paperSize: selectedPaperSize,
-                printerPaperSize: defaultPrinter.paperWidth === '58mm' ? '58mm' : '80mm',
+                printerPaperSize: normalizePrinterPaperWidth(defaultPrinter.paperWidth),
                 timeout: 20000,
             });
 

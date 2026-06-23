@@ -89,6 +89,14 @@ pub fn print_receipt(
     Ok("success".into())
 }
 
+#[command]
+pub fn open_cash_drawer(printer_id: String) -> Result<String, String> {
+    let printer_name = resolve_windows_printer_name(&printer_id)?;
+    let drawer_data = super::receipt_formatter::cash_drawer_pulse();
+    print_raw_windows(&printer_name, &drawer_data)?;
+    Ok("success".into())
+}
+
 struct WinPrinterEntry {
     name: String,
     is_offline: bool,
@@ -214,7 +222,7 @@ fn print_raw_windows(printer_name: &str, data: &[u8]) -> Result<(), String> {
             return Err(format!("Failed to open printer: {}", err));
         }
 
-        let doc_name = to_wide("Mwaka POS Receipt");
+        let doc_name = to_wide("HandyPOS Receipt");
         let data_type = to_wide("RAW");
         let doc_info = DOC_INFO_1W {
             pDocName: PWSTR(doc_name.as_ptr() as *mut _),

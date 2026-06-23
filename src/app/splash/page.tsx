@@ -4,8 +4,8 @@ export default function SplashPage() {
   return (
     <main className={styles.root} aria-label="Loading application">
       <div className={styles.card}>
-        <div className={styles.logo}>MP</div>
-        <h1 className={styles.title}>Mwaka POS</h1>
+        <div className={styles.logo}>HP</div>
+        <h1 className={styles.title}>HandyPOS</h1>
         <p className={styles.subtitle}>Point of Sale System</p>
         <div className={styles.spinner} />
         <p className={styles.status}>Loading...</p>

@@ -1383,7 +1383,7 @@ class SyncService {
     }
     
     // ✅ Fields that should NOT be converted to snake_case (backend expects camelCase)
-    const keepCamelCase = ['supplierId', 'supplierName', 'totalItems', 'totalCost', 'paymentStatus', 'amountPaid', 'amountDue', 'createdBy', 'inventoryItemId', 'quantityOrdered', 'quantityReceived', 'quantityRemaining', 'costPerUnit', 'batchNumber', 'expiryDate', 'branchId', 'businessId', 'supplierTin', 'mraSupplierId', 'vatRegistered', 'eisStockReceiptSource', 'itemType', 'stockUnits', 'unitType', 'reorderLevel', 'isVariablePrice', 'isProduced', 'isSoldInPortions', 'portionName', 'portionsPerUnit', 'isRecipeIngredient', 'onMenu', 'isRecipeIngredient'];
+    const keepCamelCase = ['supplierId', 'supplierName', 'totalItems', 'totalCost', 'paymentStatus', 'amountPaid', 'amountDue', 'createdBy', 'inventoryItemId', 'quantityOrdered', 'quantityReceived', 'quantityRemaining', 'costPerUnit', 'batchNumber', 'expiryDate', 'branchId', 'businessId', 'supplierTin', 'mraSupplierId', 'vatRegistered', 'eisStockReceiptSource', 'itemType', 'stockUnits', 'unitType', 'reorderLevel', 'isVariablePrice', 'isProduced', 'isSoldInPortions', 'portionName', 'portionsPerUnit', 'isRecipeIngredient', 'onMenu', 'isRecipeIngredient', 'fromBranchId', 'fromBranchName', 'toBranchId', 'toBranchName', 'itemId', 'itemName', 'initiatedBy', 'createdAt'];
     
     // Convert camelCase keys to snake_case for backend
     const converted: any = {};

@@ -654,8 +654,8 @@ export function SetupWizard() {
             <>
               <CardHeader className="text-center py-4">
                 <div className="mx-auto mb-2 h-12 w-12"><HandyPosLogo /></div>
-                <h1 className="font-headline text-2xl font-bold text-primary">Welcome to Mwaka POS</h1>
-                <p className="text-sm text-muted-foreground">Let's get Mwaka POS set up in a few simple steps.</p>
+                <h1 className="font-headline text-2xl font-bold text-primary">Welcome to HandyPOS</h1>
+                <p className="text-sm text-muted-foreground">Let's get HandyPOS set up in a few simple steps.</p>
               </CardHeader>
               <CardContent className="space-y-4">
                 <FormField

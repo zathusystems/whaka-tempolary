@@ -4,12 +4,27 @@ import { db } from '@/lib/db';
 
 export const PRINTER_CONFIG_UPDATED_EVENT = 'handypos:printer-config-updated';
 
+export const SUPPORTED_PRINTER_PAPER_WIDTHS = ['30mm', '40mm', '50mm', '58mm', '80mm'] as const;
+export type PrinterPaperWidth = typeof SUPPORTED_PRINTER_PAPER_WIDTHS[number];
+
+export const isPrinterPaperWidth = (value: unknown): value is PrinterPaperWidth =>
+  SUPPORTED_PRINTER_PAPER_WIDTHS.includes(value as PrinterPaperWidth);
+
+export const normalizePrinterPaperWidth = (
+  value: unknown,
+  fallback: PrinterPaperWidth = '80mm'
+): PrinterPaperWidth => {
+  const raw = String(value ?? '').trim().toLowerCase();
+  const normalized = raw.endsWith('mm') ? raw : raw ? `${raw}mm` : '';
+  return isPrinterPaperWidth(normalized) ? normalized : fallback;
+};
+
 export interface PrinterConfig {
   id: string;
   branchId: string;
   name: string;
   type: 'thermal' | 'inkjet' | 'laser' | 'thermal_bluetooth';
-  paperWidth: '80mm' | '58mm'; // Roll paper sizes (80mm standard, 58mm compact)
+  paperWidth: PrinterPaperWidth; // Roll paper size.
   connectionType: 'usb' | 'network' | 'bluetooth'; // How printer connects
   bluetoothDeviceId?: string; // For Bluetooth printers
   bluetoothDeviceName?: string; // For Bluetooth printers
@@ -17,6 +32,7 @@ export interface PrinterConfig {
   isEnabled: boolean;
   autoprint: boolean; // Auto-print receipts on sale completion
   printCopies: number; // Number of copies to print
+  openCashDrawerOnCashSale?: boolean; // Pulse ESC/POS drawer for cash payments.
   createdAt: string;
   updatedAt: string;
 }
@@ -26,7 +42,8 @@ export interface PrinterSettings {
   autoprint: boolean;
   printCopies: number;
   defaultPrinter?: string;
-  receiptPaperWidth: '80mm' | '58mm'; // Receipt layout width (can be compact on 80mm printers)
+  receiptPaperWidth: PrinterPaperWidth; // Receipt layout width.
+  openCashDrawerOnCashSale: boolean;
   printHeader: boolean;
   printFooter: boolean;
   printQRCode: boolean;
@@ -89,8 +106,8 @@ class PrinterService {
     return stored;
   }
 
-  private normalizePaperWidth(value: unknown): '80mm' | '58mm' {
-    return value === '58mm' ? '58mm' : '80mm';
+  private normalizePaperWidth(value: unknown, fallback: PrinterPaperWidth = '80mm'): PrinterPaperWidth {
+    return normalizePrinterPaperWidth(value, fallback);
   }
 
   private notifyPrinterUpdate(branchId: string, type: 'config' | 'settings'): void {
@@ -114,6 +131,7 @@ class PrinterService {
       printCopies: Math.max(1, Number(raw?.printCopies || 1) || 1),
       defaultPrinter: raw?.defaultPrinter,
       receiptPaperWidth: this.normalizePaperWidth(raw?.receiptPaperWidth),
+      openCashDrawerOnCashSale: raw?.openCashDrawerOnCashSale ?? false,
       printHeader: raw?.printHeader ?? true,
       printFooter: raw?.printFooter ?? true,
       printQRCode: raw?.printQRCode ?? true,
@@ -142,6 +160,7 @@ class PrinterService {
               ...config,
               branchId: normalizedBranchId,
               paperWidth: this.normalizePaperWidth(config?.paperWidth),
+              openCashDrawerOnCashSale: config?.openCashDrawerOnCashSale ?? false,
             };
             this.printerConfigs.set(normalizedConfig.id, normalizedConfig);
           });
@@ -196,6 +215,7 @@ class PrinterService {
         ...config,
         branchId: normalizedBranchId,
         paperWidth: this.normalizePaperWidth(config.paperWidth),
+        openCashDrawerOnCashSale: config.openCashDrawerOnCashSale ?? false,
       };
 
       console.log('[Printer] Saving printer config:', normalizedConfig.id);
@@ -297,10 +317,12 @@ class PrinterService {
    */
   async printReceiptSilent(
     receiptHtml: string,
-    copies: number = 1
+    copies: number = 1,
+    paperWidth: PrinterPaperWidth = '80mm'
   ): Promise<boolean> {
     try {
-      console.log('[Printer] Silent printing receipt', { copies });
+      const printWidth = this.normalizePaperWidth(paperWidth);
+      console.log('[Printer] Silent printing receipt', { copies, paperWidth: printWidth });
 
       // Validate receipt content
       if (!receiptHtml || receiptHtml.trim().length === 0) {
@@ -326,7 +348,7 @@ class PrinterService {
         iframe.style.visibility = 'hidden';
         iframe.style.position = 'absolute';
         iframe.style.left = '-9999px';
-        iframe.style.width = '80mm';
+        iframe.style.width = printWidth;
         iframe.style.height = 'auto';
         document.body.appendChild(iframe);
 
@@ -349,7 +371,7 @@ class PrinterService {
                   box-sizing: border-box;
                 }
                 html, body {
-                  width: 80mm;
+                  width: ${printWidth};
                   margin: 0;
                   padding: 0;
                 }
@@ -357,7 +379,7 @@ class PrinterService {
                   font-family: 'Courier New', monospace;
                   font-size: 12px;
                   line-height: 1.4;
-                  width: 80mm;
+                  width: ${printWidth};
                   margin: 0;
                   padding: 0;
                 }
@@ -368,13 +390,13 @@ class PrinterService {
                     border: none !important;
                   }
                   html, body {
-                    width: 80mm !important;
+                    width: ${printWidth} !important;
                     height: auto !important;
                     margin: 0 !important;
                     padding: 0 !important;
                   }
                   @page {
-                    size: 80mm auto;
+                    size: ${printWidth} auto;
                     margin: 0;
                     padding: 0;
                   }
@@ -395,7 +417,7 @@ class PrinterService {
         // Print this copy silently
         if (iframe.contentWindow) {
           // Use silent print with automatic printer selection
-          await this.silentPrintIframe(iframe, copyNum, copies);
+          await this.silentPrintIframe(iframe, copyNum, copies, printWidth);
           
           // Wait between copies
           if (copyNum < copies) {
@@ -427,7 +449,8 @@ class PrinterService {
   private async silentPrintIframe(
     iframe: HTMLIFrameElement,
     copyNum: number,
-    totalCopies: number
+    totalCopies: number,
+    paperWidth: PrinterPaperWidth
   ): Promise<void> {
     return new Promise((resolve) => {
       if (!iframe.contentWindow) {
@@ -455,7 +478,7 @@ class PrinterService {
           }
           @page {
             margin: 0;
-            size: 80mm auto;
+            size: ${paperWidth} auto;
           }
         `;
         printWindow.document.head.appendChild(style);
@@ -652,10 +675,14 @@ class PrinterService {
   /**
    * Print receipt directly (without dialog)
    */
-  async printReceiptDirect(receiptHtml: string, copies: number = 1): Promise<boolean> {
+  async printReceiptDirect(
+    receiptHtml: string,
+    copies: number = 1,
+    paperWidth: PrinterPaperWidth = '80mm'
+  ): Promise<boolean> {
     try {
-      console.log('[Printer] Direct printing receipt', { copies });
-      return await this.printReceiptSilent(receiptHtml, copies);
+      console.log('[Printer] Direct printing receipt', { copies, paperWidth });
+      return await this.printReceiptSilent(receiptHtml, copies, paperWidth);
     } catch (error) {
       console.error('[Printer] Error in direct print:', error);
       return false;

@@ -100,6 +100,7 @@ import { Badge } from '@/components/ui/badge';
 import { ThemeCustomizer } from '@/components/theme-customizer';
 import { syncBusinessBranchesFromServer } from '@/lib/branch-sync';
 import { formatInventoryQuantity, formatNotificationBadgeCount } from '@/lib/quantity-format';
+import { isWarehouseBranchId, WAREHOUSE_BRANCH, WAREHOUSE_BRANCH_ID } from '@/lib/branch-context';
 
 // Helper to remove auth sync items from queue
 const removeAuthSyncItem = (itemId: string) => {
@@ -131,6 +132,7 @@ const removeAuthSyncItem = (itemId: string) => {
 const toBackendBranchId = (id: string): string => {
   const normalized = String(id || '').trim();
   if (!normalized) return normalized;
+  if (isWarehouseBranchId(normalized)) return normalized;
 
   const brnMatch = /^BRN-(\d+)$/i.exec(normalized);
   if (brnMatch) return brnMatch[1];
@@ -145,6 +147,7 @@ const toBackendBranchId = (id: string): string => {
 const getBranchIdCandidates = (branchId?: string | null): string[] => {
   const normalized = String(branchId || '').trim();
   if (!normalized) return [];
+  if (isWarehouseBranchId(normalized)) return [WAREHOUSE_BRANCH_ID];
 
   const backendId = toBackendBranchId(normalized);
   const candidates = new Set<string>([normalized, backendId]);
@@ -339,12 +342,14 @@ import {
   ensureTauriDeviceIdentity,
   getDeviceSerial,
 } from '@/lib/device-identity';
+import { syncSessionSnapshotToDesktopStore } from '@/lib/desktop-session-store';
 
 import type { Permission } from '@/lib/rbac/permissions';
 import { hasPermission as checkPermission } from '@/lib/rbac/permissions';
 
 const navItems = [
     { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', permission: 'view_dashboard' as Permission },
+    { href: '/dashboard/branches', icon: Building, label: 'Branches', permission: 'manage_settings' as Permission },
     { href: '/dashboard/pos', icon: MonitorPlay, label: 'POS', permission: 'access_pos' as Permission },
     { href: '/dashboard/sessions', icon: History, label: 'Sessions', permission: 'view_sessions' as Permission },
     { href: '/dashboard/eis-sales', icon: FileText, label: 'EIS Sales', permission: 'view_sessions' as Permission },
@@ -677,7 +682,14 @@ const LOCAL_STORAGE_KEYS = {
     LEGACY_AUTH_TOKENS: 'handy-pos-auth-tokens',
 };
 
-type Branch = { id: string; name: string; address: string; };
+type Branch = {
+  id: string;
+  name: string;
+  address: string;
+  mraBranchCode?: string;
+  mra_branch_code?: string;
+  isWarehouse?: boolean;
+};
 
 const getInitialBranches = (): Branch[] => {
     if (typeof window === 'undefined') {
@@ -884,9 +896,9 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
   const [businessName, setBusinessName] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const cached = localStorage.getItem('handypos-business-name');
-      return cached || 'Mwaka POS';
+      return cached || 'HandyPOS';
     }
-    return 'Mwaka POS';
+    return 'HandyPOS';
   });
   const businessNameLoadedRef = React.useRef(false);
   const { pendingCount } = useSyncStatus(activeBranchId);
@@ -921,6 +933,13 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
 
     const storedActiveBranchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
     const resolvedBranchId = preferredBranchId || storedActiveBranchId || nextBranches[0]?.id || null;
+    if (isWarehouseBranchId(resolvedBranchId)) {
+      setBranches(nextBranches);
+      setActiveBranchId(WAREHOUSE_BRANCH_ID);
+      setActiveBranch(WAREHOUSE_BRANCH);
+      return;
+    }
+
     const resolvedActiveBranch =
       (resolvedBranchId
         ? nextBranches.find((branch) => String(branch.id) === String(resolvedBranchId))
@@ -970,11 +989,13 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
       return;
     }
 
+    const activeIsWarehouse = isWarehouseBranchId(activeBranchId);
     const needsBranchSync =
       branches.length === 0 ||
-      (activeBranchId !== null &&
+      (!activeIsWarehouse &&
+        activeBranchId !== null &&
         !branches.some((branch) => String(branch.id) === String(activeBranchId))) ||
-      (!activeBranch && Boolean(activeBranchId));
+      (!activeIsWarehouse && !activeBranch && Boolean(activeBranchId));
 
     if (!needsBranchSync) {
       return;
@@ -987,7 +1008,7 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
         const { branches: syncedBranches, activeBranchId: syncedActiveBranchId } =
           await syncBusinessBranchesFromServer(
             business.id,
-            user?.branchId || activeBranchId || undefined
+            activeBranchId || user?.branchId || undefined
           );
 
         if (cancelled) {
@@ -1009,6 +1030,7 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
 
   const lowStockItems = useLiveQuery(
     async () => {
+      if (isWarehouseBranchId(activeBranchId)) return [];
       const branchCandidates = getBranchIdCandidates(activeBranchId);
       if (branchCandidates.length === 0) return [];
 
@@ -1033,6 +1055,7 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
 
   const expiringItems = useLiveQuery(
     () => {
+        if (isWarehouseBranchId(activeBranchId)) return [];
         const branchCandidates = getBranchIdCandidates(activeBranchId);
         if (branchCandidates.length === 0) return [];
         const ninetyDaysFromNow = addDays(new Date(), 90).toISOString();
@@ -1059,11 +1082,11 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
     setActiveBranchId(branch.id);
     setActiveBranch(branch);
     localStorage.setItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH, branch.id);
-    
-    console.log('[Header] Branch switched to:', branch.name, '- Reloading page');
-    
-    // Reload the entire page to refresh all data for the new branch
-    window.location.reload();
+    localStorage.setItem('handypos-current-branch-id', branch.id);
+    window.dispatchEvent(new CustomEvent('branchChanged', { detail: { branchId: branch.id } }));
+    void syncSessionSnapshotToDesktopStore();
+
+    console.log('[Header] Branch switched to:', branch.name);
   };
 
   const handleLogout = () => {
@@ -1077,7 +1100,7 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
               <div className="flex items-center gap-4">
                   <SidebarTrigger className="h-9 w-9 shrink-0" />
                   <div className="hidden lg:flex items-center gap-2">
-                  <h1 className="text-xl font-semibold">Mwaka POS</h1>
+                  <h1 className="text-xl font-semibold">HandyPOS</h1>
                   <div className="w-48 h-9 bg-muted rounded-md animate-pulse" />
                   </div>
               </div>
@@ -1109,11 +1132,21 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
                   <DropdownMenuLabel>Switch Branch</DropdownMenuLabel>
+                  <DropdownMenuItem
+                    key={WAREHOUSE_BRANCH.id}
+                    onSelect={() => handleSetBranch(WAREHOUSE_BRANCH)}
+                    className={isWarehouseBranchId(activeBranchId) ? 'bg-accent font-medium' : ''}
+                  >
+                    <Archive className="mr-2 h-4 w-4" />
+                    Warehouse
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
                   {branches.length > 0 ? (
                     branches.map((branch) => (
                       <DropdownMenuItem
                         key={branch.id}
                         onSelect={() => handleSetBranch(branch)}
+                        className={String(branch.id) === String(activeBranchId) ? 'bg-accent font-medium' : ''}
                       >
                         {branch.name}
                       </DropdownMenuItem>
@@ -1502,7 +1535,7 @@ function AppSidebar({ user, onPosClick }: { user: User, onPosClick?: () => void 
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3 group-data-[collapsible=icon]:hidden">
             <HandyPosLogo className="size-7" />
-            <span className="text-lg font-semibold tracking-tight">Mwaka POS</span>
+            <span className="text-lg font-semibold tracking-tight">HandyPOS</span>
           </div>
         </div>
       </SidebarHeader>
@@ -1615,20 +1648,36 @@ export default function DashboardLayout({
   }, [activeBranchId, eisActivationGate.reason, toast]);
 
   const handleOpenPos = useCallback(() => {
+    if (isWarehouseBranchId(activeBranchId)) {
+      toast({
+        variant: 'destructive',
+        title: 'Warehouse selected',
+        description: 'Switch to a branch to make sales.',
+      });
+      return;
+    }
     if (eisActivationGate.required) {
       forceEisActivation();
       return;
     }
     setIsPosModalOpen(true);
-  }, [eisActivationGate.required, forceEisActivation]);
+  }, [activeBranchId, eisActivationGate.required, forceEisActivation, toast]);
 
   const handlePosModalOpenChange = useCallback((open: boolean) => {
+    if (open && isWarehouseBranchId(activeBranchId)) {
+      toast({
+        variant: 'destructive',
+        title: 'Warehouse selected',
+        description: 'Switch to a branch to make sales.',
+      });
+      return;
+    }
     if (open && eisActivationGate.required) {
       forceEisActivation();
       return;
     }
     setIsPosModalOpen(open);
-  }, [eisActivationGate.required, forceEisActivation]);
+  }, [activeBranchId, eisActivationGate.required, forceEisActivation, toast]);
 
   useEffect(() => {
     if (isPosModalOpen && eisActivationGate.required) {
@@ -1672,7 +1721,11 @@ export default function DashboardLayout({
     if (user && user.branchId) {
         if (typeof window !== 'undefined') {
             const storedActiveBranch = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
-            if (user.role !== 'Admin' && storedActiveBranch !== user.branchId) {
+            if (
+              user.role !== 'Admin' &&
+              !isWarehouseBranchId(storedActiveBranch) &&
+              storedActiveBranch !== user.branchId
+            ) {
                 localStorage.setItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH, user.branchId);
                 window.location.reload();
             }
@@ -1749,7 +1802,7 @@ export default function DashboardLayout({
   }, []);
 
   useEffect(() => {
-    if (loading || !user || !business?.id || !activeBranchId) {
+    if (loading || !user || !business?.id || !activeBranchId || isWarehouseBranchId(activeBranchId)) {
       setEisActivationGate({ checking: false, required: false, reason: '' });
       return;
     }
@@ -1851,7 +1904,7 @@ export default function DashboardLayout({
   }, [activeBranchId, activationGateRefreshKey, business, business?.id, loading, user]);
 
   useEffect(() => {
-    if (loading || !user || !business?.id || !activeBranchId) {
+    if (loading || !user || !business?.id || !activeBranchId || isWarehouseBranchId(activeBranchId)) {
       return;
     }
 
@@ -2059,7 +2112,7 @@ export default function DashboardLayout({
           </main>
         </div>
       </div>
-      {activeBranchId && (
+      {activeBranchId && !isWarehouseBranchId(activeBranchId) && (
         <PosModal
           branchId={activeBranchId}
           isOpen={isPosModalOpen}

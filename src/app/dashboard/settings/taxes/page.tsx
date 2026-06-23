@@ -2,6 +2,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -71,6 +72,63 @@ import { toast } from '@/hooks/use-toast';
 
 const DEFAULT_TAX_TYPE: TaxRate['taxType'] = 'VAT_STANDARD';
 const TAX_RATES_ENDPOINT = '/business/tax-rates/';
+const BUSINESS_SETTINGS_CHANGED_EVENT = 'handypos-business-settings-changed';
+
+const readBooleanFlag = (value: unknown): boolean | null => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  }
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'enabled'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'disabled'].includes(normalized)) return false;
+  return null;
+};
+
+const parseStoredJson = (key: string): Record<string, any> | null => {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+const resolveEisEnabled = (business: any): boolean => {
+  const storedBusiness =
+    parseStoredJson('handy-pos-business') ??
+    parseStoredJson('handypos-business') ??
+    {};
+  const storedSettings = parseStoredJson('handypos-business-settings') ?? {};
+  const businessId = String(business?.id ?? storedBusiness?.id ?? '').trim();
+  const settingsBusinessId = String(storedSettings?.businessId ?? storedSettings?.business_id ?? '').trim();
+  const settingsBelongToBusiness = !settingsBusinessId || !businessId || settingsBusinessId === businessId;
+
+  const candidates = [
+    business?.enable_eis,
+    business?.enableEis,
+    business?.eis_enabled,
+    business?.eisEnabled,
+    storedBusiness?.enable_eis,
+    storedBusiness?.enableEis,
+    storedBusiness?.eis_enabled,
+    storedBusiness?.eisEnabled,
+    settingsBelongToBusiness ? storedSettings?.enableEis : undefined,
+    settingsBelongToBusiness ? storedSettings?.enable_eis : undefined,
+    settingsBelongToBusiness ? storedSettings?.eis_enabled : undefined,
+    settingsBelongToBusiness ? storedSettings?.eisEnabled : undefined,
+  ];
+
+  for (const value of candidates) {
+    const parsed = readBooleanFlag(value);
+    if (parsed !== null) return parsed;
+  }
+
+  return false;
+};
 
 const toNumber = (value: unknown, fallback = 0): number => {
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -342,12 +400,34 @@ const TaxForm = ({
 
 export default function TaxesSettingsPage() {
   const { business } = useAuth();
+  const router = useRouter();
+  const [eisEnabled, setEisEnabled] = useState(false);
   const [taxRates, setTaxRates] = useState<TaxRate[]>([]);
   const [isTaxModalOpen, setTaxModalOpen] = useState(false);
   const [editingTax, setEditingTax] = useState<TaxRate | undefined>(undefined);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
   const [syncMessage, setSyncMessage] = useState('');
+
+  useEffect(() => {
+    const refresh = () => setEisEnabled(resolveEisEnabled(business));
+    refresh();
+
+    window.addEventListener('storage', refresh);
+    window.addEventListener('focus', refresh);
+    window.addEventListener(BUSINESS_SETTINGS_CHANGED_EVENT, refresh);
+    return () => {
+      window.removeEventListener('storage', refresh);
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener(BUSINESS_SETTINGS_CHANGED_EVENT, refresh);
+    };
+  }, [business]);
+
+  useEffect(() => {
+    if (eisEnabled) {
+      router.replace('/dashboard/settings/eis');
+    }
+  }, [eisEnabled, router]);
 
   const lockedTaxSignatures = useLiveQuery(async () => {
     const [orders, mappings] = await Promise.all([
@@ -448,6 +528,11 @@ export default function TaxesSettingsPage() {
   }, [business?.id]);
 
   const refreshTaxesFromBackend = useCallback(async (showErrorToast = true) => {
+    if (eisEnabled) {
+      setTaxRates([]);
+      return;
+    }
+
     if (!business?.id) {
       setTaxRates([]);
       return;
@@ -469,16 +554,16 @@ export default function TaxesSettingsPage() {
       }
       setTaxRates([]);
     }
-  }, [business?.id, reconcileLocalTaxes]);
+  }, [business?.id, eisEnabled, reconcileLocalTaxes]);
 
   useEffect(() => {
-    if (!business?.id) {
+    if (!business?.id || eisEnabled) {
       setTaxRates([]);
       return;
     }
 
     void refreshTaxesFromBackend();
-  }, [business?.id, refreshTaxesFromBackend]);
+  }, [business?.id, eisEnabled, refreshTaxesFromBackend]);
 
   // Initialize sync listener on component mount
   useEffect(() => {
@@ -488,6 +573,15 @@ export default function TaxesSettingsPage() {
 
   // Manual sync handler
   const handleManualSync = async () => {
+    if (eisEnabled) {
+      toast({
+        variant: 'destructive',
+        title: 'Taxes disabled',
+        description: 'Use MRA EIS tax mappings.',
+      });
+      return;
+    }
+
     setIsSyncing(true);
     setSyncStatus('syncing');
     setSyncMessage('Syncing tax rates...');
@@ -529,6 +623,15 @@ export default function TaxesSettingsPage() {
   };
 
   const handleTaxSubmit = async (data: TaxRateFormValues) => {
+    if (eisEnabled) {
+      toast({
+        variant: 'destructive',
+        title: 'Taxes disabled',
+        description: 'Use MRA EIS tax mappings.',
+      });
+      return;
+    }
+
     if (!business?.id) {
       toast({ variant: 'destructive', title: 'Error', description: 'Business not found' });
       return;
@@ -574,6 +677,8 @@ export default function TaxesSettingsPage() {
   };
 
   const handleEditTax = (tax: TaxRate) => {
+    if (eisEnabled) return;
+
     if (isTaxLocked(tax)) {
       toast({
         variant: 'destructive',
@@ -588,6 +693,8 @@ export default function TaxesSettingsPage() {
   };
 
   const handleDeleteTax = async (tax: TaxRate) => {
+    if (eisEnabled) return;
+
     if (isTaxLocked(tax)) {
       toast({
         variant: 'destructive',
@@ -646,6 +753,8 @@ export default function TaxesSettingsPage() {
   };
 
   const handleSetDefaultTax = async (taxId: string) => {
+    if (eisEnabled) return;
+
     try {
       console.log('[Tax] Setting default tax on backend:', taxId);
       const defaultEndpoints = [
@@ -692,6 +801,19 @@ export default function TaxesSettingsPage() {
       setEditingTax(undefined);
     }
   };
+
+  if (eisEnabled) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Taxes managed by MRA EIS</CardTitle>
+          <CardDescription>
+            Local tax rates are hidden because this business uses MRA EIS product tax mappings.
+          </CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  }
 
     return (
         <>

@@ -31,6 +31,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/use-auth';
 import { authFetch } from '@/lib/auth-fetch';
 import { db } from '@/lib/db';
+import { getOfflineBusinessProfile } from '@/lib/business-profile';
 import { normalizeRole, type AppRole } from '@/lib/rbac/role-utils';
 import { clearSessionContextStorage } from '@/lib/session-context-storage';
 import { syncBusinessBranchesFromServer } from '@/lib/branch-sync';
@@ -66,9 +67,11 @@ const getErrorTitle = (error: unknown, fallback: string): string =>
   (error as any)?.isNetworkError ? 'Connection Problem' : fallback;
 
 const LOGIN_BOOTSTRAP_TIMEOUT_MS = 15000;
+const APP_NAME = (process.env.NEXT_PUBLIC_APP_NAME || 'HandyPOS').trim() || 'HandyPOS';
 
 export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false);
+  const [cachedBusinessName, setCachedBusinessName] = useState('');
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [selectedBusiness, setSelectedBusiness] = useState<string>('');
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -83,6 +86,51 @@ export default function LoginPage() {
   const router = useRouter();
   const { toast } = useToast();
   const { login, selectBusiness, user } = useAuth();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadCachedBusinessName = async () => {
+      if (typeof window === 'undefined') return;
+
+      const candidates: string[] = [];
+      const pushName = (value: unknown) => {
+        const name = String(value || '').trim();
+        if (name && !candidates.includes(name)) {
+          candidates.push(name);
+        }
+      };
+
+      try {
+        const cachedAuthBusiness = localStorage.getItem('handy-pos-business');
+        if (cachedAuthBusiness) {
+          const parsed = JSON.parse(cachedAuthBusiness);
+          pushName(parsed?.name);
+        }
+      } catch {
+        // Ignore stale local cache.
+      }
+
+      pushName(localStorage.getItem('handypos-business-name'));
+
+      try {
+        const profile = await getOfflineBusinessProfile();
+        pushName(profile?.name);
+      } catch {
+        // IndexedDB may be unavailable on first launch; localStorage is enough.
+      }
+
+      if (!cancelled) {
+        setCachedBusinessName(candidates[0] || '');
+      }
+    };
+
+    void loadCachedBusinessName();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Redirect authenticated users away from login (only if tokens are valid)
   useEffect(() => {
@@ -497,6 +545,7 @@ export default function LoginPage() {
         selectedAt: new Date().toISOString(),
       };
       selectBusiness(businessData);
+      localStorage.setItem('handypos-business-name', selectedBiz.name);
 
       // Store business ID in localStorage for sync queue
       localStorage.setItem('handypos-business-id', selectedBiz.id);
@@ -1091,7 +1140,7 @@ export default function LoginPage() {
         <CardHeader>
           <CardTitle className="text-2xl">Login</CardTitle>
           <CardDescription>
-            Enter your email or phone and password to access your account.
+            {cachedBusinessName ? `${cachedBusinessName} on ${APP_NAME}` : `Sign in to ${APP_NAME}.`}
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">

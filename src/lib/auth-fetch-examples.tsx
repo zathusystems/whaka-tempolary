@@ -3,7 +3,7 @@
  * Example usage of authenticated fetch with offline-first support
  * 
  * This file demonstrates how to use the auth-fetch utility and hooks
- * throughout the Mwaka POS system.
+ * throughout the HandyPOS system.
  */
 
 // ============================================================================

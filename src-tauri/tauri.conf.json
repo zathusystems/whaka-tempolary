@@ -1,5 +1,5 @@
 {
-  "productName": "Mwaka POS",
+  "productName": "HandyPOS",
   "version": "1.0.0",
   "identifier": "com.mwakageneraldealer.pos",
   "build": {
@@ -13,7 +13,7 @@
       {
         "label": "main",
         "url": "/",
-        "title": "Mwaka POS - Point of Sale System",
+        "title": "HandyPOS - Point of Sale System",
         "width": 1280,
         "height": 800,
         "minWidth": 800,
@@ -28,7 +28,7 @@
       {
         "label": "splash",
         "url": "/splash/",
-        "title": "Mwaka POS - Loading",
+        "title": "HandyPOS - Loading",
         "width": 600,
         "height": 400,
         "center": true,

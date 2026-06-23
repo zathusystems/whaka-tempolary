@@ -7,12 +7,13 @@ import { format } from 'date-fns';
 import QRCode from 'react-qr-code';
 import { db, type Order, type Business } from '@/lib/db';
 import { getOfflineBusinessProfile } from '@/lib/business-profile';
+import { normalizePrinterPaperWidth, type PrinterPaperWidth } from '@/lib/services/printer-service';
 
 interface ReceiptProps {
     order: Order;
     business?: Business;
     currencyFormatter: (amount: number) => string;
-    paperWidth?: '80mm' | '58mm';
+    paperWidth?: PrinterPaperWidth;
     showQRCode?: boolean;
     showHeader?: boolean;
     showFooter?: boolean;
@@ -183,6 +184,60 @@ export const Receipt = ({
     return '';
   };
 
+  const findNestedArrays = (source: unknown, keys: string[]): unknown[][] => {
+    const wantedKeys = new Set(keys.map(normalizeReceiptKey));
+    const matches: unknown[][] = [];
+    const queue: unknown[] = [source];
+    const seen = new Set<unknown>();
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (current === null || current === undefined) {
+        continue;
+      }
+
+      if (typeof current === 'string') {
+        const parsed = parseJsonCandidate(current.trim());
+        if (parsed && typeof parsed === 'object') {
+          queue.push(parsed);
+        }
+        continue;
+      }
+
+      if (typeof current !== 'object') {
+        continue;
+      }
+
+      if (seen.has(current)) {
+        continue;
+      }
+      seen.add(current);
+
+      if (Array.isArray(current)) {
+        queue.push(...current);
+        continue;
+      }
+
+      for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
+        const normalizedKey = normalizeReceiptKey(key);
+        if (wantedKeys.has(normalizedKey) && Array.isArray(value)) {
+          matches.push(value);
+        }
+
+        if (value && typeof value === 'object') {
+          queue.push(value);
+        } else if (typeof value === 'string' && value.trim().startsWith('{')) {
+          const parsed = parseJsonCandidate(value.trim());
+          if (parsed && typeof parsed === 'object') {
+            queue.push(parsed);
+          }
+        }
+      }
+    }
+
+    return matches;
+  };
+
   const resolveReceiptValidationPayload = (...candidates: unknown[]): { payload: string; mode: 'online' | 'offline' | 'unknown' } => {
     const onlineKeys = ['validationURL', 'validationUrl', 'validation_url', 'mraValidationURL', 'mra_validation_url'];
     const offlineKeys = ['offlineValidationURL', 'offlineValidationUrl', 'offline_validation_url'];
@@ -232,7 +287,7 @@ export const Receipt = ({
   }, [(order as any).sessionId, (order as any).session_id, (order as any).session]);
 
   const resolvedBusiness = business || offlineBusiness || undefined;
-  const businessName = resolvedBusiness?.name?.trim() || 'Mwaka POS Inc.';
+  const businessName = resolvedBusiness?.name?.trim() || 'Business Name';
   const businessNameDisplay = businessName.toUpperCase();
   const compactBusinessName = businessNameDisplay.replace(/\s+/g, ' ').trim();
   const businessNameLength = compactBusinessName.length;
@@ -502,32 +557,117 @@ export const Receipt = ({
 
   const taxBreakdown = calculateTaxBreakdown();
   const receiptVatTotal = hasPerItemTax ? totalItemVat : normalizedOrderTax;
-  const resolvedPaperWidth: '80mm' | '58mm' = paperWidth === '58mm' ? '58mm' : '80mm';
-  const isCompactPaper = resolvedPaperWidth === '58mm';
-  const containerWidthClass = isCompactPaper ? 'w-[218px]' : 'w-[300px]';
-  const contentPaddingClass = isCompactPaper ? 'px-2 py-2' : 'px-3 py-2';
-  const bodyTextClass = isCompactPaper ? 'text-[9px]' : 'text-[10px]';
-  const metaTextClass = isCompactPaper ? 'text-[8px]' : 'text-[9px]';
-  const businessNameTextClass = isCompactPaper ? 'text-[10px]' : 'text-[12px]';
+  const resolvedPaperWidth = normalizePrinterPaperWidth(paperWidth);
+  const receiptLayout: Record<PrinterPaperWidth, {
+    containerWidthClass: string;
+    contentPaddingClass: string;
+    bodyTextClass: string;
+    metaTextClass: string;
+    businessNameTextClass: string;
+    longBusinessNameTextClass: string;
+    payableTextClass: string;
+    inlineValueMaxWidthClass: string;
+    qrSize: string;
+    qrMinHeight: string;
+    lineWidth: number;
+    compactTextMax: number;
+  }> = {
+    '30mm': {
+      containerWidthClass: 'w-[112px]',
+      contentPaddingClass: 'px-1 py-2',
+      bodyTextClass: 'text-[7px]',
+      metaTextClass: 'text-[6px]',
+      businessNameTextClass: 'text-[8px]',
+      longBusinessNameTextClass: 'text-[7px] tracking-normal',
+      payableTextClass: 'text-[9px]',
+      inlineValueMaxWidthClass: 'min-w-0 max-w-[52px]',
+      qrSize: '18mm',
+      qrMinHeight: '20mm',
+      lineWidth: 16,
+      compactTextMax: 12,
+    },
+    '40mm': {
+      containerWidthClass: 'w-[150px]',
+      contentPaddingClass: 'px-1.5 py-2',
+      bodyTextClass: 'text-[8px]',
+      metaTextClass: 'text-[7px]',
+      businessNameTextClass: 'text-[9px]',
+      longBusinessNameTextClass: 'text-[8px] tracking-normal',
+      payableTextClass: 'text-[10px]',
+      inlineValueMaxWidthClass: 'min-w-0 max-w-[72px]',
+      qrSize: '20mm',
+      qrMinHeight: '22mm',
+      lineWidth: 21,
+      compactTextMax: 16,
+    },
+    '50mm': {
+      containerWidthClass: 'w-[188px]',
+      contentPaddingClass: 'px-2 py-2',
+      bodyTextClass: 'text-[8px]',
+      metaTextClass: 'text-[7px]',
+      businessNameTextClass: 'text-[9px]',
+      longBusinessNameTextClass: 'text-[8px] tracking-normal',
+      payableTextClass: 'text-[10px]',
+      inlineValueMaxWidthClass: 'min-w-0 max-w-[92px]',
+      qrSize: '22mm',
+      qrMinHeight: '24mm',
+      lineWidth: 25,
+      compactTextMax: 20,
+    },
+    '58mm': {
+      containerWidthClass: 'w-[218px]',
+      contentPaddingClass: 'px-2 py-2',
+      bodyTextClass: 'text-[9px]',
+      metaTextClass: 'text-[8px]',
+      businessNameTextClass: 'text-[10px]',
+      longBusinessNameTextClass: 'text-[9px] tracking-normal',
+      payableTextClass: 'text-[11px]',
+      inlineValueMaxWidthClass: 'min-w-0 max-w-[108px]',
+      qrSize: '24mm',
+      qrMinHeight: '26mm',
+      lineWidth: 28,
+      compactTextMax: 22,
+    },
+    '80mm': {
+      containerWidthClass: 'w-[300px]',
+      contentPaddingClass: 'px-3 py-2',
+      bodyTextClass: 'text-[10px]',
+      metaTextClass: 'text-[9px]',
+      businessNameTextClass: 'text-[12px]',
+      longBusinessNameTextClass: 'text-[10px] tracking-normal',
+      payableTextClass: 'text-sm',
+      inlineValueMaxWidthClass: 'min-w-0 max-w-[170px]',
+      qrSize: '28mm',
+      qrMinHeight: '30mm',
+      lineWidth: 42,
+      compactTextMax: 30,
+    },
+  };
+  const layout = receiptLayout[resolvedPaperWidth];
+  const containerWidthClass = layout.containerWidthClass;
+  const contentPaddingClass = layout.contentPaddingClass;
+  const bodyTextClass = layout.bodyTextClass;
+  const metaTextClass = layout.metaTextClass;
+  const businessNameTextClass = layout.businessNameTextClass;
   const businessNameWidthClass =
     businessNameLength > 30
-      ? (isCompactPaper ? 'text-[9px] tracking-normal' : 'text-[10px] tracking-normal')
+      ? layout.longBusinessNameTextClass
       : businessNameLength > 20
       ? 'tracking-[0.04em]'
       : 'tracking-[0.08em]';
-  const payableTextClass = isCompactPaper ? 'text-[11px]' : 'text-sm';
-  const inlineValueMaxWidthClass = isCompactPaper ? 'min-w-0 max-w-[108px]' : 'min-w-0 max-w-[170px]';
+  const payableTextClass = layout.payableTextClass;
+  const inlineValueMaxWidthClass = layout.inlineValueMaxWidthClass;
   const qrSizeStyle = {
-    width: isCompactPaper ? '24mm' : '28mm',
-    height: isCompactPaper ? '24mm' : '28mm',
+    width: layout.qrSize,
+    height: layout.qrSize,
   };
   const qrContainerStyle = {
-    minHeight: isCompactPaper ? '26mm' : '30mm',
+    minHeight: layout.qrMinHeight,
   };
   const printContentWidth = resolvedPaperWidth;
   // Keep divider width aligned with native ESC/POS formatter widths
-  // (58mm=28 chars, 80mm=42 chars) to prevent hard-wrap in printed output.
-  const receiptLineWidth = isCompactPaper ? 28 : 42;
+  // to prevent hard-wrap in printed output.
+  const receiptLineWidth = layout.lineWidth;
   const sectionDotRule = '-'.repeat(receiptLineWidth);
   const sectionSpacingClass = 'mt-3 mb-3';
   const makeSectionBanner = (title: string): string => {
@@ -565,7 +705,7 @@ export const Receipt = ({
     }
     return parsed.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
   };
-  const compactReceiptText = (value: unknown, maxLength = isCompactPaper ? 22 : 30): string => {
+  const compactReceiptText = (value: unknown, maxLength = layout.compactTextMax): string => {
     const raw = toTrimmedString(value).replace(/\s+/g, ' ');
     if (!raw) return 'ITEM';
     if (raw.length <= maxLength) return raw.toUpperCase();
@@ -577,6 +717,10 @@ export const Receipt = ({
     if (normalizedType.includes('exempt')) return 'E';
     if (normalizedRate <= 0 || normalizedType.includes('zero') || normalizedType.includes('non')) return 'B';
     return 'A';
+  };
+  const formatReceiptRate = (value: unknown): string => {
+    const formatted = formatReceiptAmount(value).replace(/0+$/, '').replace(/\.$/, '');
+    return formatted || '0';
   };
   const receiptNumberDisplay = fiscalInvoiceNumber || orderNumberDisplay;
   const sellerAddressLines = (businessAddress || '')
@@ -627,8 +771,76 @@ export const Receipt = ({
       vatAmount: toFiniteNumber(tax.vatAmount, 0),
     };
   });
+  const normalizeLevyBreakdown = (...sources: unknown[]) => {
+    const rows: Array<{ levyTypeId: string; levyRate: number; levyAmount: number }> = [];
+    const seen = new Set<string>();
+    const levyKeys = ['levyBreakDown', 'levyBreakdown', 'levy_breakdown'];
+
+    const appendRows = (items: unknown[]) => {
+      for (const item of items) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          continue;
+        }
+
+        const row = item as Record<string, unknown>;
+        const levyTypeId = toTrimmedString(
+          row.levyTypeId ??
+          row.levy_type_id ??
+          row.levyId ??
+          row.levy_id ??
+          row.typeId ??
+          row.type_id
+        ) || 'LEVY';
+        const levyRate = toFiniteNumber(row.levyRate ?? row.levy_rate ?? row.rate ?? row.percentage, 0);
+        const levyAmount = toFiniteNumber(row.levyAmount ?? row.levy_amount ?? row.amount, 0);
+        if (levyAmount <= 0) {
+          continue;
+        }
+
+        const dedupeKey = `${levyTypeId.toUpperCase()}|${levyRate.toFixed(4)}|${levyAmount.toFixed(4)}`;
+        if (seen.has(dedupeKey)) {
+          continue;
+        }
+        seen.add(dedupeKey);
+        rows.push({ levyTypeId, levyRate, levyAmount });
+      }
+    };
+
+    for (const source of sources) {
+      if (!source) {
+        continue;
+      }
+
+      if (Array.isArray(source)) {
+        appendRows(source);
+        continue;
+      }
+
+      if (typeof source === 'object') {
+        const record = source as Record<string, unknown>;
+        for (const key of levyKeys) {
+          const directRows = record[key];
+          if (Array.isArray(directRows)) {
+            appendRows(directRows);
+          }
+        }
+      }
+
+      for (const nestedRows of findNestedArrays(source, levyKeys)) {
+        appendRows(nestedRows);
+      }
+    }
+
+    return rows;
+  };
+  const legalLevyBreakdown = normalizeLevyBreakdown(
+    (order as any).levyBreakDown,
+    (order as any).levyBreakdown,
+    (order as any).levy_breakdown,
+    validationMetadata
+  );
   const tenderedAmount = receiptAmountPaid > 0 ? receiptAmountPaid : normalizedFinalPayable;
-  const legalRule = '-'.repeat(isCompactPaper ? 30 : 40);
+  const legalRule = '-'.repeat(Math.max(16, receiptLineWidth - 2));
   const receiptRootClass = `${containerWidthClass} ${contentPaddingClass} bg-white text-black font-mono ${bodyTextClass} leading-tight`;
 
   return (
@@ -681,9 +893,7 @@ export const Receipt = ({
 
       {effectiveShowHeader && (
         <div className="mt-1 text-center">
-          <div className="mx-auto mb-1 flex h-9 w-9 items-center justify-center rounded-full border-2 border-black text-[9px] font-black leading-none">
-            MRA
-          </div>
+         
           <p className={`${metaTextClass} leading-none`}>/|\</p>
           <p className="mt-2 font-bold leading-tight">{legalReceiptTitle}</p>
           <p className={`${businessNameTextClass} font-bold leading-tight`}>{businessNameDisplay}</p>
@@ -737,6 +947,8 @@ export const Receipt = ({
             const itemVat = toFiniteNumber(item.tax_amount ?? item.taxAmount, Math.max(0, itemTotal - itemSubtotal));
             const itemTaxRate = toFiniteNumber(item.tax_rate ?? item.taxRate, itemVat > 0 && itemSubtotal > 0 ? (itemVat / itemSubtotal) * 100 : 0);
             const itemTaxCode = resolveTaxCode(itemTaxRate, item.tax_type ?? item.taxType);
+            const itemDiscount = toFiniteNumber(item.discount_amount ?? item.discountAmount, 0);
+            const itemDiscountName = String(item.discount_name ?? item.discountName ?? 'Discount').trim() || 'Discount';
 
             return (
               <div key={`${item.id}-${index}`} className="mb-1">
@@ -745,17 +957,23 @@ export const Receipt = ({
                   <span className="whitespace-nowrap text-right font-semibold">{formatReceiptAmount(itemTotal)} {itemTaxCode}</span>
                 </div>
                 <p className="leading-tight">{compactReceiptText(item.name)}</p>
+                {itemDiscount > 0 && (
+                  <div className="flex items-start justify-between gap-2 text-[0.9em]">
+                    <span className="truncate">{compactReceiptText(itemDiscountName).toUpperCase()}</span>
+                    <span className="whitespace-nowrap text-right">-{formatReceiptAmount(itemDiscount)}</span>
+                  </div>
+                )}
               </div>
             );
           })}
         </div>
       )}
 
-      {effectiveShowTaxBreakdown && legalTaxBreakdown.length > 0 && (
+      {effectiveShowTaxBreakdown && (legalTaxBreakdown.length > 0 || legalLevyBreakdown.length > 0) && (
         <div className={`mt-2 ${bodyTextClass}`}>
           <p className="whitespace-nowrap text-center leading-none">{legalRule}</p>
           {legalTaxBreakdown.map((tax, index) => {
-            const rateText = formatReceiptAmount(tax.rate).replace(/0+$/, '').replace(/\.$/, '');
+            const rateText = formatReceiptRate(tax.rate);
             const rateLabel = `${tax.code}-${rateText}%`;
             return (
               <React.Fragment key={`${rateLabel}-${index}`}>
@@ -774,6 +992,12 @@ export const Receipt = ({
             <span>TOTAL VAT:</span>
             <span>{formatReceiptAmount(receiptVatTotal)}</span>
           </div>
+          {legalLevyBreakdown.map((levy, index) => (
+            <div key={`${levy.levyTypeId}-${levy.levyRate}-${index}`} className="flex justify-between gap-2">
+              <span>LEVY {levy.levyTypeId}-{formatReceiptRate(levy.levyRate)}%</span>
+              <span>{formatReceiptAmount(levy.levyAmount)}</span>
+            </div>
+          ))}
         </div>
       )}
 

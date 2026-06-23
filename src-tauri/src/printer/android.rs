@@ -177,3 +177,41 @@ pub fn print_receipt(
         )
     })
 }
+
+#[command]
+pub fn open_cash_drawer(window: WebviewWindow, printer_id: String) -> Result<String, String> {
+    run_with_android_context(window, move |env, activity, _| {
+        let printer_id_j = env
+            .new_string(printer_id)
+            .map_err(|error| format!("Failed to prepare printer identifier: {error}"))?;
+        let drawer_data = super::receipt_formatter::cash_drawer_pulse();
+        let escpos_payload_j = env
+            .byte_array_from_slice(&drawer_data)
+            .map_err(|error| format!("Failed to prepare cash drawer payload: {error}"))?;
+        let paper_width_j = env
+            .new_string("80mm")
+            .map_err(|error| format!("Failed to prepare paper width: {error}"))?;
+
+        let result = env
+            .call_method(
+                activity,
+                "printBluetoothReceiptEscPos",
+                "(Ljava/lang/String;[BILjava/lang/String;)Ljava/lang/String;",
+                &[
+                    (&printer_id_j).into(),
+                    (&escpos_payload_j).into(),
+                    1.into(),
+                    (&paper_width_j).into(),
+                ],
+            )
+            .map_err(|error| jni_error_message(env, "Failed to open cash drawer", error))?;
+
+        read_java_string(
+            env,
+            result
+                .l()
+                .map_err(|error| format!("Invalid cash drawer response: {error}"))?,
+            "Failed to read cash drawer response",
+        )
+    })
+}

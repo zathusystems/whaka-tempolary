@@ -24,6 +24,7 @@ import {
   ensureTauriDeviceIdentity,
   getDeviceSerial,
 } from '@/lib/device-identity';
+import { isWarehouseBranchId } from '@/lib/branch-context';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -61,15 +62,23 @@ type MraPingStatus = {
   enabled: boolean;
   isOnline: boolean | null;
   checkedAt: string;
+  serverTime?: string;
   terminalId?: string;
   terminalLabel?: string;
   terminalStatus?: string;
   error?: string;
 };
 
+const formatOptionalDateTime = (value?: string): string => {
+  if (!value) return '';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+};
+
 const toBackendBranchId = (id?: unknown): string => {
   const normalized = String(id || '').trim();
   if (!normalized) return normalized;
+  if (isWarehouseBranchId(normalized)) return normalized;
 
   const brnMatch = /^BRN-(\d+)$/i.exec(normalized);
   if (brnMatch) return brnMatch[1];
@@ -233,6 +242,15 @@ export function DashboardHeader({
     if (typeof window === 'undefined') return;
     const businessId = resolveBusinessId();
     const branchId = toBackendBranchId(propBranchId);
+    if (isWarehouseBranchId(branchId)) {
+      setMraPingStatus({
+        enabled: false,
+        isOnline: null,
+        checkedAt: new Date().toISOString(),
+        terminalLabel: 'Warehouse',
+      });
+      return;
+    }
     if (!businessId || !branchId) return;
 
     const refKey = `${businessId}:${branchId}`;
@@ -311,6 +329,7 @@ export function DashboardHeader({
         enabled: true,
         isOnline: isMraOnline,
         checkedAt: String(healthCheck?.checked_at || new Date().toISOString()),
+        serverTime: String(healthCheck?.server_time || healthCheck?.server_time_raw || ''),
         terminalId,
         terminalLabel,
         terminalStatus: String(response?.status || matchingTerminal?.status || ''),
@@ -331,6 +350,15 @@ export function DashboardHeader({
   useEffect(() => {
     const businessId = resolveBusinessId();
     const branchId = toBackendBranchId(propBranchId);
+    if (isWarehouseBranchId(branchId)) {
+      setMraPingStatus({
+        enabled: false,
+        isOnline: null,
+        checkedAt: new Date().toISOString(),
+        terminalLabel: 'Warehouse',
+      });
+      return;
+    }
     setMraPingStatus(readCachedMraPingStatus(businessId, branchId));
     if (!businessId || !branchId) return;
 
@@ -356,7 +384,8 @@ export function DashboardHeader({
     const parts = [
       mraPingStatus.isOnline ? 'MRA ping: Online' : 'MRA ping: Offline',
       mraPingStatus.terminalLabel ? `Terminal: ${mraPingStatus.terminalLabel}` : '',
-      mraPingStatus.checkedAt ? `Checked: ${new Date(mraPingStatus.checkedAt).toLocaleString()}` : '',
+      mraPingStatus.checkedAt ? `Checked: ${formatOptionalDateTime(mraPingStatus.checkedAt)}` : '',
+      mraPingStatus.serverTime ? `Server time: ${formatOptionalDateTime(mraPingStatus.serverTime)}` : '',
       mraPingStatus.error ? `Error: ${mraPingStatus.error}` : '',
     ];
     return parts.filter(Boolean).join(' | ');

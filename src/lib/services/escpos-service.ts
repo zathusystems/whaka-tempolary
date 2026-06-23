@@ -300,6 +300,15 @@ class ESCPOSService {
     return this.ESC + 'p' + '\x00' + '\x19' + '\xFA';
   }
 
+  async pulseCashDrawer(): Promise<void> {
+    if (!this.characteristic) {
+      throw new Error('Not connected to printer');
+    }
+
+    await this.sendData(this.stringToBytes(this.openCashDrawer()));
+    console.log('[ESC/POS] Cash drawer pulse sent');
+  }
+
   /**
    * Print receipt from HTML
    */

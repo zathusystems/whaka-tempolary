@@ -11,6 +11,7 @@ import {
   History,
   Trash,
   Loader2,
+  Repeat,
 } from 'lucide-react';
 
 import { db, type EisStockReceiptSource, type InventoryItem, type PurchaseRecord, type Supplier } from '@/lib/db';
@@ -22,6 +23,7 @@ import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
 import { normalizePurchaseBatchQuantities } from '@/lib/purchase-quantity';
+import { isWarehouseBranchId } from '@/lib/branch-context';
 import {
   getMraStockReconciliationWarnings,
   loadMraStockReconciliationWarnings,
@@ -40,6 +42,7 @@ import { PurchasesTab } from './components/purchases-tab';
 import { TransfersTab } from './components/transfers-tab';
 import { WasteTab } from './components/waste-tab';
 import { MRAMappingsTab } from './components/mra-mappings-tab';
+import { WarehouseStockTab } from './components/warehouse-stock-tab';
 
 import {
   Card,
@@ -85,11 +88,22 @@ const LOCAL_STORAGE_KEYS = {
     BUSINESS_SETTINGS: 'handypos-business-settings',
     BRANCHES: 'handypos-branches'
 };
-type Branch = { id: string; name: string; address: string; };
+
+const SHOW_WASTE_TAB = false;
+
+type Branch = {
+  id: string;
+  name: string;
+  address: string;
+  mraBranchCode?: string;
+  mra_branch_code?: string;
+  isWarehouse?: boolean;
+};
 
 const toBackendBranchId = (id: string): string => {
   const normalized = String(id || '').trim();
   if (!normalized) return normalized;
+  if (isWarehouseBranchId(normalized)) return normalized;
 
   const brnMatch = /^BRN-(\d+)$/i.exec(normalized);
   if (brnMatch) return brnMatch[1];
@@ -117,6 +131,10 @@ const getBranchIdCandidates = (branchId: string): string[] => {
 };
 
 const getInventoryItemsForBranch = async (branchId: string): Promise<InventoryItem[]> => {
+  if (isWarehouseBranchId(branchId)) {
+    return [];
+  }
+
   const branchCandidates = getBranchIdCandidates(branchId);
   if (branchCandidates.length === 0) {
     return [];
@@ -130,6 +148,10 @@ const getInventoryItemsForBranch = async (branchId: string): Promise<InventoryIt
 };
 
 const getBranchScopedRows = async (table: any, branchId: string): Promise<any[]> => {
+  if (isWarehouseBranchId(branchId)) {
+    return [];
+  }
+
   const branchCandidates = getBranchIdCandidates(branchId);
   if (branchCandidates.length === 0) {
     return [];
@@ -235,7 +257,8 @@ export default function InventoryPage() {
         }
         const storedBranches = localStorage.getItem(LOCAL_STORAGE_KEYS.BRANCHES);
         if (storedBranches) {
-          setBranches(JSON.parse(storedBranches));
+          const parsedBranches = JSON.parse(storedBranches);
+          setBranches(Array.isArray(parsedBranches) ? parsedBranches : []);
         }
     }
   }, []);
@@ -287,7 +310,10 @@ export default function InventoryPage() {
       if (branchId) {
         console.log('[InventoryPage] Branch changed to:', branchId);
         setActiveBranchId(branchId);
-        // Pull fresh data from server when branch changes
+        if (isWarehouseBranchId(branchId)) {
+          setActiveTab('inventory');
+          return;
+        }
         pullServerData(branchId);
       }
     };
@@ -298,13 +324,18 @@ export default function InventoryPage() {
 
   // Pull server data on page load and when business context changes
   useEffect(() => {
-    if (activeBranchId) {
+    if (activeBranchId && !isWarehouseBranchId(activeBranchId)) {
       console.log('[InventoryPage] Pulling server data for branch:', activeBranchId);
       pullServerData(activeBranchId);
     }
   }, [activeBranchId, activeBusinessId]);
 
   const pullServerData = async (branchId: string) => {
+    if (isWarehouseBranchId(branchId)) {
+      setIsLoadingData(false);
+      return;
+    }
+
     setIsLoadingData(true);
     try {
       console.log('[InventoryPage] Starting data fetch from backend for branch:', branchId);
@@ -724,13 +755,27 @@ export default function InventoryPage() {
   // Read tab parameter from URL
   useEffect(() => {
     const tabParam = searchParams.get('tab');
-    if (tabParam && ['inventory', 'purchases', 'transfers', 'waste', 'mra'].includes(tabParam)) {
-      setActiveTab(tabParam);
+    if (activeBranchId && isWarehouseBranchId(activeBranchId)) {
+      setActiveTab('inventory');
+      return;
     }
-  }, [searchParams]);
+
+    const visibleTabs = SHOW_WASTE_TAB
+      ? ['inventory', 'purchases', 'transfers', 'waste', 'mra']
+      : ['inventory', 'purchases', 'transfers', 'mra'];
+
+    if (tabParam && visibleTabs.includes(tabParam)) {
+      setActiveTab(tabParam);
+    } else if (!SHOW_WASTE_TAB && tabParam === 'waste') {
+      setActiveTab('inventory');
+    }
+  }, [activeBranchId, searchParams]);
 
   useEffect(() => {
     if (searchParams.get('reconcile') !== '1') {
+      return;
+    }
+    if (activeBranchId && isWarehouseBranchId(activeBranchId)) {
       return;
     }
 
@@ -779,12 +824,20 @@ export default function InventoryPage() {
 
   // Read modal parameter from URL
   useEffect(() => {
+    if (activeBranchId && isWarehouseBranchId(activeBranchId)) {
+      setAddFormOpen(false);
+      setReceiveStockOpen(false);
+      setTransferStockOpen(false);
+      setWasteModalOpen(false);
+      return;
+    }
+
     const modalParam = searchParams.get('modal');
     if (modalParam === 'receive') {
       setReceiveStockOpen(true);
     } else if (modalParam === 'transfer') {
       setTransferStockOpen(true);
-    } else if (modalParam === 'waste') {
+    } else if (SHOW_WASTE_TAB && modalParam === 'waste') {
       setWasteModalOpen(true);
     } else if (modalParam === 'add-item') {
       setAddFormOpen(true);
@@ -793,6 +846,13 @@ export default function InventoryPage() {
 
   const handleSyncFromBackend = async () => {
     if (!activeBranchId) return;
+    if (isWarehouseBranchId(activeBranchId)) {
+      toast({
+        title: 'Use Refresh',
+        description: 'Warehouse stock comes directly from MRA.',
+      });
+      return;
+    }
 
     setIsSyncing(true);
     try {
@@ -847,6 +907,7 @@ export default function InventoryPage() {
   
   const inventoryData = useLiveQuery(() => {
     if (!activeBranchId) return [];
+    if (isWarehouseBranchId(activeBranchId)) return [];
     console.log('[InventoryPage] Querying inventory for branch:', activeBranchId);
     return getInventoryItemsForBranch(activeBranchId).then(data => {
       // Filter out items marked for deletion
@@ -864,6 +925,7 @@ export default function InventoryPage() {
   const purchaseHistoryData = useLiveQuery(
     () => {
       if (!activeBranchId) return [];
+      if (isWarehouseBranchId(activeBranchId)) return [];
       return db.purchaseHistory
         .where({ branchId: activeBranchId })
         .toArray()
@@ -879,6 +941,7 @@ export default function InventoryPage() {
   
   const stockTransfersData = useLiveQuery(() => {
       if (!activeBranchId) return [];
+      if (isWarehouseBranchId(activeBranchId)) return [];
       return db.stockTransfers
         .where('fromBranchId')
         .equals(activeBranchId)
@@ -891,6 +954,7 @@ export default function InventoryPage() {
 
   const wasteLogData = useLiveQuery(() => {
       if (!activeBranchId) return [];
+      if (isWarehouseBranchId(activeBranchId)) return [];
       return db.wasteLog
         .where({ branchId: activeBranchId })
         .reverse()
@@ -900,6 +964,7 @@ export default function InventoryPage() {
 
   const mraMappingsData = useLiveQuery(() => {
       if (!activeBranchId) return [];
+      if (isWarehouseBranchId(activeBranchId)) return [];
 
       const branchCandidates = new Set(getBranchIdCandidates(activeBranchId));
       const inventoryIds = new Set((inventoryData || []).map((item) => String(item.id)));
@@ -955,6 +1020,7 @@ export default function InventoryPage() {
   }, [activeBusinessId, business, businessSettingsRecord]);
 
   const isMobile = useIsMobile();
+  const isWarehouseSelected = Boolean(activeBranchId && isWarehouseBranchId(activeBranchId));
   
   const ingredients = inventoryData?.filter(item => item.itemType === 'ingredient') || [];
   const groupedPurchaseCount = React.useMemo(() => {
@@ -965,6 +1031,7 @@ export default function InventoryPage() {
   }, [purchaseHistoryData]);
   const inventoryCountLabel = `(${inventoryData.length} item${inventoryData.length === 1 ? '' : 's'})`;
   const purchaseCountLabel = `(${groupedPurchaseCount} item${groupedPurchaseCount === 1 ? '' : 's'})`;
+  const transferCountLabel = `(${stockTransfersData.length} item${stockTransfersData.length === 1 ? '' : 's'})`;
   const wasteCountLabel = `(${wasteLogData.length} item${wasteLogData.length === 1 ? '' : 's'})`;
   const mraCountLabel = `(${mraMappingsData.length} item${mraMappingsData.length === 1 ? '' : 's'})`;
 
@@ -1422,7 +1489,9 @@ export default function InventoryPage() {
   };
 
   const searchPlaceholder =
-    activeTab === 'purchases'
+    isWarehouseSelected
+      ? 'Search warehouse products...'
+      : activeTab === 'purchases'
       ? 'Search supplier, product, batch, or payment...'
       : activeTab === 'waste'
         ? 'Search item, reason, or recorded by...'
@@ -1436,7 +1505,7 @@ export default function InventoryPage() {
   React.useEffect(() => {
     const handleBarcodeSearch = (e: KeyboardEvent) => {
       // Only process if we're on the inventory tab AND search field is focused
-      if (activeTab !== 'inventory' || !isSearchFocused || e.key !== 'Enter') {
+      if (isWarehouseSelected || activeTab !== 'inventory' || !isSearchFocused || e.key !== 'Enter') {
         return;
       }
 
@@ -1473,7 +1542,7 @@ export default function InventoryPage() {
     return () => {
       window.removeEventListener('keydown', handleBarcodeSearch, false);
     };
-  }, [activeTab, isSearchFocused, activeBranchId, searchTerm]);
+  }, [activeTab, isSearchFocused, activeBranchId, searchTerm, isWarehouseSelected]);
   
   if (authLoading || !activeBranchId) {
     return (
@@ -1490,7 +1559,9 @@ export default function InventoryPage() {
         <div className="grid gap-2">
           <h1 className="text-2xl font-bold tracking-tight">Inventory</h1>
           <p className="text-muted-foreground">
-            Manage all your items, from raw ingredients to final products.
+            {isWarehouseSelected
+              ? 'View MRA warehouse stock and transfer it to a branch.'
+              : 'Manage all your items, from raw ingredients to final products.'}
           </p>
         </div>
         <div className="flex w-full flex-col gap-2 sm:max-w-xs">
@@ -1503,6 +1574,13 @@ export default function InventoryPage() {
                 <div className="flex flex-col items-start gap-4 md:flex-row md:items-center md:flex-wrap">
                     <div className="w-full overflow-x-auto md:w-auto">
                     <TabsList className="inline-flex min-w-max">
+                        {isWarehouseSelected ? (
+                          <TabsTrigger value="inventory" className="whitespace-nowrap">
+                              <Package className="mr-2 h-4 w-4" />
+                              Warehouse Stock
+                          </TabsTrigger>
+                        ) : (
+                        <>
                         <TabsTrigger value="inventory" className="whitespace-nowrap">
                             <Package className="mr-2 h-4 w-4" />
                             Current Stock
@@ -1513,16 +1591,25 @@ export default function InventoryPage() {
                             Purchase History
                             <span className="ml-1 text-xs text-muted-foreground">{purchaseCountLabel}</span>
                         </TabsTrigger>
-                        <TabsTrigger value="waste" className="whitespace-nowrap">
-                            <Trash className="mr-2 h-4 w-4" />
-                            Waste Log
-                            <span className="ml-1 text-xs text-muted-foreground">{wasteCountLabel}</span>
+                        <TabsTrigger value="transfers" className="whitespace-nowrap">
+                            <Repeat className="mr-2 h-4 w-4" />
+                            Transfers
+                            <span className="ml-1 text-xs text-muted-foreground">{transferCountLabel}</span>
                         </TabsTrigger>
+                        {SHOW_WASTE_TAB && (
+                            <TabsTrigger value="waste" className="whitespace-nowrap">
+                                <Trash className="mr-2 h-4 w-4" />
+                                Waste Log
+                                <span className="ml-1 text-xs text-muted-foreground">{wasteCountLabel}</span>
+                            </TabsTrigger>
+                        )}
                         <TabsTrigger value="mra" className="whitespace-nowrap">
                             <Package className="mr-2 h-4 w-4" />
                             MRA Mappings
                             <span className="ml-1 text-xs text-muted-foreground">{mraCountLabel}</span>
                         </TabsTrigger>
+                        </>
+                        )}
                     </TabsList>
                     </div>
                     <div className="ml-auto flex w-full flex-wrap items-center gap-2 md:w-auto md:flex-nowrap">
@@ -1538,6 +1625,7 @@ export default function InventoryPage() {
                             onBlur={() => setIsSearchFocused(false)}
                           />
                         </div>
+                        {!isWarehouseSelected && (
                         <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                                 <Button variant="outline">
@@ -1557,10 +1645,18 @@ export default function InventoryPage() {
                                 </DropdownMenuCheckboxItem>
                             </DropdownMenuContent>
                         </DropdownMenu>
+                        )}
                     </div>
                 </div>
             </CardHeader>
             <TabsContent value="inventory">
+                {isWarehouseSelected ? (
+                  <WarehouseStockTab
+                    branches={branches}
+                    searchTerm={searchTerm}
+                    currency={businessCurrency}
+                  />
+                ) : (
                 <InventoryTab
                     inventoryData={inventoryData}
                     isMobile={isMobile}
@@ -1571,6 +1667,7 @@ export default function InventoryPage() {
                     onImport={() => setImportModalOpen(true)}
                     onTransfer={() => setTransferStockOpen(true)}
                 />
+                )}
             </TabsContent>
             <TabsContent value="purchases">
                 <PurchasesTab 
@@ -1601,15 +1698,17 @@ export default function InventoryPage() {
                     branchId={activeBranchId}
                 />
             </TabsContent>
-            <TabsContent value="waste">
-                 <WasteTab 
-                    wasteLogData={wasteLogData}
-                    isMobile={isMobile}
-                    searchTerm={searchTerm}
-                    onRecordWaste={() => setWasteModalOpen(true)}
-                    branchId={activeBranchId}
-                 />
-            </TabsContent>
+            {SHOW_WASTE_TAB && (
+                <TabsContent value="waste">
+                     <WasteTab
+                        wasteLogData={wasteLogData}
+                        isMobile={isMobile}
+                        searchTerm={searchTerm}
+                        onRecordWaste={() => setWasteModalOpen(true)}
+                        branchId={activeBranchId}
+                     />
+                </TabsContent>
+            )}
             <TabsContent value="mra">
                 <MRAMappingsTab
                     inventoryData={inventoryData}
@@ -1697,24 +1796,26 @@ export default function InventoryPage() {
             <TransferStockForm
                 branchId={activeBranchId}
                 branches={branches}
-                inventoryItems={ingredients}
+                inventoryItems={inventoryData || []}
                 onFormSubmit={() => setTransferStockOpen(false)}
             />
         </DialogContent>
     </Dialog>
-    <Dialog open={isWasteModalOpen} onOpenChange={setWasteModalOpen}>
-        <DialogContent>
-            <DialogHeader>
-                <DialogTitle>Record Inventory Waste</DialogTitle>
-                <DialogDescription>Log any items that were wasted, spoiled, or damaged. This will adjust your stock levels.</DialogDescription>
-            </DialogHeader>
-            <RecordWasteForm 
-                branchId={activeBranchId}
-                inventoryItems={inventoryData || []}
-                onFormSubmit={() => setWasteModalOpen(false)}
-            />
-        </DialogContent>
-    </Dialog>
+    {SHOW_WASTE_TAB && (
+        <Dialog open={isWasteModalOpen} onOpenChange={setWasteModalOpen}>
+            <DialogContent>
+                <DialogHeader>
+                    <DialogTitle>Record Inventory Waste</DialogTitle>
+                    <DialogDescription>Log any items that were wasted, spoiled, or damaged. This will adjust your stock levels.</DialogDescription>
+                </DialogHeader>
+                <RecordWasteForm
+                    branchId={activeBranchId}
+                    inventoryItems={inventoryData || []}
+                    onFormSubmit={() => setWasteModalOpen(false)}
+                />
+            </DialogContent>
+        </Dialog>
+    )}
     <ImportModal
       isOpen={isImportModalOpen}
       onOpenChange={setImportModalOpen}

@@ -12,7 +12,7 @@ import { BarLiquorPos } from './bar-liquor-pos';
 import { SupermarketPos } from './supermarket-pos';
 import { GroceryPos } from './grocery-pos';
 import { BeautySalonPos } from './beauty-salon-pos';
-import type { BuyerDetails } from './generic-pos';
+import type { AppliedDiscount, BuyerDetails } from './generic-pos';
 import { ScannerConfigModal } from './scanner-config-modal';
 import { PrinterConfigModal } from './printer-config-modal';
 import { CameraBarcodeScannerModal, type BarcodeDetectionOutcome } from './camera-barcode-scanner-modal';
@@ -46,7 +46,22 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 
-export type CartItem = InventoryItem & { quantity: number; price: number; notes?: string; inventoryItemId?: string; };
+export type CartItem = InventoryItem & {
+  quantity: number;
+  price: number;
+  notes?: string;
+  inventoryItemId?: string;
+  discountRuleId?: string;
+  discount_rule_id?: string;
+  discountName?: string;
+  discount_name?: string;
+  discountType?: 'percentage' | 'fixed' | string;
+  discount_type?: 'percentage' | 'fixed' | string;
+  discountValue?: number;
+  discount_value?: number;
+  discountAmount?: number;
+  discount_amount?: number;
+};
 export type PaymentMethod = Order['paymentMethod'];
 
 type PosModalProps = {
@@ -181,6 +196,85 @@ const buildCartLineId = (
   }
 
   return `${normalizedInventoryItemId}::cart::${uuidv4()}`;
+};
+
+const toCartNumber = (value: unknown, fallback = 0): number => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const resolveCartLineTotal = (cartItem: CartItem): number => {
+  const price = Math.max(0, toCartNumber(cartItem.price, 0));
+  const quantity = Math.max(0, toCartNumber(cartItem.quantity, 0));
+  return cartItem.isVariablePrice ? price : price * quantity;
+};
+
+const calculateCartDiscountAmount = (cartItem: CartItem, discount?: AppliedDiscount | null): number => {
+  const lineTotal = Math.max(0, resolveCartLineTotal(cartItem));
+  const activeDiscount = discount ?? (() => {
+    const ruleId = String(cartItem.discountRuleId || cartItem.discount_rule_id || '').trim();
+    const type = String(cartItem.discountType || cartItem.discount_type || '').trim().toLowerCase();
+    const value = toCartNumber(cartItem.discountValue ?? cartItem.discount_value, 0);
+    if (!ruleId || value <= 0 || (type !== 'percentage' && type !== 'fixed')) {
+      return null;
+    }
+    return {
+      ruleId,
+      name: String(cartItem.discountName || cartItem.discount_name || '').trim(),
+      type: type as 'percentage' | 'fixed',
+      value,
+    };
+  })();
+
+  if (!activeDiscount) return 0;
+  const discountValue = Math.max(0, toCartNumber(activeDiscount.value, 0));
+  const discountAmount = activeDiscount.type === 'percentage'
+    ? lineTotal * discountValue / 100
+    : discountValue;
+  return Math.min(lineTotal, Math.round(discountAmount * 100) / 100);
+};
+
+const resolveCartDiscountAmount = (cartItem: CartItem): number => {
+  const explicit = toCartNumber(cartItem.discountAmount ?? cartItem.discount_amount, NaN);
+  const lineTotal = Math.max(0, resolveCartLineTotal(cartItem));
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return Math.min(lineTotal, explicit);
+  }
+  return calculateCartDiscountAmount(cartItem);
+};
+
+const applyDiscountToCartItem = (cartItem: CartItem, discount: AppliedDiscount | null): CartItem => {
+  if (!discount) {
+    const {
+      discountRuleId,
+      discount_rule_id,
+      discountName,
+      discount_name,
+      discountType,
+      discount_type,
+      discountValue,
+      discount_value,
+      discountAmount,
+      discount_amount,
+      ...rest
+    } = cartItem;
+    return rest as CartItem;
+  }
+
+  const discountAmount = calculateCartDiscountAmount(cartItem, discount);
+  return {
+    ...cartItem,
+    discountRuleId: discount.ruleId,
+    discount_rule_id: discount.ruleId,
+    discountName: discount.name,
+    discount_name: discount.name,
+    discountType: discount.type,
+    discount_type: discount.type,
+    discountValue: discount.value,
+    discount_value: discount.value,
+    discountAmount,
+    discount_amount: discountAmount,
+  };
 };
 
 const mappingStatusRank = (mapping: any): number => {
@@ -1768,11 +1862,35 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       setCart((prevCart) =>
         prevCart.map((cartItem) =>
           String(cartItem.id || '').trim() === normalizedItemId
-            ? { ...cartItem, quantity: newQuantity }
+            ? applyDiscountToCartItem(
+                {
+                  ...cartItem,
+                  quantity: newQuantity,
+                },
+                String(cartItem.discountRuleId || cartItem.discount_rule_id || '').trim()
+                  ? {
+                      ruleId: String(cartItem.discountRuleId || cartItem.discount_rule_id),
+                      name: String(cartItem.discountName || cartItem.discount_name || ''),
+                      type: String(cartItem.discountType || cartItem.discount_type) === 'fixed' ? 'fixed' : 'percentage',
+                      value: toCartNumber(cartItem.discountValue ?? cartItem.discount_value, 0),
+                    }
+                  : null
+              )
             : cartItem
         )
       );
     }
+  };
+
+  const handleApplyDiscount = (itemId: string, discount: AppliedDiscount | null) => {
+    const normalizedItemId = String(itemId || '').trim();
+    setCart((prevCart) =>
+      prevCart.map((cartItem) =>
+        String(cartItem.id || '').trim() === normalizedItemId
+          ? applyDiscountToCartItem(cartItem, discount)
+          : cartItem
+      )
+    );
   };
 
   const handleClearCart = () => setCart([]);
@@ -2109,9 +2227,9 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     let tax = 0;
     
     for (const cartItem of cart) {
-      const itemPrice = Number(cartItem.price || 0);
-      const itemQuantity = Number(cartItem.quantity || 0);
-      const itemGross = cartItem.isVariablePrice ? itemPrice : itemPrice * itemQuantity; // Variable-price items store line total in `price`
+      const itemGrossBeforeDiscount = resolveCartLineTotal(cartItem);
+      const itemDiscountAmount = resolveCartDiscountAmount(cartItem);
+      const itemGross = Math.max(0, itemGrossBeforeDiscount - itemDiscountAmount);
       const cartInventoryItemId = resolveCartInventoryItemId(cartItem);
       
       // Use product-specific tax rate if available, otherwise use default
@@ -2409,9 +2527,9 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               cartItemTaxRates[inventoryItemId] ||
               cartItemTaxRates[String(item.id)] ||
               { rate: 0, taxType: 'standard', calculationMethod: 'inclusive' };
-            const itemLineGross = item.isVariablePrice
-              ? Number(item.price || 0)
-              : Number(item.price || 0) * Number(item.quantity || 0);
+	            const itemLineGrossBeforeDiscount = resolveCartLineTotal(item);
+	            const itemDiscountAmount = resolveCartDiscountAmount(item);
+	            const itemLineGross = Math.max(0, itemLineGrossBeforeDiscount - itemDiscountAmount);
             const unitPriceForStorage =
               item.isVariablePrice && Number(item.quantity || 0) > 0
                 ? Number(item.price || 0) / Number(item.quantity || 0)
@@ -2452,20 +2570,60 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               tax_type: itemTaxInfo.taxType,
               taxCalculationMethod: itemTaxInfo.calculationMethod,
               tax_calculation_method: itemTaxInfo.calculationMethod,
-              // Calculated tax amounts (Immutable snapshot for audit trail)
-              subtotal: itemSubtotal,
-              taxAmount: itemTax,
-              total: itemSubtotal + itemTax,
-            };
-          }),
+	              // Calculated tax amounts (Immutable snapshot for audit trail)
+	              subtotal: itemSubtotal,
+	              taxAmount: itemTax,
+	              total: itemSubtotal + itemTax,
+	              discountRuleId: item.discountRuleId || item.discount_rule_id || '',
+	              discount_rule_id: item.discountRuleId || item.discount_rule_id || '',
+	              discountName: item.discountName || item.discount_name || '',
+	              discount_name: item.discountName || item.discount_name || '',
+	              discountType: item.discountType || item.discount_type || '',
+	              discount_type: item.discountType || item.discount_type || '',
+	              discountValue: toCartNumber(item.discountValue ?? item.discount_value, 0),
+	              discount_value: toCartNumber(item.discountValue ?? item.discount_value, 0),
+	              discountAmount: itemDiscountAmount,
+	              discount_amount: itemDiscountAmount,
+	            };
+	          }),
           status: isKitchenOrder ? 'New' : 'Completed',
           paymentMethod: paymentMethod,
           ...buyerFields,
-          subtotal: Number(subtotal),
-          tax: Number(tax),
-          tip: Number(appliedTip),
-          total: Number(total),
-          cogs: Number(orderCogs),
+	          subtotal: Number(subtotal),
+	          tax: Number(tax),
+	          tip: Number(appliedTip),
+	          total: Number(total),
+	          discountAmount: Number(cart.reduce((acc, item) => acc + resolveCartDiscountAmount(item), 0)),
+	          discount_amount: Number(cart.reduce((acc, item) => acc + resolveCartDiscountAmount(item), 0)),
+	          discountMetadata: {
+	            source: 'pos_admin_discount_rules',
+	            items: cart
+	              .filter((item) => resolveCartDiscountAmount(item) > 0)
+	              .map((item) => ({
+	                itemId: item.id,
+	                inventoryItemId: resolveCartInventoryItemId(item),
+	                ruleId: item.discountRuleId || item.discount_rule_id || '',
+	                name: item.discountName || item.discount_name || '',
+	                type: item.discountType || item.discount_type || '',
+	                value: toCartNumber(item.discountValue ?? item.discount_value, 0),
+	                amount: resolveCartDiscountAmount(item),
+	              })),
+	          },
+	          discount_metadata: {
+	            source: 'pos_admin_discount_rules',
+	            items: cart
+	              .filter((item) => resolveCartDiscountAmount(item) > 0)
+	              .map((item) => ({
+	                itemId: item.id,
+	                inventoryItemId: resolveCartInventoryItemId(item),
+	                ruleId: item.discountRuleId || item.discount_rule_id || '',
+	                name: item.discountName || item.discount_name || '',
+	                type: item.discountType || item.discount_type || '',
+	                value: toCartNumber(item.discountValue ?? item.discount_value, 0),
+	                amount: resolveCartDiscountAmount(item),
+	              })),
+	          },
+	          cogs: Number(orderCogs),
           eis_status: eisEnabled ? 'PENDING' : undefined,
           eisStatus: eisEnabled ? 'PENDING' : undefined,
           createdAt: new Date().toISOString(),
@@ -2607,7 +2765,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       // The actual tax will be calculated when checkout is called
       cartTax = 0; // Will be recalculated in handleCreateOrder
     } else if (defaultTaxRate) {
-      const cartTotal = cart.reduce((acc, item) => acc + (item.isVariablePrice ? item.price : item.price * item.quantity), 0);
+	      const cartTotal = cart.reduce((acc, item) => acc + Math.max(0, resolveCartLineTotal(item) - resolveCartDiscountAmount(item)), 0);
       const taxRate = defaultTaxRate.rate / 100;
       cartTax = taxRate > 0 ? (cartTotal / (1 + taxRate)) * taxRate : 0;
     }
@@ -2624,9 +2782,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       emptyStateDescription,
       cart,
       branchId,
-      onAddToCart: handleAddToCart,
-      onUpdateQuantity: handleUpdateQuantity,
-      onClearCart: handleClearCart,
+	      onAddToCart: handleAddToCart,
+	      onUpdateQuantity: handleUpdateQuantity,
+	      onApplyDiscount: handleApplyDiscount,
+	      onClearCart: handleClearCart,
       onCheckout: handleCreateOrder,
       viewMode,
       defaultTaxRate,

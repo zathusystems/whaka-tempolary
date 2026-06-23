@@ -7,8 +7,8 @@ import { TauriReadySignal } from '@/components/tauri-ready-signal';
 import { AndroidModalBackGuard } from '@/components/android-modal-back-guard';
 
 export const metadata: Metadata = {
-  title: 'Mwaka POS - POS and Inventory System',
-  description: 'Modern POS and Inventory Management System for Mwaka POS with offline-first capabilities.',
+  title: 'HandyPOS - POS and Inventory System',
+  description: 'Modern POS and Inventory Management System for HandyPOS with offline-first capabilities.',
   manifest: '/manifest.json',
 };
 

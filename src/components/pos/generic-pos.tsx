@@ -555,6 +555,61 @@ const normalizeBranchIdentifier = (value: unknown): string => {
   return normalized;
 };
 
+type CachedMraPingStatus = {
+  enabled: boolean;
+  isOnline: boolean | null;
+  checkedAt: string;
+  serverTime?: string;
+  terminalId?: string;
+  terminalLabel?: string;
+  terminalStatus?: string;
+  error?: string;
+};
+
+const MRA_PING_STORAGE_PREFIX = 'handypos-mra-ping-status';
+
+const getMraPingStorageKey = (businessId: string, branchId: string): string => (
+  `${MRA_PING_STORAGE_PREFIX}:${businessId}:${normalizeBranchIdentifier(branchId)}`
+);
+
+const readCachedMraPingStatus = (businessId?: unknown, branchId?: unknown): CachedMraPingStatus | null => {
+  if (typeof window === 'undefined') return null;
+  const normalizedBusinessId = String(businessId || '').trim();
+  const normalizedBranchId = normalizeBranchIdentifier(branchId);
+  if (!normalizedBusinessId || !normalizedBranchId) return null;
+
+  try {
+    const raw = localStorage.getItem(getMraPingStorageKey(normalizedBusinessId, normalizedBranchId));
+    return raw ? (JSON.parse(raw) as CachedMraPingStatus) : null;
+  } catch {
+    return null;
+  }
+};
+
+const isCachedMraOffline = (status: CachedMraPingStatus | null): boolean => (
+  Boolean(status?.enabled) && status?.isOnline === false
+);
+
+const isLikelyNetworkError = (message?: string): boolean => {
+  const normalized = String(message || '').toLowerCase();
+  return [
+    'failed to fetch',
+    'network',
+    'networkerror',
+    'offline',
+    'name resolution',
+    'failed to resolve',
+    'max retries exceeded',
+    'connection refused',
+    'connection aborted',
+    'connection reset',
+    'timeout',
+    'timed out',
+    'temporarily unavailable',
+    'could not reach',
+  ].some((marker) => normalized.includes(marker));
+};
+
 type NormalizedTaxType = 'standard' | 'zero' | 'exempt' | 'unmapped';
 type NormalizedTaxCalculationMethod = 'inclusive' | 'exclusive' | 'not_applicable' | 'unmapped';
 type MappingStatus = 'ready' | 'pending' | 'unmapped';
@@ -911,6 +966,7 @@ const PaymentDialog = ({
     const [productTaxMappings, setProductTaxMappings] = useState<Record<string, ProductTaxMappingDetail>>({});
     const [unmappedProducts, setUnmappedProducts] = useState<string[]>([]);
     const [isProcessingPayment, setIsProcessingPayment] = useState(false);
+    const [mraPingStatus, setMraPingStatus] = useState<CachedMraPingStatus | null>(null);
     const { isReachable: isBrowserOnline } = useBackendReachability({ intervalMs: 10000 });
     const shouldUseEisTaxMappings = Boolean(eisEnabled);
     const shouldEnforceTaxMapping = shouldUseEisTaxMappings && blockSalesIfTaxMappingMissing === true;
@@ -925,16 +981,65 @@ const PaymentDialog = ({
     );
     const mappingRefreshAttemptedRef = useRef(false);
     const mappingItemFetchAttemptedRef = useRef(false);
+    const businessIdForMraStatus = useMemo(() => resolveOfflineBusinessId(), []);
+
+    useEffect(() => {
+        if (!shouldUseEisTaxMappings || !businessIdForMraStatus || !normalizedActiveBranchId) {
+            setMraPingStatus(null);
+            return;
+        }
+
+        const refreshCachedStatus = () => {
+            setMraPingStatus(readCachedMraPingStatus(businessIdForMraStatus, normalizedActiveBranchId));
+        };
+
+        refreshCachedStatus();
+        window.addEventListener('focus', refreshCachedStatus);
+        window.addEventListener('storage', refreshCachedStatus);
+        window.addEventListener('handypos-sync-status-changed', refreshCachedStatus);
+
+        return () => {
+            window.removeEventListener('focus', refreshCachedStatus);
+            window.removeEventListener('storage', refreshCachedStatus);
+            window.removeEventListener('handypos-sync-status-changed', refreshCachedStatus);
+        };
+    }, [businessIdForMraStatus, normalizedActiveBranchId, shouldUseEisTaxMappings]);
+
+    const isMraOffline = shouldUseEisTaxMappings && isCachedMraOffline(mraPingStatus);
+    const isMraOnline = shouldUseEisTaxMappings && mraPingStatus?.enabled === true && mraPingStatus?.isOnline === true;
+    const connectivityTone: 'online' | 'offline' | 'blocked' | 'unknown' = isEisInvoiceSubmissionBlocked
+        ? 'blocked'
+        : shouldUseEisTaxMappings
+            ? isMraOffline
+                ? 'offline'
+                : isMraOnline
+                    ? 'online'
+                    : 'unknown'
+            : isBrowserOnline
+                ? 'online'
+                : 'offline';
     const saleConnectivityLabel = isEisInvoiceSubmissionBlocked
         ? 'Server Unavailable'
         : shouldUseEisTaxMappings
-            ? 'EIS Online'
-            : 'Online';
+            ? isMraOffline
+                ? 'EIS Offline'
+                : isMraOnline
+                    ? 'EIS Online'
+                    : 'EIS Status Unknown'
+            : isBrowserOnline
+                ? 'Online'
+                : 'Offline';
     const saleConnectivityDescription = isEisInvoiceSubmissionBlocked
         ? eisInvoiceSubmissionBlockedMessage
         : shouldUseEisTaxMappings
-            ? 'Submits to MRA.'
-            : 'Submits to POS server.';
+            ? isMraOffline
+                ? 'Signs offline and queues for MRA.'
+                : isMraOnline
+                    ? 'Submits to MRA.'
+                    : 'MRA status not checked.'
+            : isBrowserOnline
+                ? 'Submits to POS server.'
+                : 'Will sync later.';
     const taxMethodSummary = useMemo(() => {
         const methods = new Set<'inclusive' | 'exclusive'>();
         Object.values(productTaxMappings).forEach((mapping) => {
@@ -1566,6 +1671,14 @@ const PaymentDialog = ({
             return false;
         }
 
+        if (isCachedMraOffline(mraPingStatus)) {
+            toast({
+                variant: 'destructive',
+                title: 'B2B needs MRA online',
+            });
+            return false;
+        }
+
         try {
             if (tin) {
                 const tinResult = await authFetch.fetch<any>(
@@ -1613,10 +1726,11 @@ const PaymentDialog = ({
 
             return true;
         } catch (error: any) {
+            const message = String(error?.message || '');
             toast({
                 variant: 'destructive',
-                title: 'Buyer validation failed',
-                description: error?.message || 'Check buyer details.',
+                title: isLikelyNetworkError(message) ? 'B2B needs MRA online' : 'Buyer validation failed',
+                description: isLikelyNetworkError(message) ? undefined : 'Check buyer details.',
             });
             return false;
         }
@@ -2374,18 +2488,22 @@ const PaymentDialog = ({
                         variant="outline"
                         className={cn(
                             'w-fit gap-1.5 text-xs font-semibold',
-                            isBrowserOnline
+                            connectivityTone === 'online'
                                 ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                                : 'border-amber-200 bg-amber-50 text-amber-800'
+                                : connectivityTone === 'blocked'
+                                    ? 'border-red-200 bg-red-50 text-red-700'
+                                    : connectivityTone === 'unknown'
+                                        ? 'border-slate-200 bg-slate-50 text-slate-700'
+                                        : 'border-amber-200 bg-amber-50 text-amber-800'
                         )}
                     >
-                        {isBrowserOnline ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
+                        {connectivityTone === 'online' ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
                         {saleConnectivityLabel}
                     </Badge>
                 </div>
                 <p className={cn(
                     'text-xs',
-                    isBrowserOnline ? 'text-muted-foreground' : 'text-amber-700'
+                    connectivityTone === 'online' || connectivityTone === 'unknown' ? 'text-muted-foreground' : connectivityTone === 'blocked' ? 'text-red-700' : 'text-amber-700'
                 )}>
                     {saleConnectivityDescription}
                 </p>

@@ -894,7 +894,7 @@ export const Receipt = ({
       {effectiveShowHeader && (
         <div className="mt-1 text-center">
          
-          <p className={`${metaTextClass} leading-none`}>/|\</p>
+         
           <p className="mt-2 font-bold leading-tight">{legalReceiptTitle}</p>
           <p className={`${businessNameTextClass} font-bold leading-tight`}>{businessNameDisplay}</p>
           {sellerAddressLines.length > 0 ? (

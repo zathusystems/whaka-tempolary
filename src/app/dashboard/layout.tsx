@@ -1431,9 +1431,13 @@ function NavGroup({ title, items, userRole, onPosClick }: { title: string, items
   const { setOpenMobile } = useSidebar();
   const { hasPermission } = useRBAC();
   
-  // Restrict Cashier and Waiter to only see Point of Sale section
-  const isCashierOrWaiter = userRole === 'Cashier' || userRole === 'Waiter';
-  if (isCashierOrWaiter && title !== 'Point of Sale' && title !== 'Settings') {
+  // Restrict frontline users, but let cashiers view inventory stock/transfers.
+  const isCashier = userRole === 'Cashier';
+  const isWaiter = userRole === 'Waiter';
+  if (isWaiter && title !== 'Point of Sale' && title !== 'Settings') {
+    return null;
+  }
+  if (isCashier && title !== 'Point of Sale' && title !== 'Settings' && title !== 'Management') {
     return null;
   }
   

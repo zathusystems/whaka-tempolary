@@ -282,6 +282,17 @@ const getStatusBadgeVariant = (status: string): 'default' | 'secondary' | 'destr
   return 'outline';
 };
 
+
+const resolveOrderDiscountAmount = (order: Order): number => {
+  const orderDiscount = Math.max(0, toFiniteNumber((order as any).discountAmount ?? (order as any).discount_amount));
+  const items = Array.isArray((order as any).items) ? (order as any).items : [];
+  const itemDiscount = items.reduce(
+    (sum: number, item: any) => sum + Math.max(0, toFiniteNumber(item?.discountAmount ?? item?.discount_amount)),
+    0
+  );
+  return Math.max(orderDiscount, itemDiscount);
+};
+
 const resolveBuyerText = (order: Order): string => {
   const source = order as any;
   return toTrimmedString(
@@ -500,17 +511,34 @@ export default function EisSalesAuditPage() {
   const [voidReceiptResult, setVoidReceiptResult] = useState<VoidReceiptLookupResult | null>(null);
 
   useEffect(() => {
-    const loadActiveBranch = () => {
+    const resolveStoredActiveBranch = () => {
       const stored = localStorage.getItem(ACTIVE_BRANCH_STORAGE_KEY) || localStorage.getItem('handy-pos-active-branch');
-      setActiveBranchId(stored ? String(stored) : null);
+      return stored ? String(stored) : null;
+    };
+
+    const applyActiveBranch = (branchId: string | null) => {
+      setActiveBranchId((current) => {
+        if (current === branchId) return current;
+        setLastSubmitReconciliation(null);
+        setTerminal(null);
+        return branchId;
+      });
+    };
+
+    const loadActiveBranch = () => applyActiveBranch(resolveStoredActiveBranch());
+    const handleBranchChanged = (event: Event) => {
+      const nextBranchId = String((event as CustomEvent<{ branchId?: unknown }>).detail?.branchId ?? '').trim();
+      applyActiveBranch(nextBranchId || resolveStoredActiveBranch());
     };
 
     loadActiveBranch();
     window.addEventListener('storage', loadActiveBranch);
-    window.addEventListener('handypos-active-branch-changed', loadActiveBranch as EventListener);
+    window.addEventListener('branchChanged', handleBranchChanged);
+    window.addEventListener('handypos-active-branch-changed', handleBranchChanged);
     return () => {
       window.removeEventListener('storage', loadActiveBranch);
-      window.removeEventListener('handypos-active-branch-changed', loadActiveBranch as EventListener);
+      window.removeEventListener('branchChanged', handleBranchChanged);
+      window.removeEventListener('handypos-active-branch-changed', handleBranchChanged);
     };
   }, []);
 
@@ -1076,6 +1104,7 @@ export default function EisSalesAuditPage() {
                   <TableHead>Buyer</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">VAT</TableHead>
+                  <TableHead className="text-right">Discount</TableHead>
                   <TableHead className="text-right">Total</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -1083,13 +1112,13 @@ export default function EisSalesAuditPage() {
               <TableBody>
                 {allOrders === undefined ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="h-24 text-center">
+                    <TableCell colSpan={10} className="h-24 text-center">
                       <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
                     </TableCell>
                   </TableRow>
                 ) : filteredOrders.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="h-24 text-center text-muted-foreground">
+                    <TableCell colSpan={10} className="h-24 text-center text-muted-foreground">
                       No sales found for this search.
                     </TableCell>
                   </TableRow>
@@ -1099,6 +1128,7 @@ export default function EisSalesAuditPage() {
                     const fiscalInvoice = resolveFiscalInvoiceNumber(order);
                     const createdAt = getOrderCreatedDate(order);
                     const qrUrl = toTrimmedString((order as any).qrCodePayload ?? (order as any).qr_code_payload);
+                    const discountAmount = resolveOrderDiscountAmount(order);
                     return (
                       <TableRow key={order.id}>
                         <TableCell>
@@ -1116,6 +1146,7 @@ export default function EisSalesAuditPage() {
                           </Badge>
                         </TableCell>
                         <TableCell className="text-right">{formatCurrency(toFiniteNumber((order as any).vatAmount ?? (order as any).vat_amount ?? (order as any).tax))}</TableCell>
+                        <TableCell className="text-right">{discountAmount > 0 ? formatCurrency(discountAmount) : '-'}</TableCell>
                         <TableCell className="text-right font-medium">{formatCurrency(toFiniteNumber((order as any).total))}</TableCell>
                         <TableCell className="text-right">
                           <div className="flex justify-end gap-2">

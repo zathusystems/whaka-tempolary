@@ -381,6 +381,13 @@ export const Receipt = ({
     (order as any).vat_amount,
     0
   );
+  const orderItems = Array.isArray((order as any).items) ? (order as any).items : [];
+  const receiptOrderDiscount = Math.max(0, toFiniteNumber((order as any).discount_amount ?? (order as any).discountAmount, 0));
+  const receiptItemDiscountTotal = orderItems.reduce(
+    (sum, item) => sum + Math.max(0, toFiniteNumber((item as any).discount_amount ?? (item as any).discountAmount, 0)),
+    0
+  );
+  const receiptDiscountTotal = Math.max(receiptOrderDiscount, receiptItemDiscountTotal);
   const normalizedFinalPayable = normalizedOrderTotal;
   const explicitChangeAmount = toOptionalFiniteNumber(
     (order as any).change ??
@@ -416,7 +423,6 @@ export const Receipt = ({
       : normalizedFinalPayable;
   const receiptChangeDisplay = receiptChangeAmount > 0 ? receiptChangeAmount : 0;
 
-  const orderItems = Array.isArray((order as any).items) ? (order as any).items : [];
   const totalItemVat = orderItems.reduce(
     (acc, item) => acc + toFiniteNumber((item as any).itemTax ?? item.tax_amount ?? item.taxAmount, 0),
     0
@@ -947,7 +953,7 @@ export const Receipt = ({
             const itemVat = toFiniteNumber(item.tax_amount ?? item.taxAmount, Math.max(0, itemTotal - itemSubtotal));
             const itemTaxRate = toFiniteNumber(item.tax_rate ?? item.taxRate, itemVat > 0 && itemSubtotal > 0 ? (itemVat / itemSubtotal) * 100 : 0);
             const itemTaxCode = resolveTaxCode(itemTaxRate, item.tax_type ?? item.taxType);
-            const itemDiscount = toFiniteNumber(item.discount_amount ?? item.discountAmount, 0);
+            const itemDiscount = Math.max(0, toFiniteNumber(item.discount_amount ?? item.discountAmount, 0));
             const itemDiscountName = String(item.discount_name ?? item.discountName ?? 'Discount').trim() || 'Discount';
 
             return (
@@ -1003,6 +1009,12 @@ export const Receipt = ({
 
       <div className={`mt-2 ${bodyTextClass}`}>
         <p className="whitespace-nowrap text-center leading-none">{legalRule}</p>
+        {receiptDiscountTotal > 0 && (
+          <div className="flex justify-between gap-2">
+            <span>TOTAL DISCOUNT:</span>
+            <span>{formatReceiptAmount(receiptDiscountTotal)}</span>
+          </div>
+        )}
         <div className="flex justify-between gap-2 font-bold">
           <span>TOTAL:</span>
           <span>{formatReceiptAmount(normalizedFinalPayable)}</span>

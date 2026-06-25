@@ -2571,6 +2571,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
               taxCalculationMethod: itemTaxInfo.calculationMethod,
               tax_calculation_method: itemTaxInfo.calculationMethod,
 	              // Calculated tax amounts (Immutable snapshot for audit trail)
+	              lineAmountBeforeDiscount: itemLineGrossBeforeDiscount,
+	              line_amount_before_discount: itemLineGrossBeforeDiscount,
+	              originalLineAmount: itemLineGrossBeforeDiscount,
+	              original_line_amount: itemLineGrossBeforeDiscount,
 	              subtotal: itemSubtotal,
 	              taxAmount: itemTax,
 	              total: itemSubtotal + itemTax,

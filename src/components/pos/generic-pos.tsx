@@ -862,7 +862,7 @@ const CartItemView = ({
             <Trash2 className="h-4 w-4" />
           </Button>
         </div>
-        {taxDetail && (
+        {showTaxStatus && taxDetail && (
           <p className="text-xs text-muted-foreground">
             {taxDescriptor}
             {taxStatusLabel}: <span className="font-medium text-foreground">{currencyFormatter(taxDetail.amount)}</span>
@@ -1655,10 +1655,14 @@ const PaymentDialog = ({
             .join(' · ');
     }, [receiptStyleTaxBreakdown]);
 
-    const validateBuyerTinBeforeCheckout = async (buyerDetails: BuyerDetails | undefined): Promise<boolean> => {
+    const validateEisSaleFieldsBeforeCheckout = async (buyerDetails: BuyerDetails | undefined): Promise<boolean> => {
         const tin = String(buyerDetails?.tin || '').trim();
         const authorizationCode = String(buyerDetails?.authorizationCode || '').trim();
-        if (!shouldUseEisTaxMappings || (!tin && !authorizationCode)) {
+        const isRelief = buyerDetails?.isReliefSupply === true;
+        const vat5ProjectNumber = String(buyerDetails?.vat5ProjectNumber || '').trim();
+        const vat5CertificateNumber = String(buyerDetails?.vat5CertificateNumber || '').trim();
+        const vat5Quantity = Number(buyerDetails?.vat5Quantity);
+        if (!shouldUseEisTaxMappings || (!tin && !authorizationCode && !isRelief)) {
             return true;
         }
 
@@ -1666,7 +1670,7 @@ const PaymentDialog = ({
         if (!businessId) {
             toast({
                 variant: 'destructive',
-                title: 'Cannot validate buyer TIN',
+                title: 'Cannot validate EIS details',
             });
             return false;
         }
@@ -1674,7 +1678,15 @@ const PaymentDialog = ({
         if (isCachedMraOffline(mraPingStatus)) {
             toast({
                 variant: 'destructive',
-                title: 'B2B needs MRA online',
+                title: isRelief ? 'Relief sale needs MRA online' : 'B2B needs MRA online',
+            });
+            return false;
+        }
+
+        if (isRelief && (!vat5ProjectNumber || !vat5CertificateNumber || !Number.isFinite(vat5Quantity) || vat5Quantity <= 0)) {
+            toast({
+                variant: 'destructive',
+                title: 'VAT5 details required',
             });
             return false;
         }
@@ -1724,13 +1736,38 @@ const PaymentDialog = ({
                 }
             }
 
+            if (isRelief) {
+                const vat5Result = await authFetch.fetch<any>(
+                    `/mra-eis/utilities/validate-vat5/?business_id=${encodeURIComponent(businessId)}`,
+                    {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            projectNumber: vat5ProjectNumber,
+                            certificateNumber: vat5CertificateNumber,
+                            quantity: vat5Quantity,
+                        }),
+                    }
+                );
+
+                if (vat5Result?.checked && vat5Result?.is_valid === false) {
+                    toast({
+                        variant: 'destructive',
+                        title: 'Invalid VAT5 certificate',
+                    });
+                    return false;
+                }
+            }
+
             return true;
         } catch (error: any) {
             const message = String(error?.message || '');
+            const isNetwork = isLikelyNetworkError(message);
             toast({
                 variant: 'destructive',
-                title: isLikelyNetworkError(message) ? 'B2B needs MRA online' : 'Buyer validation failed',
-                description: isLikelyNetworkError(message) ? undefined : 'Check buyer details.',
+                title: isNetwork
+                    ? isRelief ? 'Relief sale needs MRA online' : 'B2B needs MRA online'
+                    : isRelief ? 'VAT5 validation failed' : 'Buyer validation failed',
+                description: isNetwork ? undefined : 'Check EIS details.',
             });
             return false;
         }
@@ -1763,7 +1800,7 @@ const PaymentDialog = ({
                 vat5CertificateNumber,
                 vat5Quantity: typeof vat5Quantity === 'number' ? vat5Quantity : Number.parseFloat(String(vat5Quantity || '')),
             });
-            const buyerIsValid = await validateBuyerTinBeforeCheckout(buyerDetails);
+            const buyerIsValid = await validateEisSaleFieldsBeforeCheckout(buyerDetails);
             if (!buyerIsValid) {
                 return;
             }
@@ -2512,10 +2549,12 @@ const PaymentDialog = ({
                 <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
                     <div className="flex justify-between text-xs"><span>Net Amount (Before VAT)</span><span>{currencyFormatter(calculatedNetAmount)}</span></div>
                     <div className="flex justify-between text-xs"><span>{calculatedTaxLabel || 'VAT Amount'}</span><span className="text-green-600 font-semibold">{currencyFormatter(calculatedTax)}</span></div>
-                    <div className="flex justify-between text-[11px] text-muted-foreground">
-                        <span>Tax Method</span>
-                        <span>{taxMethodSummary}</span>
-                    </div>
+                    {taxMethodSummary !== 'N/A' && (
+                        <div className="flex justify-between text-[11px] text-muted-foreground">
+                            <span>Tax Method</span>
+                            <span>{taxMethodSummary}</span>
+                        </div>
+                    )}
                     {taxMethodRateSummary && (
                         <div className="flex justify-between text-[11px] text-muted-foreground">
                             <span>Methods & Rates</span>
@@ -2534,93 +2573,6 @@ const PaymentDialog = ({
                     </div>
                 )}
 
-                {Object.keys(productTaxMappings).length > 0 && cart && cart.length > 0 && (
-                    <div className="rounded-lg border bg-amber-50 dark:bg-amber-950/20 p-3">
-                        <h4 className="text-sm font-semibold mb-2 text-amber-900 dark:text-amber-100">MRA Tax Details</h4>
-                        <div className="space-y-2 text-xs">
-                            {cart?.map((item) => {
-                                const mapping = productTaxMappings[String(item.id)];
-                                if (!mapping) return null;
-                                const taxRate = Number.isFinite(mapping.rate) ? mapping.rate : 0;
-                                const statusLabel = formatMappingStatusLabel(mapping.mappingStatus);
-                                const taxTypeLabel = formatTaxTypeLabel(mapping.taxType);
-                                const taxMethodLabel = formatTaxMethodLabel(mapping.taxCalculationMethod);
-                                const taxBasisLabel = formatTaxBasisLabel(mapping.taxCalculationBasis);
-                                const rateLabel =
-                                    mapping.mappingStatus === 'ready'
-                                        ? (mapping.taxType === 'standard' ? `${taxRate.toFixed(2)}%` : '0%')
-                                        : 'N/A';
-                                const amountLabel = mapping.mappingStatus === 'ready'
-                                    ? currencyFormatter(mapping.taxAmount)
-                                    : 'Blocked';
-                                return (
-                                    <div key={item.id} className="rounded border border-amber-200/80 bg-white/70 p-2 dark:bg-transparent dark:border-amber-900/50">
-                                        <div className="flex justify-between items-center gap-2">
-                                            <span className="font-medium text-amber-900 dark:text-amber-100">
-                                                {item.name}
-                                            </span>
-                                            <span
-                                                className={cn(
-                                                    "font-semibold",
-                                                    mapping.mappingStatus === 'ready'
-                                                        ? "text-amber-900 dark:text-amber-100"
-                                                        : "text-red-700 dark:text-red-300"
-                                                )}
-                                            >
-                                                {amountLabel}
-                                            </span>
-                                        </div>
-                                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-amber-800 dark:text-amber-200">
-                                            <span>Type: {taxTypeLabel}</span>
-                                            <span>Method: {taxMethodLabel}</span>
-                                            <span>Basis: {taxBasisLabel}</span>
-                                            <span>Rate: {rateLabel}</span>
-                                            <span>Status: {statusLabel}</span>
-                                        </div>
-                                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-amber-900 dark:text-amber-100">
-                                            <span>Net: {currencyFormatter(mapping.netAmount)}</span>
-                                            <span>Tax: {currencyFormatter(mapping.taxAmount)}</span>
-                                            <span>Gross: {currencyFormatter(mapping.grossAmount)}</span>
-                                        </div>
-                                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-                                            <span>Mapping: {mapping.mappingId || 'none'}</span>
-                                            <span>Branch: {mapping.mappingBranchId || 'any'}</span>
-                                            <span>Source: {mapping.mappingSource || 'unknown'}</span>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                        {receiptStyleTaxBreakdown.length > 0 && (
-                            <div className="mt-3 border-t border-amber-200/70 pt-2 space-y-1 text-xs">
-                                <p className="font-semibold text-amber-900 dark:text-amber-100">Tax Summary</p>
-                                {receiptStyleTaxBreakdown.map((tax, index) => {
-                                    const methodShortLabel =
-                                        tax.method === 'exclusive'
-                                            ? 'EXC'
-                                            : tax.method === 'inclusive'
-                                                ? 'INC'
-                                                : 'N/A';
-                                    const displayTaxRate = (Number.isFinite(tax.rate) ? tax.rate : 0).toFixed(2);
-
-                                    return (
-                                        <div key={`${displayTaxRate}-${tax.method}-${index}`} className="space-y-0.5 text-amber-900 dark:text-amber-100">
-                                            <div className="flex items-center justify-between gap-3">
-                                                <span>VAT {displayTaxRate}% ({methodShortLabel})</span>
-                                                <span className="font-semibold">{currencyFormatter(tax.vatAmount)}</span>
-                                            </div>
-                                            <div className="flex items-center justify-between gap-3 text-[11px] text-amber-800 dark:text-amber-200 pl-2">
-                                                <span>Taxable:</span>
-                                                <span>{currencyFormatter(tax.taxableValue)}</span>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        )}
-                    </div>
-                )}
-
                 <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
                     <h4 className="text-sm font-medium">Buyer Details (optional)</h4>
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -2634,25 +2586,15 @@ const PaymentDialog = ({
                             />
                         </div>
                         <div className="space-y-1">
-                            <label className="text-xs font-medium text-muted-foreground">Phone</label>
+                            <label className="text-xs font-medium text-muted-foreground">Buyer TIN</label>
                             <Input
-                                placeholder="Enter phone number"
-                                value={buyerPhone}
-                                onChange={(e) => setBuyerPhone(e.target.value)}
+                                placeholder="Enter buyer TIN"
+                                value={buyerTin}
+                                onChange={(e) => setBuyerTin(e.target.value)}
                                 disabled={isProcessingPayment}
-                                inputMode="tel"
                             />
                         </div>
                     </div>
-	                    <div className="space-y-1">
-	                        <label className="text-xs font-medium text-muted-foreground">Buyer TIN</label>
-	                        <Input
-	                            placeholder="Enter buyer TIN"
-	                            value={buyerTin}
-	                            onChange={(e) => setBuyerTin(e.target.value)}
-	                            disabled={isProcessingPayment}
-	                        />
-	                    </div>
 	                    <div className="space-y-1">
 	                        <label className="text-xs font-medium text-muted-foreground">Authorization Code</label>
 	                        <Input
@@ -3372,7 +3314,7 @@ export const GenericPos = ({
             onApplyDiscount={onApplyDiscount}
             currencyFormatter={formatCurrency}
             taxDetail={cartSummary.perItemTax[String(item.id)]}
-            showTaxStatus={shouldUseEisTaxMappings}
+            showTaxStatus={false}
             discountRules={discountRules.filter((rule) => discountAppliesToItem(rule, item))}
           />
         ))}

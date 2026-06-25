@@ -113,6 +113,18 @@ const normalizeTaxMethod = (value: unknown): 'inclusive' | 'exclusive' => {
   return String(value ?? '').trim().toLowerCase() === 'exclusive' ? 'exclusive' : 'inclusive';
 };
 
+const resolveDiscountAmount = (value: unknown): number => Math.max(0, toFiniteNumber(value, 0));
+
+const formatDiscountLabel = (item: any): string => {
+  const name = toTrimmedString(item?.discount_name ?? item?.discountName) || 'Discount';
+  const type = toTrimmedString(item?.discount_type ?? item?.discountType).toLowerCase();
+  const rawValue = toFiniteNumber(item?.discount_value ?? item?.discountValue, 0);
+  if (rawValue <= 0) return name;
+  if (type === 'percentage') return `${name} (${rawValue}%)`;
+  if (type === 'fixed') return `${name} (fixed)`;
+  return name;
+};
+
 const toTrimmedString = (value: unknown): string => {
   if (value === undefined || value === null) {
     return '';
@@ -511,6 +523,8 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
     const itemPrice = toFiniteNumber(item.price, 0);
     const itemQuantity = toFiniteNumber(item.quantity, 1);
     const itemSubtotal = toFiniteNumber(item.subtotal, itemPrice * itemQuantity);
+    const itemDiscountAmount = resolveDiscountAmount(item.discount_amount ?? item.discountAmount);
+    const itemDiscountLabel = itemDiscountAmount > 0 ? formatDiscountLabel(item) : '';
     const itemTaxAmount = toFiniteNumber(item.tax_amount ?? item.taxAmount, 0);
     const itemTotal = toFiniteNumber(item.total, itemSubtotal + itemTaxAmount);
     const directUnit =
@@ -534,11 +548,19 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
       itemPrice,
       itemQuantity,
       itemSubtotal,
+      itemDiscountAmount,
+      itemDiscountLabel,
       itemTaxAmount,
       itemTotal,
       unitLabel,
     };
   });
+  const orderDiscountAmount = resolveDiscountAmount(
+    (order as any).discount_amount ?? (order as any).discountAmount
+  );
+  const itemDiscountTotal = normalizedItems.reduce((sum, item) => sum + item.itemDiscountAmount, 0);
+  const totalDiscountAmount = Math.max(orderDiscountAmount, itemDiscountTotal);
+
   const voidEisStatus = normalizeFiscalStatus(
     voidTransaction?.eis_status || voidTransaction?.eis_sync_state || ''
   );
@@ -846,6 +868,13 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                         </div>
                       </div>
 
+                      {item.itemDiscountAmount > 0 && (
+                        <div className="flex items-center justify-between rounded-md bg-amber-50 p-2 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+                          <span>{item.itemDiscountLabel}</span>
+                          <span className="font-semibold">{formatCurrency(item.itemDiscountAmount)}</span>
+                        </div>
+                      )}
+
                       <div className="flex flex-wrap items-center gap-1.5 text-xs">
                         <span className="rounded-full bg-blue-100 px-2 py-1 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">
                           {item.itemTaxRate}%
@@ -880,6 +909,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                       <TableHead>Item Name & Qty</TableHead>
                       <TableHead className="text-right">Unit Price</TableHead>
                       <TableHead className="text-right">Subtotal</TableHead>
+                      <TableHead className="text-right">Discount</TableHead>
                       <TableHead className="text-right">Tax Details</TableHead>
                       <TableHead className="text-right">Item Tax</TableHead>
                       <TableHead className="text-right">Item Total</TableHead>
@@ -900,6 +930,16 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                           </TableCell>
                           <TableCell className="text-right">{formatCurrency(item.itemPrice)}</TableCell>
                           <TableCell className="text-right">{formatCurrency(item.itemSubtotal)}</TableCell>
+                          <TableCell className="text-right">
+                            {item.itemDiscountAmount > 0 ? (
+                              <div className="space-y-1">
+                                <div className="font-medium text-amber-700 dark:text-amber-300">{formatCurrency(item.itemDiscountAmount)}</div>
+                                <div className="text-xs text-muted-foreground">{item.itemDiscountLabel}</div>
+                              </div>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
+                          </TableCell>
                           <TableCell className="text-right">
                             <div className="space-y-1">
                               <div className="text-blue-600 dark:text-blue-400 font-medium">{item.itemTaxRate}%</div>
@@ -964,6 +1004,12 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                   <span className="text-muted-foreground">Subtotal:</span>
                   <span className="font-medium">{formatCurrency(order.subtotal)}</span>
                 </div>
+                {totalDiscountAmount > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Total discount:</span>
+                    <span className="font-medium text-amber-700 dark:text-amber-300">{formatCurrency(totalDiscountAmount)}</span>
+                  </div>
+                )}
                 
                 <div className="border-t pt-3 space-y-2">
                   {/* Group items by tax rate and calculation method */}

@@ -531,7 +531,11 @@ class AuthenticatedFetch {
         }, TOKEN_REFRESH_REQUEST_TIMEOUT_MS);
 
         if (!response.ok) {
+          // Only a clear auth rejection means the saved session is invalid.
+          // Server errors, captive portals, DNS issues, and timeouts should not
+          // erase a freshly logged-in Windows/Tauri session.
           if (
+            (response.status === 401 || response.status === 403) &&
             this.authStateVersion === refreshStateVersion &&
             this.tokens?.refresh === currentRefreshToken
           ) {
@@ -542,12 +546,7 @@ class AuthenticatedFetch {
 
         const data = await response.json();
         if (!data?.access) {
-          if (
-            this.authStateVersion === refreshStateVersion &&
-            this.tokens?.refresh === currentRefreshToken
-          ) {
-            this.clearTokens();
-          }
+          console.warn('[AuthFetch] Token refresh response did not include an access token; preserving current session.');
           return false;
         }
 

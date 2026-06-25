@@ -141,6 +141,7 @@ interface InventoryTabProps {
     onEditItem: (item: InventoryItem) => void;
     onImport: () => void;
     onTransfer: () => void;
+    readOnly?: boolean;
 }
 
 export function InventoryTab({ 
@@ -151,7 +152,8 @@ export function InventoryTab({
     onAddItem,
     onEditItem,
     onImport,
-    onTransfer
+    onTransfer,
+    readOnly = false
 }: InventoryTabProps) {
     const { user } = useAuth();
     const { currencyCode } = useCurrency();
@@ -381,7 +383,7 @@ export function InventoryTab({
             <TableHead>Supplier</TableHead>
             <TableHead className="text-right">Remaining</TableHead>
             <TableHead className="text-right">Value/Cost</TableHead>
-            <TableHead className="w-[50px]"><span className="sr-only">Actions</span></TableHead>
+            {!readOnly && <TableHead className="w-[50px]"><span className="sr-only">Actions</span></TableHead>}
         </TableRow>
     );
 
@@ -439,22 +441,24 @@ export function InventoryTab({
                 <TableCell className="text-right font-semibold">
                         {isSellable ? `${currencySymbol}${toSafeNumber(cost).toFixed(2)}` : `${currencySymbol}${toSafeNumber(displayValue).toFixed(2)}`}
                 </TableCell>
-                <TableCell>
-                    <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon">
-                        <MoreHorizontal />
-                        </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                        <DropdownMenuItem onSelect={() => handleViewDetails(item)}><Eye className="mr-2"/> View Details</DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => onEditItem(item)}><Edit className="mr-2"/> Edit Item</DropdownMenuItem>
-                        <DropdownMenuItem><History className="mr-2"/> View History</DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem onSelect={() => handleDeleteItem(item.id)} className="text-destructive"><Trash2 className="mr-2"/> Delete Item</DropdownMenuItem>
-                    </DropdownMenuContent>
-                    </DropdownMenu>
-                </TableCell>
+                {!readOnly && (
+                    <TableCell>
+                        <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon">
+                            <MoreHorizontal />
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                            <DropdownMenuItem onSelect={() => handleViewDetails(item)}><Eye className="mr-2"/> View Details</DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => onEditItem(item)}><Edit className="mr-2"/> Edit Item</DropdownMenuItem>
+                            <DropdownMenuItem><History className="mr-2"/> View History</DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onSelect={() => handleDeleteItem(item.id)} className="text-destructive"><Trash2 className="mr-2"/> Delete Item</DropdownMenuItem>
+                        </DropdownMenuContent>
+                        </DropdownMenu>
+                    </TableCell>
+                )}
             </TableRow>
         );
     };
@@ -500,20 +504,22 @@ export function InventoryTab({
                                 )}
                             </div>
                         </div>
-                        <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                                <Button variant="ghost" size="icon" className="-mt-2 -mr-2">
-                                    <MoreHorizontal />
-                                </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                                <DropdownMenuItem onSelect={() => handleViewDetails(item)}><Eye className="mr-2" /> View Details</DropdownMenuItem>
-                                <DropdownMenuItem onSelect={() => onEditItem(item)}><Edit className="mr-2" /> Edit Item</DropdownMenuItem>
-                                <DropdownMenuItem><History className="mr-2" /> View History</DropdownMenuItem>
-                                <DropdownMenuSeparator />
-                                <DropdownMenuItem onSelect={() => handleDeleteItem(item.id)} className="text-destructive"><Trash2 className="mr-2" /> Delete Item</DropdownMenuItem>
-                            </DropdownMenuContent>
-                        </DropdownMenu>
+                        {!readOnly && (
+                            <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                    <Button variant="ghost" size="icon" className="-mt-2 -mr-2">
+                                        <MoreHorizontal />
+                                    </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                    <DropdownMenuItem onSelect={() => handleViewDetails(item)}><Eye className="mr-2" /> View Details</DropdownMenuItem>
+                                    <DropdownMenuItem onSelect={() => onEditItem(item)}><Edit className="mr-2" /> Edit Item</DropdownMenuItem>
+                                    <DropdownMenuItem><History className="mr-2" /> View History</DropdownMenuItem>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem onSelect={() => handleDeleteItem(item.id)} className="text-destructive"><Trash2 className="mr-2" /> Delete Item</DropdownMenuItem>
+                                </DropdownMenuContent>
+                            </DropdownMenu>
+                        )}
                     </div>
                     <Separator className="my-4" />
                     <div className="grid grid-cols-2 gap-4 text-sm">
@@ -568,9 +574,11 @@ export function InventoryTab({
     return (
          <CardContent>
             <div className="flex w-full flex-col items-stretch gap-2 mb-6 sm:flex-row">
-                <Button onClick={onAddItem}>
-                    <PlusCircle className="mr-2 h-4 w-4" /> Add Item
-                </Button>
+                {!readOnly && (
+                    <Button onClick={onAddItem}>
+                        <PlusCircle className="mr-2 h-4 w-4" /> Add Item
+                    </Button>
+                )}
                 {/* <Button variant="outline" onClick={onTransfer}>
                     <Repeat className="mr-2 h-4 w-4" /> Transfer Stock
                 </Button> */}
@@ -582,11 +590,13 @@ export function InventoryTab({
                     </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
-                    <DropdownMenuItem onSelect={onImport}><Upload className="mr-2" /> Import Products</DropdownMenuItem>
+                    {!readOnly && <DropdownMenuItem onSelect={onImport}><Upload className="mr-2" /> Import Products</DropdownMenuItem>}
                     <DropdownMenuItem onSelect={handleExport}><Download className="mr-2" /> Export Stock File</DropdownMenuItem>
-                    <DropdownMenuItem asChild>
-                        <Link href="/dashboard/inventory/audit"><ClipboardList className="mr-2" /> Full Stock Audit</Link>
-                    </DropdownMenuItem>
+                    {!readOnly && (
+                        <DropdownMenuItem asChild>
+                            <Link href="/dashboard/inventory/audit"><ClipboardList className="mr-2" /> Full Stock Audit</Link>
+                        </DropdownMenuItem>
+                    )}
                     </DropdownMenuContent>
                 </DropdownMenu>
                 </div>
@@ -632,14 +642,15 @@ export function InventoryTab({
                 itemLabel="products"
             />
 
-            {/* Product Details Modal */}
-            <ProductDetailsModal
-                product={selectedProduct}
-                isOpen={isDetailsModalOpen}
-                onOpenChange={setIsDetailsModalOpen}
-                onEdit={handleEditFromDetails}
-                currentBusinessType={currentBusinessType}
-            />
+            {!readOnly && (
+                <ProductDetailsModal
+                    product={selectedProduct}
+                    isOpen={isDetailsModalOpen}
+                    onOpenChange={setIsDetailsModalOpen}
+                    onEdit={handleEditFromDetails}
+                    currentBusinessType={currentBusinessType}
+                />
+            )}
         </CardContent>
     )
 }

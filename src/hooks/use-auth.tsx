@@ -236,6 +236,21 @@ const isRecoverableBootstrapError = (error: unknown): boolean => {
   );
 };
 
+const isExplicitAuthInvalidBootstrapError = (error: unknown): boolean => {
+  const status = Number((error as any)?.status);
+  if (status === 401 || status === 403) {
+    return true;
+  }
+
+  const message = String((error as any)?.message ?? '').toLowerCase();
+  return (
+    message.includes('unauthorized') ||
+    message.includes('forbidden') ||
+    message.includes('invalid credentials') ||
+    message.includes('please login again')
+  );
+};
+
 const buildUserFromProfiles = (profile: any, staffProfile: any | null): User | null => {
   const email = pickFirstString(
     profile?.email,
@@ -314,6 +329,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(null);
   const [business, setBusiness] = useState<Business | null>(null);
   const [loading, setLoading] = useState(true);
+  const authGenerationRef = React.useRef(0);
 
   const clearAuthStorage = () => {
     localStorage.removeItem(AUTH_STORAGE_KEYS.USER);
@@ -334,6 +350,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   useEffect(() => {
     let cancelled = false;
+    const bootstrapGeneration = authGenerationRef.current;
+    const isBootstrapCurrent = () => !cancelled && authGenerationRef.current === bootstrapGeneration;
+    const clearAuthStorageIfBootstrapCurrent = () => {
+      if (isBootstrapCurrent()) {
+        clearAuthStorage();
+      }
+    };
 
     const bootstrapAuth = async () => {
       // Check for a user and business in localStorage on initial load
@@ -361,7 +384,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
               }) as User['role'],
             };
             restoredUser = normalizedUser;
-            if (!cancelled) {
+            if (isBootstrapCurrent()) {
               setUser(normalizedUser);
             }
             localStorage.setItem(AUTH_STORAGE_KEYS.USER, JSON.stringify(normalizedUser));
@@ -376,7 +399,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         if (storedBusiness && hasValidTokens) {
           const parsedBusiness = parseStoredJson<Business>(storedBusiness);
           if (parsedBusiness) {
-            if (!cancelled) {
+            if (isBootstrapCurrent()) {
               setBusiness(parsedBusiness);
             }
           } else {
@@ -412,40 +435,44 @@ export function AuthProvider({ children }: AuthProviderProps) {
             const recoverableFailure =
               restoreErrors.length > 0 &&
               restoreErrors.every((error) => isRecoverableBootstrapError(error));
+            const explicitAuthFailure =
+              restoreErrors.length > 0 &&
+              restoreErrors.every((error) => isExplicitAuthInvalidBootstrapError(error));
+            const profileUnavailableFailure = restoreErrors.length > 0 && !explicitAuthFailure;
             const rebuiltUser = buildUserFromProfiles(profile, staffProfile);
-            const nextUser = rebuiltUser ?? (recoverableFailure ? fallbackUserFromToken : null);
+            const nextUser = rebuiltUser ?? ((recoverableFailure || profileUnavailableFailure) ? fallbackUserFromToken : null);
 
             if (nextUser) {
               restoredUser = nextUser;
               localStorage.setItem(AUTH_STORAGE_KEYS.USER, JSON.stringify(nextUser));
-              if (!cancelled) {
+              if (isBootstrapCurrent()) {
                 setUser(nextUser);
               }
             } else {
-              if (recoverableFailure) {
-                console.warn('[Auth] Preserving auth session after recoverable bootstrap failure');
+              if (recoverableFailure || profileUnavailableFailure) {
+                console.warn('[Auth] Preserving auth session after profile bootstrap failure');
               } else {
                 console.warn('[Auth] Valid tokens found but no user profile could be restored');
-                clearAuthStorage();
+                clearAuthStorageIfBootstrapCurrent();
               }
             }
           } catch (error) {
             if (fallbackUserFromToken && isRecoverableBootstrapError(error)) {
               restoredUser = fallbackUserFromToken;
               localStorage.setItem(AUTH_STORAGE_KEYS.USER, JSON.stringify(fallbackUserFromToken));
-              if (!cancelled) {
+              if (isBootstrapCurrent()) {
                 setUser(fallbackUserFromToken);
               }
               console.warn('[Auth] Restored user from token after recoverable bootstrap failure:', error);
             } else {
               console.warn('[Auth] Failed to rebuild user from profile:', error);
-              clearAuthStorage();
+              clearAuthStorageIfBootstrapCurrent();
             }
           }
         }
 
         if (!hasValidTokens && (storedUser || storedBusiness)) {
-          clearAuthStorage();
+          clearAuthStorageIfBootstrapCurrent();
         }
 
         if (hasValidTokens) {
@@ -453,7 +480,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         }
       } catch (error) {
         console.error('Failed to parse from localStorage', error);
-        clearAuthStorage();
+        clearAuthStorageIfBootstrapCurrent();
       }
 
       if (!cancelled) {
@@ -473,6 +500,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   }, []);
 
   const login = (userData: User) => {
+    authGenerationRef.current += 1;
     const normalizedUserData: User = {
       ...userData,
       role: normalizeRole(userData.role, {
@@ -532,12 +560,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
   };
 
   const logout = () => {
+    authGenerationRef.current += 1;
     clearAuthStorage();
     setUser(null);
     setBusiness(null);
   };
 
   const selectBusiness = (businessData: Business) => {
+    authGenerationRef.current += 1;
     localStorage.setItem(AUTH_STORAGE_KEYS.BUSINESS, JSON.stringify(businessData));
     setBusiness(businessData);
     void syncSessionSnapshotToDesktopStore();

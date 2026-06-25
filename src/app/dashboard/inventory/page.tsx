@@ -245,6 +245,9 @@ export default function InventoryPage() {
   const [receiveStockDefaultSource, setReceiveStockDefaultSource] = useState<EisStockReceiptSource>('pos_goods_receiving');
   const [receiveStockReconciliationDefaults, setReceiveStockReconciliationDefaults] = useState<StockReconciliationWarning[]>([]);
   const hasShownReconciliationPromptRef = React.useRef(false);
+  const isCashierInventoryViewer = user?.role === 'Cashier';
+  const canManageInventory = !isCashierInventoryViewer;
+  const canTransferInventory = true;
   
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -760,22 +763,26 @@ export default function InventoryPage() {
       return;
     }
 
-    const visibleTabs = SHOW_WASTE_TAB
-      ? ['inventory', 'purchases', 'transfers', 'waste', 'mra']
-      : ['inventory', 'purchases', 'transfers', 'mra'];
+    const visibleTabs = isCashierInventoryViewer
+      ? ['inventory', 'transfers']
+      : SHOW_WASTE_TAB
+        ? ['inventory', 'purchases', 'transfers', 'waste', 'mra']
+        : ['inventory', 'purchases', 'transfers', 'mra'];
 
     if (tabParam && visibleTabs.includes(tabParam)) {
       setActiveTab(tabParam);
     } else if (!SHOW_WASTE_TAB && tabParam === 'waste') {
       setActiveTab('inventory');
+    } else if (!visibleTabs.includes(activeTab)) {
+      setActiveTab('inventory');
     }
-  }, [activeBranchId, searchParams]);
+  }, [activeBranchId, activeTab, isCashierInventoryViewer, searchParams]);
 
   useEffect(() => {
     if (searchParams.get('reconcile') !== '1') {
       return;
     }
-    if (activeBranchId && isWarehouseBranchId(activeBranchId)) {
+    if (isCashierInventoryViewer || (activeBranchId && isWarehouseBranchId(activeBranchId))) {
       return;
     }
 
@@ -820,7 +827,7 @@ export default function InventoryPage() {
         console.warn('[InventoryPage] Failed to refresh MRA stock reconciliation defaults:', error);
         showReconciliationToast(storedWarnings);
       });
-  }, [activeBranchId, searchParams]);
+  }, [activeBranchId, isCashierInventoryViewer, searchParams]);
 
   // Read modal parameter from URL
   useEffect(() => {
@@ -833,16 +840,21 @@ export default function InventoryPage() {
     }
 
     const modalParam = searchParams.get('modal');
-    if (modalParam === 'receive') {
-      setReceiveStockOpen(true);
-    } else if (modalParam === 'transfer') {
+    if (modalParam === 'transfer') {
       setTransferStockOpen(true);
+    } else if (!canManageInventory) {
+      setAddFormOpen(false);
+      setReceiveStockOpen(false);
+      setWasteModalOpen(false);
+      setImportModalOpen(false);
+    } else if (modalParam === 'receive') {
+      setReceiveStockOpen(true);
     } else if (SHOW_WASTE_TAB && modalParam === 'waste') {
       setWasteModalOpen(true);
     } else if (modalParam === 'add-item') {
       setAddFormOpen(true);
     }
-  }, [searchParams]);
+  }, [canManageInventory, searchParams]);
 
   const handleSyncFromBackend = async () => {
     if (!activeBranchId) return;
@@ -1477,6 +1489,7 @@ export default function InventoryPage() {
   };
   
   const handleFormOpenChange = (open: boolean) => {
+    if (open && !canManageInventory) return;
     setAddFormOpen(open);
     if (!open) {
       setEditingItem(undefined);
@@ -1484,6 +1497,7 @@ export default function InventoryPage() {
   };
 
   const handleEditItem = (item: InventoryItem) => {
+    if (!canManageInventory) return;
     setEditingItem(item);
     setAddFormOpen(true);
   };
@@ -1526,7 +1540,9 @@ export default function InventoryPage() {
 
         if (product) {
           console.log('[InventoryPage] Found product by barcode:', product.name);
-          handleEditItem(product);
+          if (canManageInventory) {
+            handleEditItem(product);
+          }
           toast({
             title: 'Product Found',
             description: `Found: ${product.name}`,
@@ -1542,7 +1558,7 @@ export default function InventoryPage() {
     return () => {
       window.removeEventListener('keydown', handleBarcodeSearch, false);
     };
-  }, [activeTab, isSearchFocused, activeBranchId, searchTerm, isWarehouseSelected]);
+  }, [activeTab, isSearchFocused, activeBranchId, searchTerm, isWarehouseSelected, canManageInventory]);
   
   if (authLoading || !activeBranchId) {
     return (
@@ -1586,28 +1602,32 @@ export default function InventoryPage() {
                             Current Stock
                             <span className="ml-1 text-xs text-muted-foreground">{inventoryCountLabel}</span>
                         </TabsTrigger>
-                        <TabsTrigger value="purchases" className="whitespace-nowrap">
-                            <History className="mr-2 h-4 w-4" />
-                            Purchase History
-                            <span className="ml-1 text-xs text-muted-foreground">{purchaseCountLabel}</span>
-                        </TabsTrigger>
+                        {canManageInventory && (
+                            <TabsTrigger value="purchases" className="whitespace-nowrap">
+                                <History className="mr-2 h-4 w-4" />
+                                Purchase History
+                                <span className="ml-1 text-xs text-muted-foreground">{purchaseCountLabel}</span>
+                            </TabsTrigger>
+                        )}
                         <TabsTrigger value="transfers" className="whitespace-nowrap">
                             <Repeat className="mr-2 h-4 w-4" />
                             Transfers
                             <span className="ml-1 text-xs text-muted-foreground">{transferCountLabel}</span>
                         </TabsTrigger>
-                        {SHOW_WASTE_TAB && (
+                        {canManageInventory && SHOW_WASTE_TAB && (
                             <TabsTrigger value="waste" className="whitespace-nowrap">
                                 <Trash className="mr-2 h-4 w-4" />
                                 Waste Log
                                 <span className="ml-1 text-xs text-muted-foreground">{wasteCountLabel}</span>
                             </TabsTrigger>
                         )}
-                        <TabsTrigger value="mra" className="whitespace-nowrap">
-                            <Package className="mr-2 h-4 w-4" />
-                            MRA Mappings
-                            <span className="ml-1 text-xs text-muted-foreground">{mraCountLabel}</span>
-                        </TabsTrigger>
+                        {canManageInventory && (
+                            <TabsTrigger value="mra" className="whitespace-nowrap">
+                                <Package className="mr-2 h-4 w-4" />
+                                MRA Mappings
+                                <span className="ml-1 text-xs text-muted-foreground">{mraCountLabel}</span>
+                            </TabsTrigger>
+                        )}
                         </>
                         )}
                     </TabsList>
@@ -1662,13 +1682,15 @@ export default function InventoryPage() {
                     isMobile={isMobile}
                     currentBusinessType={currentBusinessType}
                     searchTerm={searchTerm}
-                    onAddItem={() => setAddFormOpen(true)}
+                    onAddItem={() => canManageInventory && setAddFormOpen(true)}
                     onEditItem={handleEditItem}
-                    onImport={() => setImportModalOpen(true)}
-                    onTransfer={() => setTransferStockOpen(true)}
+                    onImport={() => canManageInventory && setImportModalOpen(true)}
+                    onTransfer={() => canTransferInventory && setTransferStockOpen(true)}
+                    readOnly={!canManageInventory}
                 />
                 )}
             </TabsContent>
+            {canManageInventory && (
             <TabsContent value="purchases">
                 <PurchasesTab 
                     purchaseHistoryData={purchaseHistoryData}
@@ -1689,6 +1711,7 @@ export default function InventoryPage() {
                     currency={businessCurrency}
                 />
             </TabsContent>
+            )}
             <TabsContent value="transfers">
                 <TransfersTab
                     stockTransfersData={stockTransfersData}
@@ -1698,7 +1721,7 @@ export default function InventoryPage() {
                     branchId={activeBranchId}
                 />
             </TabsContent>
-            {SHOW_WASTE_TAB && (
+            {canManageInventory && SHOW_WASTE_TAB && (
                 <TabsContent value="waste">
                      <WasteTab
                         wasteLogData={wasteLogData}
@@ -1709,6 +1732,7 @@ export default function InventoryPage() {
                      />
                 </TabsContent>
             )}
+            {canManageInventory && (
             <TabsContent value="mra">
                 <MRAMappingsTab
                     inventoryData={inventoryData}
@@ -1719,11 +1743,13 @@ export default function InventoryPage() {
                     isEisEnabled={isEisEnabled}
                 />
             </TabsContent>
+            )}
         </Tabs>
       </Card>
     </div>
 
     {/* Modals and Dialogs */}
+    {canManageInventory && (
     <Dialog open={isAddFormOpen} onOpenChange={handleFormOpenChange}>
         <DialogContent className="sm:max-w-2xl max-h-[90vh] flex flex-col">
         <DialogHeader className="sticky top-0 bg-background z-10 pt-6">
@@ -1744,6 +1770,8 @@ export default function InventoryPage() {
         </div>
         </DialogContent>
     </Dialog>
+    )}
+     {canManageInventory && (
      <Dialog
         open={isReceiveStockOpen}
         onOpenChange={(open) => {
@@ -1785,6 +1813,7 @@ export default function InventoryPage() {
         </div>
         </DialogContent>
     </Dialog>
+     )}
     <Dialog open={isTransferStockOpen} onOpenChange={setTransferStockOpen}>
         <DialogContent className="sm:max-w-md">
             <DialogHeader>
@@ -1801,7 +1830,7 @@ export default function InventoryPage() {
             />
         </DialogContent>
     </Dialog>
-    {SHOW_WASTE_TAB && (
+    {canManageInventory && SHOW_WASTE_TAB && (
         <Dialog open={isWasteModalOpen} onOpenChange={setWasteModalOpen}>
             <DialogContent>
                 <DialogHeader>
@@ -1816,6 +1845,7 @@ export default function InventoryPage() {
             </DialogContent>
         </Dialog>
     )}
+    {canManageInventory && (
     <ImportModal
       isOpen={isImportModalOpen}
       onOpenChange={setImportModalOpen}
@@ -1823,6 +1853,7 @@ export default function InventoryPage() {
       branches={branches}
       businessType={currentBusinessType}
     />
+    )}
     <AlertDialog open={isRestoreInclusiveCostsOpen} onOpenChange={setIsRestoreInclusiveCostsOpen}>
       <AlertDialogContent>
         <AlertDialogHeader>

@@ -116,6 +116,11 @@ export const hydrateSessionSnapshotFromDesktopStore = async (): Promise<boolean>
     return false;
   }
 
+  const initialValues = new Map<string, string | null>();
+  SESSION_SNAPSHOT_KEYS.forEach((key) => {
+    initialValues.set(key, localStorage.getItem(key));
+  });
+
   try {
     const invoke = await getDesktopInvoke();
     if (!invoke) {
@@ -133,7 +138,23 @@ export const hydrateSessionSnapshotFromDesktopStore = async (): Promise<boolean>
         return;
       }
 
-      if (localStorage.getItem(key) === value) {
+      const shouldTrackKey =
+        (SESSION_SNAPSHOT_KEYS as readonly string[]).includes(key) ||
+        SESSION_SNAPSHOT_PREFIXES.some((prefix) => key.startsWith(prefix));
+      if (!shouldTrackKey) {
+        return;
+      }
+
+      const initialValue = initialValues.has(key) ? initialValues.get(key) : localStorage.getItem(key);
+      const currentValue = localStorage.getItem(key);
+
+      // If login or another auth action wrote newer local state while the
+      // native snapshot was loading, never overwrite it with stale app data.
+      if (currentValue !== initialValue) {
+        return;
+      }
+
+      if (currentValue === value) {
         return;
       }
 

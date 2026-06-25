@@ -116,6 +116,9 @@ export const rolePermissions: Record<Staff['role'], Permission[]> = {
     'access_pos',
     'view_sessions',
     'view_kitchen',
+
+    // Inventory
+    'view_inventory',
   ],
   
   Waiter: [

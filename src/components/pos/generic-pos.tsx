@@ -2547,14 +2547,8 @@ const PaymentDialog = ({
             </DialogHeader>
             <div className="space-y-4 py-3 overflow-y-auto flex-1 hide-scrollbar">
                 <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
-                    <div className="flex justify-between text-xs"><span>Net Amount (Before VAT)</span><span>{currencyFormatter(calculatedNetAmount)}</span></div>
+                    <div className="flex justify-between text-xs"><span>Net Amount</span><span>{currencyFormatter(calculatedNetAmount)}</span></div>
                     <div className="flex justify-between text-xs"><span>{calculatedTaxLabel || 'VAT Amount'}</span><span className="text-green-600 font-semibold">{currencyFormatter(calculatedTax)}</span></div>
-                    {taxMethodSummary !== 'N/A' && (
-                        <div className="flex justify-between text-[11px] text-muted-foreground">
-                            <span>Tax Method</span>
-                            <span>{taxMethodSummary}</span>
-                        </div>
-                    )}
                     {taxMethodRateSummary && (
                         <div className="flex justify-between text-[11px] text-muted-foreground">
                             <span>Methods & Rates</span>

@@ -9,6 +9,7 @@ ANDROID_TAURI_CONFIG="$ROOT_DIR/src-tauri/tauri.android.conf.json"
 ANDROID_GEN_DIR="$ROOT_DIR/src-tauri/gen/android"
 ANDROID_MANIFEST_FILE="$ANDROID_GEN_DIR/app/src/main/AndroidManifest.xml"
 ANDROID_ICON_SYNC_SCRIPT="$ROOT_DIR/scripts/sync-tauri-android-icons.sh"
+ANDROID_PRINTER_BRIDGE_PATCH_SCRIPT="$ROOT_DIR/scripts/patch-tauri-android-printer-bridge.sh"
 ANDROID_COMMAND_ALREADY_EXECUTED=0
 
 copy_if_exists() {
@@ -49,6 +50,12 @@ restore_android_signing_artifacts() {
 sync_android_icons() {
   if [[ -f "$ANDROID_ICON_SYNC_SCRIPT" ]]; then
     bash "$ANDROID_ICON_SYNC_SCRIPT"
+  fi
+}
+
+patch_android_printer_bridge() {
+  if [[ -f "$ANDROID_PRINTER_BRIDGE_PATCH_SCRIPT" ]]; then
+    bash "$ANDROID_PRINTER_BRIDGE_PATCH_SCRIPT"
   fi
 }
 
@@ -279,6 +286,7 @@ TAURI_ARGS=("$@")
 ANDROID_SUBCOMMAND="${1:-}"
 recreate_android_project_if_broken "$ANDROID_SUBCOMMAND"
 sync_android_icons
+patch_android_printer_bridge
 
 if [[ "$ANDROID_SUBCOMMAND" =~ ^(build|dev|run)$ ]] && [[ -f "$ANDROID_TAURI_CONFIG" ]] && ! has_tauri_config_arg "${TAURI_ARGS[@]}"; then
   TAURI_ARGS+=(--config "$ANDROID_TAURI_CONFIG")
@@ -292,6 +300,7 @@ else
 
   if [[ "$ANDROID_SUBCOMMAND" == "init" ]]; then
     sync_android_icons
+    patch_android_printer_bridge
   fi
 fi
 

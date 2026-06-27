@@ -600,13 +600,13 @@ export function DashboardHeader({
   return (
     <>
       <header className="tauri-android-safe-top sticky top-0 z-10 w-full border-b bg-background/80 backdrop-blur-sm">
-        <div className="mx-auto flex min-h-16 w-full max-w-[1540px] flex-col items-stretch gap-1 px-3 py-1.5 sm:h-16 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-6 sm:py-3 lg:px-8 2xl:px-10">
-          <div className="order-2 flex min-w-0 flex-1 flex-nowrap items-center gap-2 sm:order-1 sm:gap-4">
+        <div className="mx-auto flex min-h-[4.75rem] w-full max-w-[1540px] flex-col items-stretch gap-1.5 px-3 py-2 sm:h-16 sm:min-h-16 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-6 sm:py-3 lg:px-8 2xl:px-10">
+          <div className="order-2 flex min-h-10 min-w-0 flex-1 flex-nowrap items-center gap-2 sm:order-1 sm:min-h-0 sm:gap-4">
             {children}
           </div>
           
           {/* Sync Status Indicator */}
-          <div className="order-1 flex h-6 w-full shrink-0 items-center justify-end gap-1 border-b border-border/50 pb-1 sm:order-2 sm:h-auto sm:w-auto sm:border-0 sm:pb-0 sm:gap-2">
+          <div className="order-1 flex min-h-6 w-full shrink-0 items-center justify-end gap-1 overflow-visible border-b border-border/50 pb-1 sm:order-2 sm:min-h-0 sm:w-auto sm:border-0 sm:pb-0 sm:gap-2">
           {/* Online/Offline Status */}
           <div className={`flex h-5 items-center gap-1 rounded-md px-1.5 sm:h-auto sm:px-2 sm:py-1 ${isOnline ? 'bg-green-500/10' : 'bg-destructive/10'}`}>
             {isOnline ? (

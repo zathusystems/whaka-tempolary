@@ -614,6 +614,32 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     error: backendReachabilityError,
     checkNow: checkBackendConnectionNow,
   } = useBackendReachability({ intervalMs: 10000 });
+  const [isBackendUnavailableStable, setIsBackendUnavailableStable] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setIsBackendUnavailableStable(false);
+      return;
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setIsBackendUnavailableStable(true);
+      return;
+    }
+
+    if (isBackendReachable) {
+      setIsBackendUnavailableStable(false);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setIsBackendUnavailableStable(true);
+    }, 12000);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [isBackendReachable, isOpen]);
 
   const resolveBranchIntegerId = useCallback((rawBranchId: string): number | null => {
     const branchIdMatch = String(rawBranchId || '').match(/\d+/);
@@ -673,7 +699,10 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     return String(sessionLike?.status || '').trim().toLowerCase() === 'active';
   }, []);
 
-  const isBrowserOffline = useCallback((): boolean => !isBackendReachable, [isBackendReachable]);
+  const isBrowserOffline = useCallback(
+    (): boolean => isBackendUnavailableStable,
+    [isBackendUnavailableStable],
+  );
 
   const isSessionForCurrentBranch = useCallback((sessionLike: any): boolean => {
     return normalizeBranchId(sessionLike?.branchId ?? sessionLike?.branch_id ?? sessionLike?.branch) === normalizeBranchId(branchId);
@@ -2810,7 +2839,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     }
 
     const backendConnectionIssue = getBackendConnectionIssue({
-      isReachable: isBackendReachable,
+      isReachable: !isBackendUnavailableStable,
       error: backendReachabilityError,
     });
 
@@ -2830,7 +2859,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       defaultTaxRate,
       eisEnabled,
       blockSalesIfTaxMappingMissing,
-      isEisInvoiceSubmissionBlocked: !isBackendReachable,
+      isEisInvoiceSubmissionBlocked: isBackendUnavailableStable,
       eisInvoiceSubmissionBlockedMessage: backendConnectionIssue.description,
     };
 
@@ -2852,9 +2881,9 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     }
   };
 
-  const isOfflineAtRender = isBrowserOffline();
+  const isOfflineAtRender = isBackendUnavailableStable;
   const backendConnectionIssue = getBackendConnectionIssue({
-    isReachable: isBackendReachable,
+    isReachable: !isBackendUnavailableStable,
     error: backendReachabilityError,
   });
   const hasActiveBranchSession =

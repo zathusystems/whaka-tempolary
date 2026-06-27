@@ -146,7 +146,24 @@ class SilentPrintService {
       });
 
       console.log('[SilentPrint] Tauri print result:', result);
-      return result === true || result === 'success';
+      if (result === true) {
+        return true;
+      }
+
+      if (typeof result === 'string') {
+        const normalizedResult = result.trim().toLowerCase();
+        if (
+          normalizedResult === 'success' ||
+          normalizedResult.startsWith('printed to ') ||
+          normalizedResult.startsWith('printed.')
+        ) {
+          return true;
+        }
+
+        console.warn('[SilentPrint] Tauri print reported failure:', result);
+      }
+
+      return false;
     } catch (error) {
       console.error('[SilentPrint] Tauri print error:', error);
       return false;

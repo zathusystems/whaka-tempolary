@@ -972,7 +972,10 @@ const PaymentDialog = ({
     const [unmappedProducts, setUnmappedProducts] = useState<string[]>([]);
     const [isProcessingPayment, setIsProcessingPayment] = useState(false);
     const [mraPingStatus, setMraPingStatus] = useState<CachedMraPingStatus | null>(null);
-    const { isReachable: isBrowserOnline } = useBackendReachability({ intervalMs: 10000 });
+    const { isReachable: rawBrowserOnline } = useBackendReachability({ intervalMs: 10000 });
+    const [isBrowserOnline, setIsBrowserOnline] = useState(
+        () => (typeof navigator === 'undefined' ? true : navigator.onLine !== false)
+    );
     const shouldUseEisTaxMappings = Boolean(eisEnabled);
     const shouldEnforceTaxMapping = shouldUseEisTaxMappings && blockSalesIfTaxMappingMissing === true;
     const defaultTaxRateDecimal = defaultTaxRate ? defaultTaxRate.rate / 100 : 0;
@@ -987,6 +990,26 @@ const PaymentDialog = ({
     const mappingRefreshAttemptedRef = useRef(false);
     const mappingItemFetchAttemptedRef = useRef(false);
     const businessIdForMraStatus = useMemo(() => resolveOfflineBusinessId(), []);
+
+    useEffect(() => {
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+            setIsBrowserOnline(false);
+            return;
+        }
+
+        if (rawBrowserOnline) {
+            setIsBrowserOnline(true);
+            return;
+        }
+
+        const timeoutId = window.setTimeout(() => {
+            setIsBrowserOnline(false);
+        }, 12000);
+
+        return () => {
+            window.clearTimeout(timeoutId);
+        };
+    }, [rawBrowserOnline]);
 
     useEffect(() => {
         if (!shouldUseEisTaxMappings || !businessIdForMraStatus || !normalizedActiveBranchId) {

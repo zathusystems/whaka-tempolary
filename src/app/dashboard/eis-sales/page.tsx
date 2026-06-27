@@ -825,15 +825,15 @@ export default function EisSalesAuditPage() {
               MRA Receipt Lookup
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-5xl">
-            <DialogHeader>
+          <DialogContent className="max-h-[88vh] w-[calc(100vw-1rem)] max-w-[calc(100vw-1rem)] overflow-y-auto p-4 sm:max-w-5xl sm:p-6">
+            <DialogHeader className="space-y-2 text-left">
               <DialogTitle>MRA Receipt Lookup</DialogTitle>
-              <DialogDescription>
+              <DialogDescription className="text-sm leading-snug">
                 Fetch official receipts and cancelled receipt requests directly from MRA for certification checks.
               </DialogDescription>
             </DialogHeader>
-            <div className="grid gap-4 xl:grid-cols-2">
-              <div className="space-y-3 rounded-md border p-3">
+            <div className="grid min-w-0 gap-4 xl:grid-cols-2">
+              <div className="min-w-0 space-y-3 rounded-md border p-3">
                 <div>
                   <p className="text-sm font-medium">Receipt by invoice number</p>
                   <p className="text-xs text-muted-foreground">Uses MRA get-invoice-by-number.</p>
@@ -843,22 +843,22 @@ export default function EisSalesAuditPage() {
                     value={invoiceLookupNumber}
                     onChange={(event) => setInvoiceLookupNumber(event.target.value)}
                     placeholder="Fiscal invoice number"
-                    className="font-mono"
+                    className="min-w-0 font-mono"
                   />
-                  <Button onClick={onLookupInvoice} disabled={!terminal?.id || isLookingUpInvoice} className="shrink-0">
+                  <Button onClick={onLookupInvoice} disabled={!terminal?.id || isLookingUpInvoice} className="w-full shrink-0 sm:w-auto">
                     {isLookingUpInvoice ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Search className="mr-2 h-4 w-4" />}
                     Lookup
                   </Button>
                 </div>
                 {invoiceLookupResult && (
-                  <div className="rounded-md bg-muted/30 p-3 text-xs">
+                  <div className="min-w-0 rounded-md bg-muted/30 p-3 text-xs">
                     <div className="mb-2 flex flex-wrap items-center gap-2">
                       <Badge variant={invoiceLookupResult.error || formatReconciliationValue(invoiceLookupResult.errors) ? 'destructive' : invoiceLookupResult.found ? 'default' : 'outline'}>
                         {invoiceLookupResult.error ? 'Error' : invoiceLookupResult.found ? 'Found' : 'Checked'}
                       </Badge>
-                      <span className="font-mono">{invoiceLookupResult.invoice_number || invoiceLookupNumber || 'N/A'}</span>
+                      <span className="min-w-0 break-all font-mono">{invoiceLookupResult.invoice_number || invoiceLookupNumber || 'N/A'}</span>
                       {invoiceLookupResult.validation_url && (
-                        <a href={invoiceLookupResult.validation_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-primary underline-offset-4 hover:underline">
+                        <a href={invoiceLookupResult.validation_url} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1 break-all font-medium text-primary underline-offset-4 hover:underline">
                           Validation URL <ExternalLink className="h-3 w-3" />
                         </a>
                       )}
@@ -869,7 +869,7 @@ export default function EisSalesAuditPage() {
                       </p>
                     )}
                     {Object.keys(getLookupReceiptInner(invoiceLookupResult)).length > 0 && (
-                      <pre className="max-h-56 overflow-auto rounded bg-background p-2 text-[11px] leading-snug">
+                      <pre className="max-h-56 max-w-full overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 text-[11px] leading-snug">
                         {safeJsonPreview(getLookupReceiptInner(invoiceLookupResult))}
                       </pre>
                     )}
@@ -877,17 +877,17 @@ export default function EisSalesAuditPage() {
                 )}
               </div>
 
-              <div className="space-y-3 rounded-md border p-3">
+              <div className="min-w-0 space-y-3 rounded-md border p-3">
                 <div>
                   <p className="text-sm font-medium">Cancelled receipts</p>
                   <p className="text-xs text-muted-foreground">Uses MRA get-void-receipts.</p>
                 </div>
-                <div className="grid gap-2 sm:grid-cols-2">
+                <div className="grid min-w-0 gap-2 sm:grid-cols-2">
                   <Input
                     value={voidReceiptInvoiceNumber}
                     onChange={(event) => setVoidReceiptInvoiceNumber(event.target.value)}
                     placeholder="Invoice number optional"
-                    className="font-mono"
+                    className="min-w-0 font-mono"
                   />
                   <Input
                     value={voidReceiptStatusCode}
@@ -900,10 +900,10 @@ export default function EisSalesAuditPage() {
                 </div>
                 <Button variant="outline" onClick={onFetchVoidReceipts} disabled={!terminal?.id || isLoadingVoidReceipts} className="w-full sm:w-auto">
                   {isLoadingVoidReceipts ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-                  Fetch Cancelled Receipts
+                  <span className="truncate">Fetch Cancelled Receipts</span>
                 </Button>
                 {voidReceiptResult && (
-                  <div className="rounded-md bg-muted/30 p-3 text-xs">
+                  <div className="min-w-0 rounded-md bg-muted/30 p-3 text-xs">
                     <div className="mb-2 flex flex-wrap items-center gap-2">
                       <Badge variant={voidReceiptResult.error || formatReconciliationValue(voidReceiptResult.errors) ? 'destructive' : 'default'}>
                         {voidReceiptResult.error ? 'Error' : `${voidReceiptResult.items?.length ?? 0} returned`}
@@ -917,11 +917,11 @@ export default function EisSalesAuditPage() {
                       </p>
                     )}
                     {Boolean(voidReceiptResult.items?.length) ? (
-                      <div className="max-h-56 space-y-2 overflow-auto">
+                      <div className="max-h-56 max-w-full space-y-2 overflow-auto">
                         {(voidReceiptResult.items || []).map((item, index) => (
                           <div key={`${getVoidReceiptNumber(item) || 'void'}-${index}`} className="rounded border bg-background p-2">
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <span className="break-all font-mono">{getVoidReceiptNumber(item) || 'N/A'}</span>
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                              <span className="min-w-0 break-all font-mono">{getVoidReceiptNumber(item) || 'N/A'}</span>
                               <Badge variant="outline">{toTrimmedString(item?.status ?? item?.approvalStatus ?? item?.approval_status) || 'Status N/A'}</Badge>
                             </div>
                             <div className="mt-1 grid gap-1 text-muted-foreground sm:grid-cols-2">

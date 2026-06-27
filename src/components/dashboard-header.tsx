@@ -600,23 +600,23 @@ export function DashboardHeader({
   return (
     <>
       <header className="tauri-android-safe-top sticky top-0 z-10 w-full border-b bg-background/80 backdrop-blur-sm">
-        <div className="mx-auto flex h-16 w-full max-w-[1540px] items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8 2xl:px-10">
-          <div className="flex min-w-0 flex-1 items-center gap-4">
+        <div className="mx-auto flex min-h-16 w-full max-w-[1540px] flex-col items-stretch gap-1 px-3 py-1.5 sm:h-16 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-6 sm:py-3 lg:px-8 2xl:px-10">
+          <div className="order-2 flex min-w-0 flex-1 flex-nowrap items-center gap-2 sm:order-1 sm:gap-4">
             {children}
           </div>
           
           {/* Sync Status Indicator */}
-          <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+          <div className="order-1 flex h-6 w-full shrink-0 items-center justify-end gap-1 border-b border-border/50 pb-1 sm:order-2 sm:h-auto sm:w-auto sm:border-0 sm:pb-0 sm:gap-2">
           {/* Online/Offline Status */}
-          <div className={`flex items-center gap-1 px-2 py-1 rounded-md ${isOnline ? 'bg-green-500/10' : 'bg-destructive/10'}`}>
+          <div className={`flex h-5 items-center gap-1 rounded-md px-1.5 sm:h-auto sm:px-2 sm:py-1 ${isOnline ? 'bg-green-500/10' : 'bg-destructive/10'}`}>
             {isOnline ? (
               <>
-                <Cloud className="h-4 w-4 text-green-600" />
+                <Cloud className="h-3.5 w-3.5 text-green-600 sm:h-4 sm:w-4" />
                 <span className="hidden text-xs font-medium text-green-600 sm:inline">Online</span>
               </>
             ) : (
               <>
-                <CloudOff className="h-4 w-4 text-destructive" />
+                <CloudOff className="h-3.5 w-3.5 text-destructive sm:h-4 sm:w-4" />
                 <span className="hidden text-xs font-medium text-destructive sm:inline">Offline</span>
               </>
             )}
@@ -627,7 +627,7 @@ export function DashboardHeader({
               type="button"
               variant="ghost"
               size="sm"
-              className={`h-7 gap-1 rounded-md px-2 text-xs ${
+              className={`h-5 gap-1 rounded-md px-1.5 text-xs sm:h-7 sm:px-2 ${
                 isCheckingMraPing
                   ? 'bg-muted text-muted-foreground'
                   : mraPingStatus.isOnline
@@ -640,11 +640,11 @@ export function DashboardHeader({
               disabled={isCheckingMraPing}
             >
               {isCheckingMraPing ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-3.5 w-3.5 animate-spin sm:h-4 sm:w-4" />
               ) : mraPingStatus.isOnline ? (
-                <Radio className="h-4 w-4" />
+                <Radio className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
               ) : (
-                <CloudOff className="h-4 w-4" />
+                <CloudOff className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
               )}
               <span className="hidden whitespace-nowrap font-medium sm:inline">
                 {isCheckingMraPing ? 'MRA...' : mraPingStatus.isOnline ? 'MRA Online' : 'MRA Offline'}
@@ -656,10 +656,11 @@ export function DashboardHeader({
           {hasFailed && (
             <DropdownMenu open={isDropdownOpen} onOpenChange={setIsDropdownOpen}>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="gap-1 px-2">
-                  <AlertCircle className="h-4 w-4 text-destructive" />
-                  <Badge variant="destructive" className="text-xs">
-                    {failedCount} Failed
+                <Button variant="ghost" size="sm" className="h-5 gap-1 px-1.5 sm:h-8 sm:px-2">
+                  <AlertCircle className="h-3.5 w-3.5 text-destructive sm:h-4 sm:w-4" />
+                  <Badge variant="destructive" className="max-w-[4.75rem] truncate px-1.5 text-xs sm:max-w-none sm:px-2">
+                    <span className="sm:hidden">{failedCount}</span>
+                    <span className="hidden sm:inline">{failedCount} Failed</span>
                   </Badge>
                   <ChevronDown className="h-3 w-3 opacity-50" />
                 </Button>
@@ -741,10 +742,11 @@ export function DashboardHeader({
           {hasPending && !hasFailed && (
             <DropdownMenu open={isDropdownOpen} onOpenChange={setIsDropdownOpen}>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="gap-1 px-2">
-                  <Loader2 className="h-4 w-4 text-yellow-600 animate-spin" />
-                  <Badge variant="outline" className="text-xs">
-                    {pendingCount} Pending
+                <Button variant="ghost" size="sm" className="h-5 gap-1 px-1.5 sm:h-8 sm:px-2">
+                  <Loader2 className="h-3.5 w-3.5 text-yellow-600 animate-spin sm:h-4 sm:w-4" />
+                  <Badge variant="outline" className="max-w-[4.75rem] truncate px-1.5 text-xs sm:max-w-none sm:px-2">
+                    <span className="sm:hidden">{pendingCount}</span>
+                    <span className="hidden sm:inline">{pendingCount} Pending</span>
                   </Badge>
                   <ChevronDown className="h-3 w-3 opacity-50" />
                 </Button>

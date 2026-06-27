@@ -277,6 +277,12 @@ const applyDiscountToCartItem = (cartItem: CartItem, discount: AppliedDiscount |
   };
 };
 
+const triggerCartHapticFeedback = () => {
+  if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+    navigator.vibrate(35);
+  }
+};
+
 const mappingStatusRank = (mapping: any): number => {
   if (!mapping) {
     return -1;
@@ -1818,6 +1824,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         const newCart = [...prevCart];
         const oldQuantity = newCart[existingItemIndex].quantity;
         newCart[existingItemIndex].quantity += quantity;
+        triggerCartHapticFeedback();
         console.log('[POS Modal] Incremented item:', item.name, 'old quantity:', oldQuantity, 'new quantity:', newCart[existingItemIndex].quantity);
         return newCart;
       } else {
@@ -1837,6 +1844,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
           return prevCart;
         }
 
+        triggerCartHapticFeedback();
         return [
           ...prevCart,
           {
@@ -1859,8 +1867,35 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         prevCart.filter((cartItem) => String(cartItem.id || '').trim() !== normalizedItemId)
       );
     } else {
-      setCart((prevCart) =>
-        prevCart.map((cartItem) =>
+      setCart((prevCart) => {
+        const targetItem = prevCart.find((cartItem) => String(cartItem.id || '').trim() === normalizedItemId);
+        if (!targetItem) {
+          return prevCart;
+        }
+
+        if (!targetItem.isProduced) {
+          const targetInventoryItemId = resolveCartInventoryItemId(targetItem);
+          const otherQuantity = prevCart.reduce((total, cartItem) => {
+            if (String(cartItem.id || '').trim() === normalizedItemId) {
+              return total;
+            }
+            return resolveCartInventoryItemId(cartItem) === targetInventoryItemId
+              ? total + toPositiveNumber(cartItem.quantity, 0)
+              : total;
+          }, 0);
+          const maxAllowedQuantity = Math.max(0, toNonNegativeNumber(targetItem.stockUnits, 0) - otherQuantity);
+
+          if (newQuantity > maxAllowedQuantity + 0.0001) {
+            toast({
+              variant: 'destructive',
+              title: 'Insufficient stock',
+              description: `Only ${formatStockQuantity(maxAllowedQuantity)} ${targetItem.unitType || 'units'} available.`,
+            });
+            return prevCart;
+          }
+        }
+
+        return prevCart.map((cartItem) =>
           String(cartItem.id || '').trim() === normalizedItemId
             ? applyDiscountToCartItem(
                 {
@@ -1877,8 +1912,8 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                   : null
               )
             : cartItem
-        )
-      );
+        );
+      });
     }
   };
 

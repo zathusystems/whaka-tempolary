@@ -11,7 +11,6 @@ import {
   DollarSign,
   ShoppingBasket,
   Package,
-  Wallet,
   Smartphone,
   CheckCircle,
   Eye,
@@ -800,6 +799,10 @@ const CartItemView = ({
   const discountAmount = resolveCartDiscountAmount(item);
   const discountedTotal = Math.max(0, total - discountAmount);
   const isVariable = item.isVariablePrice;
+  const hasStockSnapshot = item.stockUnits !== undefined && item.stockUnits !== null;
+  const maxStockQuantity = Math.max(0, toFiniteMoneyNumber(item.stockUnits, 0));
+  const hasQuantityLimit = !item.isProduced && !isVariable && hasStockSnapshot;
+  const hasReachedStockLimit = hasQuantityLimit && item.quantity >= maxStockQuantity - 0.0001;
   const taxRateLabel = taxDetail && Number.isFinite(taxDetail.rate) ? `${taxDetail.rate.toFixed(2)}%` : '0%';
   const taxMethodLabel =
     taxDetail?.method === 'exclusive'
@@ -845,6 +848,8 @@ const CartItemView = ({
             variant="outline"
             className="h-7 w-7"
             onClick={() => onUpdateQuantity(item.id, item.quantity + 1)}
+            disabled={hasReachedStockLimit}
+            title={hasReachedStockLimit ? `${formatInventoryQuantity(maxStockQuantity, { preferWholeNumbers: true })} available` : 'Increase quantity'}
           >
             <Plus className="h-4 w-4" />
           </Button>
@@ -2656,7 +2661,7 @@ const PaymentDialog = ({
                 <div>
                     <h4 className="text-sm font-medium mb-2">Payment Method</h4>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                       <Button size="default" variant={selectedPaymentMethod === 'Cash' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Cash')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><Wallet className="mr-1 h-4 w-4"/>Cash</Button>
+                       <Button size="default" variant={selectedPaymentMethod === 'Cash' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Cash')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><img src="/icon-128x128.png" alt="" className="mr-1 h-4 w-4 object-contain" draggable={false}/>Cash</Button>
                        <Button size="default" variant={selectedPaymentMethod === 'Card' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Card')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><CreditCard className="mr-1 h-4 w-4"/>Card</Button>
                        <Button size="default" variant={selectedPaymentMethod === 'Mobile Money' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Mobile Money')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><Smartphone className="mr-1 h-4 w-4"/>Mobile</Button>
                        <Button size="default" variant={selectedPaymentMethod === 'On Account' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('On Account')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><UserPlus className="mr-1 h-4 w-4"/>Account</Button>
@@ -3259,29 +3264,39 @@ export const GenericPos = ({
             <div 
               key={item.id} 
               className={cn(
-                "flex items-center gap-4 rounded-md border p-2 cursor-pointer hover:bg-muted",
+                "flex cursor-pointer flex-col gap-3 rounded-md border p-3 hover:bg-muted sm:flex-row sm:items-center sm:gap-4 sm:p-2",
                 !canAddToCart && "opacity-50 cursor-not-allowed"
               )} 
               onClick={async () => canAddToCart && await onAddToCart(item)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={async (event) => {
+                if ((event.key === 'Enter' || event.key === ' ') && canAddToCart) {
+                  event.preventDefault();
+                  await onAddToCart(item);
+                }
+              }}
             >
-              <div className="flex h-12 w-12 items-center justify-center rounded-md bg-muted/50">
-                 {productIcon}
+              <div className="flex min-w-0 items-start gap-3 sm:flex-1 sm:items-center">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-muted/50 sm:h-12 sm:w-12">
+                  {productIcon}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-semibold">{item.name}</p>
+                  <p className="truncate text-sm text-muted-foreground">{item.category}</p>
+                  <p className={cn(
+                    "mt-1 text-xs font-medium",
+                    stockTone === 'available'
+                      ? "text-green-600"
+                      : stockTone === 'warning'
+                        ? "text-amber-600"
+                        : "text-red-600"
+                  )}>
+                    {stockInfo}
+                  </p>
+                </div>
               </div>
-              <div className="flex-1">
-                <p className="font-semibold">{item.name}</p>
-                <p className="text-sm text-muted-foreground">{item.category}</p>
-                <p className={cn(
-                  "text-xs mt-1 font-medium",
-                  stockTone === 'available'
-                    ? "text-green-600"
-                    : stockTone === 'warning'
-                      ? "text-amber-600"
-                      : "text-red-600"
-                )}>
-                  {stockInfo}
-                </p>
-              </div>
-              <p className="font-bold text-primary">{formatCurrency(item.price || 0)}</p>
+              <p className="text-right font-bold text-primary sm:w-32">{formatCurrency(item.price || 0)}</p>
             </div>
           );
         })}

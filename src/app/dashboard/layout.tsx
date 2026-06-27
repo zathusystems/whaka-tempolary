@@ -1114,8 +1114,15 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
   return (
     <>
       <DashboardHeader branchId={activeBranchId}>
-        <div className="flex items-center gap-4">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-4">
           <SidebarTrigger className="h-9 w-9 shrink-0" />
+          <Badge
+            variant="secondary"
+            className="max-w-[42vw] truncate px-2 py-1 text-[11px] font-medium lg:hidden"
+            title={activeBranch?.name || (isWarehouseBranchId(activeBranchId) ? 'Warehouse' : 'Select Branch')}
+          >
+            {activeBranch?.name || (isWarehouseBranchId(activeBranchId) ? 'Warehouse' : 'Select Branch')}
+          </Badge>
           <div className="hidden lg:flex items-center gap-2">
             <h1 className="text-xl font-semibold">{businessName}</h1>
             {user.role === 'Admin' ? (
@@ -1184,8 +1191,9 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
           */}
 
           <div className="flex items-center gap-1">
-            <Button size="sm" onClick={() => onPosClick?.()}>
-                <MonitorPlay className="mr-2 h-4 w-4" /> POS
+            <Button size="sm" className="px-2 sm:px-3" onClick={() => onPosClick?.()}>
+                <MonitorPlay className="h-4 w-4 sm:mr-2" />
+                <span className="sr-only sm:not-sr-only">POS</span>
             </Button>
 
             {user.role !== 'Cashier' && (

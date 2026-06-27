@@ -703,7 +703,7 @@ export const Receipt = ({
   const isCopyReceipt = copyNumber > 1;
   const receiptTypeLabel = `COPY${copyNumber > 2 ? ` #${copyNumber}` : ''}`;
 
-  const formatReceiptAmount = (value: unknown): string => toFiniteNumber(value, 0).toFixed(2);
+  const formatReceiptAmount = (value: unknown): string => currencyFormatter(toFiniteNumber(value, 0)).replace(/\s+/g, ' ');
   const formatReceiptQuantity = (value: unknown): string => {
     const parsed = toFiniteNumber(value, 0);
     if (Math.abs(parsed - Math.round(parsed)) < 0.0001) {
@@ -725,7 +725,7 @@ export const Receipt = ({
     return 'A';
   };
   const formatReceiptRate = (value: unknown): string => {
-    const formatted = formatReceiptAmount(value).replace(/0+$/, '').replace(/\.$/, '');
+    const formatted = toFiniteNumber(value, 0).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
     return formatted || '0';
   };
   const receiptNumberDisplay = fiscalInvoiceNumber || orderNumberDisplay;

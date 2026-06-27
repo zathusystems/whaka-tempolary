@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { DollarSign, Users, Percent, Wallet, Copy, Gift, ChevronsRight, CheckCircle, Download, Megaphone, Image as ImageIcon, Loader2 } from 'lucide-react';
+import { DollarSign, Users, Percent, Copy, Gift, ChevronsRight, CheckCircle, Download, Megaphone, Image as ImageIcon, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
 
 import { authFetch } from '@/lib/auth-fetch';
@@ -75,6 +75,10 @@ const KpiCard = ({ title, value, icon: Icon, description }: { title: string, val
             <p className="text-xs text-muted-foreground">{description}</p>
         </CardContent>
     </Card>
+);
+
+const PublicAppIcon = ({ className = '' }: { className?: string }) => (
+    <img src="/icon-128x128.png" alt="" className={`object-contain ${className}`.trim()} draggable={false} />
 );
 
 const MarketingCopyCard = ({ title, content }: { title: string, content: string }) => {
@@ -294,7 +298,7 @@ export default function AffiliatePage() {
                             </div>
                             <div className="space-y-2">
                                 <div className="flex items-center gap-2">
-                                    <Wallet className="h-5 w-5 text-primary" />
+                                    <PublicAppIcon className="h-5 w-5" />
                                     <h3 className="font-semibold">Get Paid</h3>
                                 </div>
                                 <p className="text-sm text-muted-foreground">
@@ -369,7 +373,7 @@ export default function AffiliatePage() {
                 <KpiCard 
                     title="Total Paid" 
                     value={formatCurrency(affiliate.total_paid)} 
-                    icon={Wallet} 
+                    icon={PublicAppIcon} 
                     description="Amount already paid out." 
                 />
             </div>

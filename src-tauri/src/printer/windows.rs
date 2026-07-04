@@ -74,13 +74,11 @@ pub fn print_receipt(
 
     let printer_name = resolve_windows_printer_name(&printer_id)?;
 
-    let line_width = super::receipt_formatter::resolve_line_width(paper_size.as_deref());
-    let printer_line_width =
-        super::receipt_formatter::resolve_line_width(printer_paper_width.as_deref());
-    let horizontal_offset = printer_line_width.saturating_sub(line_width) / 2;
-
-    let escpos_data =
-        super::receipt_formatter::html_to_escpos(&html, line_width, horizontal_offset);
+    let escpos_data = super::receipt_formatter::build_escpos_receipt(
+        &html,
+        paper_size.as_deref(),
+        printer_paper_width.as_deref(),
+    );
 
     for _ in 0..copies {
         print_raw_windows(&printer_name, &escpos_data)?;

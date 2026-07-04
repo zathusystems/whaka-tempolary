@@ -1,10 +1,20 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use jni::objects::{JObject, JString};
+use jni::objects::{JObject, JString, JValue};
 use tauri::{command, WebviewWindow};
 
 const ANDROID_BRIDGE_TIMEOUT: Duration = Duration::from_secs(120);
+const ANDROID_BLUETOOTH_PERMISSION_REQUEST_CODE: i32 = 4107;
+const ANDROID_BLUETOOTH_WRITE_CHUNK_SIZE: usize = 512;
+const ANDROID_BLUETOOTH_WRITE_DELAY_MS: u64 = 50;
+const ANDROID_BLUETOOTH_COPY_DELAY_MS: u64 = 350;
+const BLUETOOTH_SPP_UUID: &str = "00001101-0000-1000-8000-00805F9B34FB";
+const BLUETOOTH_PRINTER_MAJOR_CLASS: i32 = 0x0600;
+const BLUETOOTH_PRINTER_KEYWORDS: &[&str] = &[
+    "printer", "thermal", "receipt", "epson", "star", "sunmi", "xprinter", "bixolon", "rongta",
+    "gprinter", "pos",
+];
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct PrinterInfo {
@@ -67,6 +77,18 @@ fn jni_error_message(
     format!("{context}: {}", fallback_error.to_string())
 }
 
+fn friendly_bluetooth_error(message: String, action: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("bluetooth_connect")
+        || lower.contains("bluetooth_scan")
+        || lower.contains("nearby devices")
+    {
+        return format!("Allow Nearby devices permission and retry {action}.");
+    }
+
+    message
+}
+
 fn read_java_string(
     env: &mut jni::JNIEnv<'_>,
     obj: JObject<'_>,
@@ -79,6 +101,425 @@ fn read_java_string(
     env.get_string(&jstr)
         .map(Into::into)
         .map_err(|error| format!("{context}: {error}"))
+}
+
+fn normalize_bluetooth_address(value: &str) -> String {
+    let trimmed = value.trim();
+    let without_prefix = if trimmed
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bt:"))
+    {
+        &trimmed[3..]
+    } else {
+        trimmed
+    };
+
+    let hex_only: String = without_prefix
+        .chars()
+        .filter(|ch| ch.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_ascii_uppercase();
+
+    if hex_only.len() == 12 {
+        return hex_only
+            .as_bytes()
+            .chunks(2)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(":");
+    }
+
+    without_prefix.replace('-', ":").to_ascii_uppercase()
+}
+
+fn get_android_sdk_int(env: &mut jni::JNIEnv<'_>) -> Result<i32, String> {
+    env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
+        .map_err(|error| format!("Failed to read Android SDK version: {error}"))?
+        .i()
+        .map_err(|error| format!("Invalid Android SDK version response: {error}"))
+}
+
+fn get_required_bluetooth_permissions(sdk_int: i32) -> Vec<&'static str> {
+    if sdk_int >= 31 {
+        vec![
+            "android.permission.BLUETOOTH_CONNECT",
+            "android.permission.BLUETOOTH_SCAN",
+        ]
+    } else {
+        vec![
+            "android.permission.BLUETOOTH",
+            "android.permission.BLUETOOTH_ADMIN",
+            "android.permission.ACCESS_FINE_LOCATION",
+        ]
+    }
+}
+
+fn is_permission_granted(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &JObject<'_>,
+    permission: &str,
+) -> Result<bool, String> {
+    let permission_j = env
+        .new_string(permission)
+        .map_err(|error| format!("Failed to prepare Android permission {permission}: {error}"))?;
+    let granted = env
+        .get_static_field(
+            "android/content/pm/PackageManager",
+            "PERMISSION_GRANTED",
+            "I",
+        )
+        .map_err(|error| format!("Failed to read Android permission state: {error}"))?
+        .i()
+        .map_err(|error| format!("Invalid Android permission state response: {error}"))?;
+    let state = env
+        .call_method(
+            activity,
+            "checkSelfPermission",
+            "(Ljava/lang/String;)I",
+            &[(&permission_j).into()],
+        )
+        .map_err(|error| {
+            jni_error_message(
+                env,
+                &format!("Failed to check {permission} permission"),
+                error,
+            )
+        })?
+        .i()
+        .map_err(|error| format!("Invalid {permission} permission response: {error}"))?;
+
+    Ok(state == granted)
+}
+
+fn request_android_permissions(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &JObject<'_>,
+    permissions: &[&str],
+) -> Result<(), String> {
+    if permissions.is_empty() {
+        return Ok(());
+    }
+
+    let permission_array = env
+        .new_object_array(
+            permissions.len() as i32,
+            "java/lang/String",
+            JObject::null(),
+        )
+        .map_err(|error| format!("Failed to prepare Android permission request: {error}"))?;
+
+    for (index, permission) in permissions.iter().enumerate() {
+        let permission_j = env.new_string(*permission).map_err(|error| {
+            format!("Failed to prepare Android permission {permission}: {error}")
+        })?;
+        env.set_object_array_element(&permission_array, index as i32, &permission_j)
+            .map_err(|error| format!("Failed to queue Android permission {permission}: {error}"))?;
+    }
+
+    env.call_method(
+        activity,
+        "requestPermissions",
+        "([Ljava/lang/String;I)V",
+        &[
+            (&permission_array).into(),
+            JValue::Int(ANDROID_BLUETOOTH_PERMISSION_REQUEST_CODE),
+        ],
+    )
+    .map_err(|error| jni_error_message(env, "Failed to request Bluetooth permissions", error))?;
+
+    Ok(())
+}
+
+fn ensure_bluetooth_permissions(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &JObject<'_>,
+    action: &str,
+) -> Result<(), String> {
+    let sdk_int = get_android_sdk_int(env)?;
+    let required_permissions = get_required_bluetooth_permissions(sdk_int);
+    let mut missing_permissions = Vec::new();
+
+    for permission in required_permissions {
+        if !is_permission_granted(env, activity, permission)? {
+            missing_permissions.push(permission);
+        }
+    }
+
+    if missing_permissions.is_empty() {
+        return Ok(());
+    }
+
+    request_android_permissions(env, activity, &missing_permissions)?;
+
+    Err(format!(
+        "Bluetooth permission requested. Allow Nearby devices permission and retry {action}."
+    ))
+}
+
+fn is_likely_printer_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    BLUETOOTH_PRINTER_KEYWORDS
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+}
+
+fn get_bluetooth_adapter<'local>(env: &mut jni::JNIEnv<'local>) -> Result<JObject<'local>, String> {
+    let adapter = env
+        .call_static_method(
+            "android/bluetooth/BluetoothAdapter",
+            "getDefaultAdapter",
+            "()Landroid/bluetooth/BluetoothAdapter;",
+            &[],
+        )
+        .map_err(|error| jni_error_message(env, "Failed to access Bluetooth adapter", error))?
+        .l()
+        .map_err(|error| format!("Invalid Bluetooth adapter response: {error}"))?;
+
+    if adapter.is_null() {
+        return Err("Bluetooth is not supported on this device.".to_string());
+    }
+
+    Ok(adapter)
+}
+
+fn ensure_bluetooth_enabled(
+    env: &mut jni::JNIEnv<'_>,
+    adapter: &JObject<'_>,
+) -> Result<(), String> {
+    let is_enabled = env
+        .call_method(adapter, "isEnabled", "()Z", &[])
+        .map_err(|error| {
+            friendly_bluetooth_error(
+                jni_error_message(env, "Failed to read Bluetooth state", error),
+                "printer scan",
+            )
+        })?
+        .z()
+        .map_err(|error| format!("Invalid Bluetooth state response: {error}"))?;
+
+    if !is_enabled {
+        return Err("Bluetooth is turned off. Turn it on and retry printer scan.".to_string());
+    }
+
+    Ok(())
+}
+
+fn is_likely_printer_device(
+    env: &mut jni::JNIEnv<'_>,
+    device: &JObject<'_>,
+    name: &str,
+) -> Result<bool, String> {
+    if is_likely_printer_name(name) {
+        return Ok(true);
+    }
+
+    let bluetooth_class = env
+        .call_method(
+            device,
+            "getBluetoothClass",
+            "()Landroid/bluetooth/BluetoothClass;",
+            &[],
+        )
+        .map_err(|error| jni_error_message(env, "Failed to inspect Bluetooth device class", error))?
+        .l()
+        .map_err(|error| format!("Invalid Bluetooth class response: {error}"))?;
+
+    if bluetooth_class.is_null() {
+        return Ok(false);
+    }
+
+    let major_class = env
+        .call_method(&bluetooth_class, "getMajorDeviceClass", "()I", &[])
+        .map_err(|error| {
+            jni_error_message(env, "Failed to inspect Bluetooth major device class", error)
+        })?
+        .i()
+        .map_err(|error| format!("Invalid Bluetooth major class response: {error}"))?;
+
+    Ok(major_class == BLUETOOTH_PRINTER_MAJOR_CLASS)
+}
+
+fn close_java_resource(env: &mut jni::JNIEnv<'_>, object: &JObject<'_>) {
+    if object.is_null() {
+        return;
+    }
+
+    let _ = env.call_method(object, "close", "()V", &[]);
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+}
+
+fn create_bluetooth_socket<'local>(
+    env: &mut jni::JNIEnv<'local>,
+    device: &JObject<'local>,
+    uuid: &JObject<'local>,
+    insecure: bool,
+) -> Result<JObject<'local>, String> {
+    let method_name = if insecure {
+        "createInsecureRfcommSocketToServiceRecord"
+    } else {
+        "createRfcommSocketToServiceRecord"
+    };
+
+    env.call_method(
+        device,
+        method_name,
+        "(Ljava/util/UUID;)Landroid/bluetooth/BluetoothSocket;",
+        &[uuid.into()],
+    )
+    .map_err(|error| jni_error_message(env, "Failed to create Bluetooth socket", error))?
+    .l()
+    .map_err(|error| format!("Invalid Bluetooth socket response: {error}"))
+}
+
+fn write_escpos_to_socket(
+    env: &mut jni::JNIEnv<'_>,
+    socket: &JObject<'_>,
+    payload: &jni::objects::JByteArray<'_>,
+    payload_len: usize,
+    copies: i32,
+) -> Result<(), String> {
+    env.call_method(socket, "connect", "()V", &[])
+        .map_err(|error| jni_error_message(env, "Failed to connect to Bluetooth printer", error))?;
+
+    let output_stream = env
+        .call_method(socket, "getOutputStream", "()Ljava/io/OutputStream;", &[])
+        .map_err(|error| {
+            jni_error_message(env, "Failed to access Bluetooth printer stream", error)
+        })?
+        .l()
+        .map_err(|error| format!("Invalid Bluetooth output stream response: {error}"))?;
+
+    let write_result = (|| {
+        for copy_index in 0..copies.max(1) {
+            let mut offset = 0usize;
+            while offset < payload_len {
+                let chunk_len =
+                    ANDROID_BLUETOOTH_WRITE_CHUNK_SIZE.min(payload_len.saturating_sub(offset));
+
+                env.call_method(
+                    &output_stream,
+                    "write",
+                    "([BII)V",
+                    &[
+                        payload.into(),
+                        JValue::Int(offset as i32),
+                        JValue::Int(chunk_len as i32),
+                    ],
+                )
+                .map_err(|error| {
+                    jni_error_message(env, "Failed to write receipt to Bluetooth printer", error)
+                })?;
+                env.call_method(&output_stream, "flush", "()V", &[])
+                    .map_err(|error| {
+                        jni_error_message(env, "Failed to flush Bluetooth printer output", error)
+                    })?;
+
+                offset += chunk_len;
+                if offset < payload_len {
+                    std::thread::sleep(Duration::from_millis(ANDROID_BLUETOOTH_WRITE_DELAY_MS));
+                }
+            }
+
+            if copy_index < copies.max(1) - 1 {
+                std::thread::sleep(Duration::from_millis(ANDROID_BLUETOOTH_COPY_DELAY_MS));
+            }
+        }
+
+        Ok(())
+    })();
+
+    close_java_resource(env, &output_stream);
+    write_result
+}
+
+fn print_to_bluetooth_printer(
+    env: &mut jni::JNIEnv<'_>,
+    printer_id: &str,
+    escpos_data: &[u8],
+    copies: i32,
+) -> Result<(), String> {
+    let adapter = get_bluetooth_adapter(env)?;
+    ensure_bluetooth_enabled(env, &adapter)?;
+
+    let normalized_address = normalize_bluetooth_address(printer_id);
+    if normalized_address.is_empty() {
+        return Err("Bluetooth printer address is empty.".to_string());
+    }
+
+    let address_j = env
+        .new_string(normalized_address.clone())
+        .map_err(|error| format!("Failed to prepare Bluetooth printer address: {error}"))?;
+    let device = env
+        .call_method(
+            &adapter,
+            "getRemoteDevice",
+            "(Ljava/lang/String;)Landroid/bluetooth/BluetoothDevice;",
+            &[(&address_j).into()],
+        )
+        .map_err(|error| {
+            friendly_bluetooth_error(
+                jni_error_message(env, "Failed to resolve Bluetooth printer", error),
+                "printing",
+            )
+        })?
+        .l()
+        .map_err(|error| format!("Invalid Bluetooth printer response: {error}"))?;
+
+    if device.is_null() {
+        return Err(format!(
+            "Bluetooth printer {normalized_address} could not be resolved."
+        ));
+    }
+
+    let uuid_j = env
+        .new_string(BLUETOOTH_SPP_UUID)
+        .map_err(|error| format!("Failed to prepare Bluetooth printer UUID: {error}"))?;
+    let uuid = env
+        .call_static_method(
+            "java/util/UUID",
+            "fromString",
+            "(Ljava/lang/String;)Ljava/util/UUID;",
+            &[(&uuid_j).into()],
+        )
+        .map_err(|error| jni_error_message(env, "Failed to prepare Bluetooth printer UUID", error))?
+        .l()
+        .map_err(|error| format!("Invalid Bluetooth UUID response: {error}"))?;
+
+    let _ = env.call_method(&adapter, "cancelDiscovery", "()Z", &[]);
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+
+    let payload = env
+        .byte_array_from_slice(escpos_data)
+        .map_err(|error| format!("Failed to prepare ESC/POS payload: {error}"))?;
+    let payload_len = escpos_data.len();
+
+    let mut last_error: Option<String> = None;
+
+    for insecure in [false, true] {
+        let socket = match create_bluetooth_socket(env, &device, &uuid, insecure) {
+            Ok(socket) => socket,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+
+        let print_result = write_escpos_to_socket(env, &socket, &payload, payload_len, copies);
+        close_java_resource(env, &socket);
+
+        match print_result {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "Bluetooth print failed.".to_string()))
 }
 
 fn run_with_android_context<T, F>(window: WebviewWindow, operation: F) -> Result<T, String>
@@ -106,25 +547,120 @@ where
 #[command]
 pub fn get_printers(window: WebviewWindow) -> Result<Vec<PrinterInfo>, String> {
     run_with_android_context(window, |env, activity, _| {
-        let result = env
-            .call_method(
-                activity,
-                "getBluetoothPrintersJson",
-                "()Ljava/lang/String;",
-                &[],
-            )
-            .map_err(|error| jni_error_message(env, "Failed to query Bluetooth printers", error))?;
+        ensure_bluetooth_permissions(env, activity, "printer scan")
+            .map_err(|error| friendly_bluetooth_error(error, "printer scan"))?;
 
-        let json = read_java_string(
-            env,
-            result
+        let adapter = get_bluetooth_adapter(env)?;
+        ensure_bluetooth_enabled(env, &adapter)?;
+
+        let bonded_devices = env
+            .call_method(&adapter, "getBondedDevices", "()Ljava/util/Set;", &[])
+            .map_err(|error| {
+                friendly_bluetooth_error(
+                    jni_error_message(env, "Failed to query paired Bluetooth devices", error),
+                    "printer scan",
+                )
+            })?
+            .l()
+            .map_err(|error| format!("Invalid paired Bluetooth device response: {error}"))?;
+
+        if bonded_devices.is_null() {
+            return Ok(Vec::new());
+        }
+
+        let iterator = env
+            .call_method(&bonded_devices, "iterator", "()Ljava/util/Iterator;", &[])
+            .map_err(|error| jni_error_message(env, "Failed to iterate Bluetooth devices", error))?
+            .l()
+            .map_err(|error| format!("Invalid Bluetooth iterator response: {error}"))?;
+
+        let mut printers = Vec::new();
+
+        loop {
+            let has_next = env
+                .call_method(&iterator, "hasNext", "()Z", &[])
+                .map_err(|error| {
+                    jni_error_message(env, "Failed to inspect Bluetooth device iterator", error)
+                })?
+                .z()
+                .map_err(|error| format!("Invalid Bluetooth iterator state: {error}"))?;
+
+            if !has_next {
+                break;
+            }
+
+            let device = env
+                .call_method(&iterator, "next", "()Ljava/lang/Object;", &[])
+                .map_err(|error| jni_error_message(env, "Failed to read Bluetooth device", error))?
                 .l()
-                .map_err(|error| format!("Invalid discovery response: {error}"))?,
-            "Failed to read Bluetooth discovery response",
-        )?;
+                .map_err(|error| format!("Invalid Bluetooth device response: {error}"))?;
 
-        serde_json::from_str::<Vec<PrinterInfo>>(&json)
-            .map_err(|error| format!("Failed to parse Bluetooth printer list: {error}"))
+            if device.is_null() {
+                continue;
+            }
+
+            let name = env
+                .call_method(&device, "getName", "()Ljava/lang/String;", &[])
+                .map_err(|error| {
+                    friendly_bluetooth_error(
+                        jni_error_message(env, "Failed to read Bluetooth device name", error),
+                        "printer scan",
+                    )
+                })
+                .and_then(|value| {
+                    read_java_string(
+                        env,
+                        value
+                            .l()
+                            .map_err(|error| format!("Invalid Bluetooth device name: {error}"))?,
+                        "Failed to read Bluetooth device name",
+                    )
+                })?;
+
+            if !is_likely_printer_device(env, &device, &name)? {
+                continue;
+            }
+
+            let address = env
+                .call_method(&device, "getAddress", "()Ljava/lang/String;", &[])
+                .map_err(|error| {
+                    friendly_bluetooth_error(
+                        jni_error_message(env, "Failed to read Bluetooth device address", error),
+                        "printer scan",
+                    )
+                })
+                .and_then(|value| {
+                    read_java_string(
+                        env,
+                        value.l().map_err(|error| {
+                            format!("Invalid Bluetooth device address response: {error}")
+                        })?,
+                        "Failed to read Bluetooth device address",
+                    )
+                })?;
+
+            let normalized_address = normalize_bluetooth_address(&address);
+            if normalized_address.is_empty() {
+                continue;
+            }
+
+            let display_name = if name.trim().is_empty() {
+                format!("Bluetooth Printer {normalized_address}")
+            } else {
+                name.trim().to_string()
+            };
+
+            printers.push(PrinterInfo {
+                id: format!("bt:{normalized_address}"),
+                name: display_name,
+                r#type: "bluetooth_thermal".to_string(),
+                status: "ready".to_string(),
+                is_default: printers.is_empty(),
+                description: Some("Paired Bluetooth printer".to_string()),
+            });
+        }
+
+        Ok(printers)
     })
 }
 
@@ -138,80 +674,35 @@ pub fn print_receipt(
     printer_paper_width: Option<String>,
 ) -> Result<String, String> {
     run_with_android_context(window, move |env, activity, _| {
-        let printer_id_j = env
-            .new_string(printer_id)
-            .map_err(|error| format!("Failed to prepare printer identifier: {error}"))?;
-        let resolved_paper_width = printer_paper_width
-            .or(paper_size)
-            .unwrap_or_else(|| "80mm".to_string());
-        let line_width =
-            super::receipt_formatter::resolve_line_width(Some(resolved_paper_width.as_str()));
-        let escpos_data = super::receipt_formatter::html_to_escpos(&html, line_width, 0);
-        let escpos_payload_j = env
-            .byte_array_from_slice(&escpos_data)
-            .map_err(|error| format!("Failed to prepare ESC/POS payload: {error}"))?;
-        let paper_width_j = env
-            .new_string(resolved_paper_width)
-            .map_err(|error| format!("Failed to prepare paper width: {error}"))?;
+        ensure_bluetooth_permissions(env, activity, "printing")
+            .map_err(|error| friendly_bluetooth_error(error, "printing"))?;
 
-        let result = env
-            .call_method(
-                activity,
-                "printBluetoothReceiptEscPos",
-                "(Ljava/lang/String;[BILjava/lang/String;)Ljava/lang/String;",
-                &[
-                    (&printer_id_j).into(),
-                    (&escpos_payload_j).into(),
-                    copies.max(1).into(),
-                    (&paper_width_j).into(),
-                ],
-            )
-            .map_err(|error| jni_error_message(env, "Failed to print via Bluetooth", error))?;
+        let escpos_data = super::receipt_formatter::build_escpos_receipt(
+            &html,
+            paper_size.as_deref(),
+            printer_paper_width.as_deref(),
+        );
+        let normalized_printer_id = normalize_bluetooth_address(&printer_id);
 
-        read_java_string(
-            env,
-            result
-                .l()
-                .map_err(|error| format!("Invalid print response: {error}"))?,
-            "Failed to read Bluetooth print response",
-        )
+        print_to_bluetooth_printer(env, &normalized_printer_id, &escpos_data, copies)
+            .map_err(|error| friendly_bluetooth_error(error, "printing"))?;
+
+        Ok("success".to_string())
     })
 }
 
 #[command]
 pub fn open_cash_drawer(window: WebviewWindow, printer_id: String) -> Result<String, String> {
     run_with_android_context(window, move |env, activity, _| {
-        let printer_id_j = env
-            .new_string(printer_id)
-            .map_err(|error| format!("Failed to prepare printer identifier: {error}"))?;
+        ensure_bluetooth_permissions(env, activity, "cash drawer")
+            .map_err(|error| friendly_bluetooth_error(error, "cash drawer"))?;
+
         let drawer_data = super::receipt_formatter::cash_drawer_pulse();
-        let escpos_payload_j = env
-            .byte_array_from_slice(&drawer_data)
-            .map_err(|error| format!("Failed to prepare cash drawer payload: {error}"))?;
-        let paper_width_j = env
-            .new_string("80mm")
-            .map_err(|error| format!("Failed to prepare paper width: {error}"))?;
+        let normalized_printer_id = normalize_bluetooth_address(&printer_id);
 
-        let result = env
-            .call_method(
-                activity,
-                "printBluetoothReceiptEscPos",
-                "(Ljava/lang/String;[BILjava/lang/String;)Ljava/lang/String;",
-                &[
-                    (&printer_id_j).into(),
-                    (&escpos_payload_j).into(),
-                    1.into(),
-                    (&paper_width_j).into(),
-                ],
-            )
-            .map_err(|error| jni_error_message(env, "Failed to open cash drawer", error))?;
+        print_to_bluetooth_printer(env, &normalized_printer_id, &drawer_data, 1)
+            .map_err(|error| friendly_bluetooth_error(error, "cash drawer"))?;
 
-        read_java_string(
-            env,
-            result
-                .l()
-                .map_err(|error| format!("Invalid cash drawer response: {error}"))?,
-            "Failed to read cash drawer response",
-        )
+        Ok("success".to_string())
     })
 }

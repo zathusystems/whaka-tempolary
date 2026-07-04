@@ -559,7 +559,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
     // blocker here. Mapping readiness is enforced through approval/sync checks.
     const explicitReady = mapping.isReadyForSale ?? mapping.is_ready_for_sale;
     if (explicitReady === false) {
-      return `${productName} is not EIS-ready.`;
+      return `${productName} is not ready for sale.`;
     }
 
     return '';
@@ -1156,8 +1156,8 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       } else if (response?.refreshed) {
         setMraProductSyncError(null);
         toast({
-          title: 'New MRA configs downloaded',
-          description: 'Latest EIS taxpayer, terminal, product, and tax settings are now stored locally.',
+          title: 'Settings updated',
+          description: 'Latest product and tax settings are stored locally.',
         });
       }
     } catch (error: any) {
@@ -1228,14 +1228,15 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
 
       const reconciliationWarnings = syncResult.stockReconciliationWarnings || [];
       setMraProductSyncError(null);
-      if (reconciliationWarnings.length > 0) {
+      const shouldShowPurchasePrompt = String(user?.role || '').toLowerCase() !== 'cashier';
+      if (shouldShowPurchasePrompt && reconciliationWarnings.length > 0) {
         const totalMissing = reconciliationWarnings.reduce(
           (sum, item) => sum + Number(item.missingBatchQuantity || 0),
           0
         );
         toast({
-          title: 'EIS stock needs batch details',
-            description: `${reconciliationWarnings.length} product${reconciliationWarnings.length === 1 ? '' : 's'} have EIS stock without matching local batches. Create one or more purchases by supplier to record batch/expiry details for ${formatStockQuantity(totalMissing)} unit${Math.abs(totalMissing - 1) < 0.0001 ? '' : 's'}.`,
+          title: 'Stock needs batch details',
+            description: `${reconciliationWarnings.length} product${reconciliationWarnings.length === 1 ? '' : 's'} need local batch/expiry details for ${formatStockQuantity(totalMissing)} unit${Math.abs(totalMissing - 1) < 0.0001 ? '' : 's'}.`,
           action: (
             <ToastAction
               altText="Create purchases"
@@ -1252,11 +1253,11 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       if (showSuccessToast) {
         const incompatibleCount = Number(pullResponse?.taxpayer_incompatible_count ?? pullResponse?.taxpayerIncompatibleCount ?? 0);
         const incompatibleNote = incompatibleCount > 0
-          ? ` ${incompatibleCount} MRA-approved product${incompatibleCount === 1 ? '' : 's'} are not sale-ready because their MRA tax setup conflicts with this taxpayer.`
+          ? ` ${incompatibleCount} product${incompatibleCount === 1 ? '' : 's'} need tax setup review.`
           : '';
         toast({
-          title: incompatibleCount > 0 ? 'MRA products synced with tax warnings' : 'MRA products synced',
-          description: `${pullResponse?.created ?? 0} created, ${pullResponse?.updated ?? 0} updated from MRA. Local POS refreshed ${syncResult.synced} product${syncResult.synced === 1 ? '' : 's'} and ${syncResult.mraMappingsSynced ?? 0} mapping${syncResult.mraMappingsSynced === 1 ? '' : 's'}.${incompatibleNote}`,
+          title: incompatibleCount > 0 ? 'Products synced with tax warnings' : 'Products synced',
+          description: `${syncResult.synced} product${syncResult.synced === 1 ? '' : 's'} refreshed.${incompatibleNote}`,
           variant: incompatibleCount > 0 ? 'destructive' : undefined,
         });
       }
@@ -1264,7 +1265,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       return { ok: true };
     } catch (error: any) {
       console.error('[POS Modal] Failed to sync MRA products:', error);
-      return fail('MRA sync failed', 'Try again.');
+      return fail('Product sync failed', 'Try again.');
     } finally {
       setIsSyncingMraProducts(false);
     }
@@ -2214,7 +2215,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         toast({
           variant: 'destructive',
           title: 'Unmapped Products',
-          description: `Cannot sell: ${unmappedProducts.join(', ')}. Please map these products to MRA codes first.`,
+          description: `Cannot sell: ${unmappedProducts.join(', ')}. Product setup is incomplete.`,
         });
         return null;
       }
@@ -2223,7 +2224,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         toast({
           variant: 'destructive',
           title: 'Unapproved Mappings',
-          description: `Cannot sell: ${unapprovedProducts.join(', ')}. Please approve the MRA mappings first.`,
+          description: `Cannot sell: ${unapprovedProducts.join(', ')}. Product setup is not approved yet.`,
         });
         return null;
       }
@@ -2232,7 +2233,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
         toast({
           variant: 'destructive',
           title: 'Unsynced Mappings',
-          description: `Cannot sell: ${unsyncedProducts.join(', ')}. Please sync these mappings first.`,
+          description: `Cannot sell: ${unsyncedProducts.join(', ')}. Please sync products first.`,
         });
         return null;
       }
@@ -2240,7 +2241,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
       if (taxpayerIncompatibleProducts.length > 0) {
         toast({
           variant: 'destructive',
-          title: 'EIS Tax Setup Conflict',
+          title: 'Tax Setup Conflict',
           description: taxpayerIncompatibleProducts.slice(0, 2).join(' '),
         });
         return null;
@@ -2971,8 +2972,8 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
                 <Button
                   variant="outline"
                   className="h-10 w-10 p-0"
-                  title={isSyncingMraProducts ? 'Loading Products from MRA' : 'Sync Products from MRA'}
-                  aria-label={isSyncingMraProducts ? 'Loading Products from MRA' : 'Sync Products from MRA'}
+                  title={isSyncingMraProducts ? 'Loading products' : 'Sync products'}
+                  aria-label={isSyncingMraProducts ? 'Loading products' : 'Sync products'}
                   onClick={() => void syncProductsFromMra()}
                   disabled={isSyncingMraProducts}
                 >
@@ -3011,7 +3012,7 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
             {isSyncingMraProducts && allInventory && (
               <div className="flex shrink-0 items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span>{hasCachedInventory ? 'Refreshing MRA products...' : 'Syncing MRA products...'}</span>
+                <span>{hasCachedInventory ? 'Refreshing products...' : 'Syncing products...'}</span>
               </div>
             )}
             {!isSyncingMraProducts && mraProductSyncError && allInventory && (

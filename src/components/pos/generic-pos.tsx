@@ -156,6 +156,17 @@ const resolveCartDiscountAmount = (item: CartItem): number => {
   return calculateDiscountAmount(lineAmount, getCartDiscount(item));
 };
 
+const isCartDiscountInvalid = (item: CartItem): boolean => {
+  const lineAmount = resolveCartLineTotal(item);
+  const discount = getCartDiscount(item);
+  if (!discount || lineAmount <= 0) return false;
+
+  if (discount.type === 'percentage' && discount.value >= 100) return true;
+  if (discount.type === 'fixed' && discount.value >= lineAmount) return true;
+
+  return resolveCartDiscountAmount(item) >= lineAmount;
+};
+
 const normalizeDiscountRule = (rule: any): DiscountRule | null => {
   const id = String(rule?.id || '').trim();
   const name = String(rule?.name || '').trim();
@@ -336,6 +347,8 @@ const extractReceiptValidationPayload = (order: Partial<Order> | null | undefine
     (order as any)?.qr_code_payload,
     (order as any)?.eisValidationMetadata,
     (order as any)?.eis_validation_metadata,
+    (order as any)?.mraSubmission,
+    (order as any)?.mra_submission,
     (order as any)?.mraResponse,
     (order as any)?.mra_response,
   ]);
@@ -363,16 +376,16 @@ const resolveCompletedSaleSubmissionDisplay = (
   if (eisEnabled) {
     if (status === 'REJECTED') {
       return {
-        label: 'EIS Rejected',
-        description: 'The sale was saved locally, but MRA rejected the fiscal submission.',
+        label: 'Receipt Rejected',
+        description: 'The sale was saved locally, but the legal receipt was rejected.',
         tone: 'rejected',
       };
     }
 
     if (status === 'ACCEPTED' || (status === 'SUBMITTED' && hasFiscalData)) {
       return {
-        label: status === 'ACCEPTED' ? 'EIS Accepted' : 'EIS Submitted',
-        description: 'MRA fiscal receipt details are available for this sale.',
+        label: status === 'ACCEPTED' ? 'Receipt Accepted' : 'Receipt Submitted',
+        description: 'Legal receipt details are available for this sale.',
         tone: 'accepted',
       };
     }
@@ -384,17 +397,17 @@ const resolveCompletedSaleSubmissionDisplay = (
       !isBrowserOnline
     ) {
       return {
-        label: 'EIS Offline Queued',
+        label: 'Offline Queued',
         description: hasFiscalData
-          ? 'Queued for MRA.'
+          ? 'Queued for upload.'
           : 'Will upload later.',
         tone: 'offline',
       };
     }
 
     return {
-      label: 'EIS Online Pending',
-      description: 'Submitting to MRA.',
+      label: 'Receipt Pending',
+      description: 'Submitting receipt.',
       tone: 'pending',
     };
   }
@@ -797,6 +810,7 @@ const CartItemView = ({
   const total = resolveCartLineTotal(item);
   const appliedDiscount = getCartDiscount(item);
   const discountAmount = resolveCartDiscountAmount(item);
+  const hasInvalidDiscount = isCartDiscountInvalid(item);
   const discountedTotal = Math.max(0, total - discountAmount);
   const isVariable = item.isVariablePrice;
   const hasStockSnapshot = item.stockUnits !== undefined && item.stockUnits !== null;
@@ -874,8 +888,16 @@ const CartItemView = ({
           </p>
         )}
         {discountAmount > 0 && (
-          <p className="text-[11px] text-green-700 dark:text-green-500">
+          <p className={cn(
+            'text-[11px]',
+            hasInvalidDiscount ? 'text-destructive' : 'text-green-700 dark:text-green-500'
+          )}>
             Discount: -{currencyFormatter(discountAmount)}
+          </p>
+        )}
+        {hasInvalidDiscount && (
+          <p className="text-[11px] font-medium text-destructive">
+            Discount must be less than item total.
           </p>
         )}
       </div>
@@ -1050,10 +1072,10 @@ const PaymentDialog = ({
         ? 'Server Unavailable'
         : shouldUseEisTaxMappings
             ? isMraOffline
-                ? 'EIS Offline'
+                ? 'Offline'
                 : isMraOnline
-                    ? 'EIS Online'
-                    : 'EIS Status Unknown'
+                    ? 'Online'
+                    : 'Status Unknown'
             : isBrowserOnline
                 ? 'Online'
                 : 'Offline';
@@ -1061,10 +1083,10 @@ const PaymentDialog = ({
         ? eisInvoiceSubmissionBlockedMessage
         : shouldUseEisTaxMappings
             ? isMraOffline
-                ? 'Signs offline and queues for MRA.'
+                ? 'Signs offline and queues for upload.'
                 : isMraOnline
-                    ? 'Submits to MRA.'
-                    : 'MRA status not checked.'
+                    ? 'Submits receipt.'
+                    : 'Status not checked.'
             : isBrowserOnline
                 ? 'Submits to POS server.'
                 : 'Will sync later.';
@@ -1111,7 +1133,7 @@ const PaymentDialog = ({
 
         const calculateCorrectTax = async () => {
             const effectiveTaxLabel = shouldUseEisTaxMappings
-                ? 'VAT Amount (MRA Rules Applied)'
+                ? 'VAT Amount'
                 : taxLabel;
             console.log('[PaymentDialog] Starting tax calculation, cart items:', cart?.length);
             if (!cart || cart.length === 0) {
@@ -1698,7 +1720,7 @@ const PaymentDialog = ({
         if (!businessId) {
             toast({
                 variant: 'destructive',
-                title: 'Cannot validate EIS details',
+                title: 'Cannot validate sale details',
             });
             return false;
         }
@@ -2088,11 +2110,20 @@ const PaymentDialog = ({
             const isBluetoothPrinter =
                 defaultPrinter.connectionType === 'bluetooth' ||
                 String(defaultPrinter.id || '').toLowerCase().startsWith('bt:');
-            const printAttemptTimeoutMs = isBluetoothPrinter ? 45000 : 20000;
+            const printAttemptTimeoutMs = isBluetoothPrinter ? 60000 : 20000;
 
             toast({
                 title: 'Printing...',
                 description: `Sending ${copiesToPrint} receipt${copiesToPrint > 1 ? 's' : ''} to ${defaultPrinter.name}`,
+            });
+
+            setReceiptPaperWidth(selectedPaperWidth);
+            await new Promise((resolve) => {
+                if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+                    window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve(undefined)));
+                } else {
+                    setTimeout(resolve, 150);
+                }
             });
 
             // Try silent printing first (works with Tauri/Electron or auto-submit)
@@ -2123,7 +2154,7 @@ const PaymentDialog = ({
                     printerId: defaultPrinter.id,
                     copies: 1,
                     paperSize: selectedPaperWidth,
-                    printerPaperSize: normalizePrinterPaperWidth(defaultPrinter.paperWidth),
+                    printerPaperSize: selectedPaperWidth,
                 };
 
                 // Never keep the UI busy forever if native printing hangs.
@@ -2200,8 +2231,8 @@ const PaymentDialog = ({
 
             if (eisEnabled && !hasFiscalReceiptPrintData(receiptOrder)) {
                 toast({
-                    title: 'Preparing MRA Receipt',
-                    description: 'Waiting for fiscal receipt details from MRA EIS...',
+                    title: 'Preparing Receipt',
+                    description: 'Waiting for legal receipt details...',
                 });
 
                 receiptOrder = await waitForFiscalReceiptData(receiptOrder, 15000);
@@ -2217,7 +2248,7 @@ const PaymentDialog = ({
             if (eisEnabled && !hasFiscalReceiptPrintData(receiptOrder)) {
                 toast({
                     variant: 'destructive',
-                    title: 'MRA Receipt Not Ready',
+                    title: 'Receipt Not Ready',
                     description: 'Try again shortly.',
                 });
                 return;
@@ -2232,12 +2263,21 @@ const PaymentDialog = ({
                 return;
             }
 
+            const { printerService } = await import('@/lib/services/printer-service');
+            const [defaultPrinter, currentSettings] = await Promise.all([
+                printerService.getDefaultPrinter(activeBranchId),
+                printerService.getPrinterSettings(activeBranchId),
+            ]);
+            applyPrinterSettingsToReceipt(
+                currentSettings,
+                normalizePrinterPaperWidth(defaultPrinter?.paperWidth)
+            );
             setReceiptCopyNumber(1);
             setIsReceiptPreviewOpen(true);
         } finally {
             setIsPreparingReceiptPreview(false);
         }
-    }, [completedOrder, eisEnabled, toast, waitForFiscalReceiptData]);
+    }, [activeBranchId, applyPrinterSettingsToReceipt, completedOrder, eisEnabled, toast, waitForFiscalReceiptData]);
 
     useEffect(() => {
         if (step !== 'confirmation' || !completedOrder || autoPrintHandled) {
@@ -2396,7 +2436,7 @@ const PaymentDialog = ({
         );
 
         return (
-             <DialogContent className="max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-md overflow-y-auto p-4 sm:max-w-lg sm:p-6">
+             <DialogContent className="tauri-android-safe-bottom max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-md overflow-y-auto p-4 sm:max-w-lg sm:p-6">
                 <DialogHeader>
                     <DialogTitle className="flex items-center justify-center text-center">
                         <CheckCircle className="h-12 w-12 text-green-500" />
@@ -2452,9 +2492,9 @@ const PaymentDialog = ({
                     />
                  </div>
                 <Dialog open={isReceiptPreviewOpen} onOpenChange={setIsReceiptPreviewOpen}>
-                    <DialogContent className="max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-[420px] overflow-y-auto p-4 sm:p-6">
+                    <DialogContent className="tauri-android-safe-bottom max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-[420px] overflow-y-auto p-4 sm:p-6">
                         <DialogHeader>
-                            <DialogTitle>MRA Receipt</DialogTitle>
+                            <DialogTitle>Receipt</DialogTitle>
                             <DialogDescription>
                                 Fiscal receipt preview for order #{displayOrderNumber}.
                             </DialogDescription>
@@ -2512,7 +2552,7 @@ const PaymentDialog = ({
                             ) : (
                                 <>
                                     <Eye className="mr-2 h-4 w-4" />
-                                    View MRA Receipt
+                                    View Receipt
                                 </>
                             )}
                         </Button>
@@ -2542,7 +2582,7 @@ const PaymentDialog = ({
     }
 
     return (
-        <DialogContent className="flex max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-2xl flex-col overflow-hidden p-4 sm:p-6">
+        <DialogContent className="tauri-android-safe-bottom flex max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-2xl flex-col overflow-hidden p-4 sm:p-6">
             <DialogHeader>
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                     <div>
@@ -2573,7 +2613,7 @@ const PaymentDialog = ({
                     {saleConnectivityDescription}
                 </p>
             </DialogHeader>
-            <div className="space-y-4 py-3 overflow-y-auto flex-1 hide-scrollbar">
+            <div className="space-y-4 overflow-y-auto py-3 pb-5 flex-1 hide-scrollbar">
                 <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
                     <div className="flex justify-between text-xs"><span>Net Amount</span><span>{currencyFormatter(calculatedNetAmount)}</span></div>
                     <div className="flex justify-between text-xs"><span>{calculatedTaxLabel || 'VAT Amount'}</span><span className="text-green-600 font-semibold">{currencyFormatter(calculatedTax)}</span></div>
@@ -2620,7 +2660,7 @@ const PaymentDialog = ({
 	                    <div className="space-y-1">
 	                        <label className="text-xs font-medium text-muted-foreground">Authorization Code</label>
 	                        <Input
-	                            placeholder="MRA buyer code"
+	                            placeholder="Buyer code"
 	                            value={buyerAuthorizationCode}
 	                            onChange={(e) => setBuyerAuthorizationCode(e.target.value)}
 	                            disabled={isProcessingPayment}
@@ -2684,7 +2724,7 @@ const PaymentDialog = ({
                 <div>
                     <h4 className="text-sm font-medium mb-2">Payment Method</h4>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                       <Button size="default" variant={selectedPaymentMethod === 'Cash' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Cash')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><img src="/icon-128x128.png" alt="" className="mr-1 h-4 w-4 object-contain" draggable={false}/>Cash</Button>
+                       <Button size="default" variant={selectedPaymentMethod === 'Cash' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Cash')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><DollarSign className="mr-1 h-4 w-4"/>Cash</Button>
                        <Button size="default" variant={selectedPaymentMethod === 'Card' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Card')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><CreditCard className="mr-1 h-4 w-4"/>Card</Button>
                        <Button size="default" variant={selectedPaymentMethod === 'Mobile Money' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('Mobile Money')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><Smartphone className="mr-1 h-4 w-4"/>Mobile</Button>
                        <Button size="default" variant={selectedPaymentMethod === 'On Account' ? 'default' : 'outline'} onClick={() => setSelectedPaymentMethod('On Account')} className="text-sm h-11" disabled={isProcessingPayment || isEisInvoiceSubmissionBlocked}><UserPlus className="mr-1 h-4 w-4"/>Account</Button>
@@ -3072,8 +3112,12 @@ export const GenericPos = ({
   const subtotal = cartSummary.net;
   const tax = cartSummary.tax;
   const total = cartSummary.gross;
-  const cartTaxLabel = shouldUseEisTaxMappings ? 'VAT Amount (MRA Rules Applied)' : (taxLabel || 'VAT Amount');
+  const cartTaxLabel = shouldUseEisTaxMappings ? 'VAT Amount' : (taxLabel || 'VAT Amount');
   const hasItemsInCart = cart.length > 0;
+  const invalidDiscountItems = useMemo(
+    () => cart.filter((item) => isCartDiscountInvalid(item)),
+    [cart]
+  );
 
   const getMRAMappingStatus = useCallback((itemId: string): {
     hasMapping: boolean;
@@ -3355,7 +3399,7 @@ export const GenericPos = ({
   };
 
   const renderCartFooter = () => (
-    <div className="flex flex-col gap-4 bg-muted/50 p-4">
+    <div className="tauri-android-safe-bottom flex flex-col gap-4 bg-muted/50 p-4">
       <div className="space-y-1 text-sm">
         <div className="flex w-full items-center justify-between gap-2">
           <span className="flex-shrink-0 text-muted-foreground">Subtotal (Excl VAT)</span>
@@ -3384,11 +3428,16 @@ export const GenericPos = ({
           <span className="min-w-0">{eisInvoiceSubmissionBlockedMessage}</span>
         </div>
       )}
+      {invalidDiscountItems.length > 0 && (
+        <div className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-100">
+          Discount must be less than item total.
+        </div>
+      )}
       <Button
         size="lg"
         className="bg-green-600 hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
         onClick={() => { setPaymentSessionId((id) => id + 1); setPaymentDialogOpen(true); }}
-        disabled={isEisInvoiceSubmissionBlocked}
+        disabled={isEisInvoiceSubmissionBlocked || invalidDiscountItems.length > 0}
       >
         <CreditCard className="mr-2 h-5 w-5" /> Payment
       </Button>
@@ -3400,7 +3449,6 @@ export const GenericPos = ({
       <CardHeader className="flex flex-row items-center justify-between border-b p-2 shrink-0">
         <CardTitle className="text-base">Current Order</CardTitle>
         <div className="flex items-center gap-2">
-            <Button variant="ghost" size="icon" className="text-muted-foreground h-8 w-8"><UserPlus className="h-4 w-4" /></Button>
             <Button variant="ghost" size="icon" className="text-destructive h-8 w-8" onClick={onClearCart}><Trash2 className="h-4 w-4" /></Button>
         </div>
       </CardHeader>
@@ -3416,7 +3464,7 @@ export const GenericPos = ({
   const renderMobileCartDialog = () => (
     <Dialog>
       <DialogTrigger asChild>
-        <Button size="lg" className="fixed bottom-4 right-4 z-10 h-14 w-auto rounded-full shadow-lg lg:hidden">
+        <Button size="lg" className="tauri-android-floating-bottom fixed bottom-4 right-4 z-10 h-14 w-auto rounded-full shadow-lg lg:hidden">
           <span>View Cart ({cart.reduce((acc, item) => acc + item.quantity, 0)})</span>
           <Separator orientation="vertical" className="mx-3 h-6" />
           <span className="font-bold">{formatCurrency(total)}</span>

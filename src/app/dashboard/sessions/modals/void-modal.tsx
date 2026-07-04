@@ -130,7 +130,7 @@ export function VoidModal({
         const eisStatus = String(response.eis_result?.eis_status || response.void_transaction?.eis_status || '').trim();
         toast({
           title: 'Sale Voided',
-          description: `Order #${order.orderNumber} voided${eisStatus ? ` with EIS status ${eisStatus}` : ''}.`,
+          description: `Order #${order.orderNumber} voided${eisStatus ? ` with receipt status ${eisStatus}` : ''}.`,
         });
 
         reset();
@@ -211,7 +211,7 @@ export function VoidModal({
           <div className="rounded-lg border border-red-200 bg-red-50 p-3">
             <p className="text-sm font-medium text-red-900">Void only when the whole receipt must be cancelled.</p>
             <p className="mt-1 text-xs text-red-800">
-              This reverses the full fiscal sale, restores stock for all items, and records the correcting document with MRA EIS.
+              This reverses the full legal receipt, restores stock for all items, and records the correcting document.
             </p>
           </div>
 
@@ -287,7 +287,7 @@ export function VoidModal({
             <Label htmlFor="supporting_documents_text">Supporting documents</Label>
             <Textarea
               id="supporting_documents_text"
-              placeholder="Optional: return slip number, approval reference, or document URL. This is encoded as one MRA supporting document."
+              placeholder="Optional: return slip number, approval reference, or document URL."
               {...register('supporting_documents_text')}
               className="min-h-16"
             />

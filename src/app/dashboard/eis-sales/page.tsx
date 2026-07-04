@@ -398,22 +398,6 @@ const formatUpdatedRecords = (records?: string[]): string => {
   return records.map((record) => String(record).replace(/_/g, ' ')).join(', ');
 };
 
-const safeJsonPreview = (value: unknown): string => {
-  if (value === undefined || value === null || value === '') return '';
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-};
-
-const getLookupReceiptInner = (result?: InvoiceLookupResult | null): any => {
-  if (!result) return {};
-  const receipt = result.receipt;
-  if (receipt?.data && typeof receipt.data === 'object') return receipt.data;
-  return receipt && typeof receipt === 'object' ? receipt : {};
-};
-
 const getVoidReceiptNumber = (item: any): string => toTrimmedString(
   item?.invoiceNumber ?? item?.invoice_number ?? item?.receiptNumber ?? item?.receipt_number
 );
@@ -815,7 +799,7 @@ export default function EisSalesAuditPage() {
     <div className="flex-1 space-y-6 p-4 pt-6 md:p-8">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">EIS Sales</h1>
+          <h1 className="text-3xl font-bold tracking-tight">Sales</h1>
           <p className="text-muted-foreground">Search fiscal sales across sessions and check the last MRA submissions when needed.</p>
         </div>
         <Dialog>
@@ -868,10 +852,8 @@ export default function EisSalesAuditPage() {
                         {invoiceLookupResult.error || formatReconciliationValue(invoiceLookupResult.errors)}
                       </p>
                     )}
-                    {Object.keys(getLookupReceiptInner(invoiceLookupResult)).length > 0 && (
-                      <pre className="max-h-56 max-w-full overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 text-[11px] leading-snug">
-                        {safeJsonPreview(getLookupReceiptInner(invoiceLookupResult))}
-                      </pre>
+                    {invoiceLookupResult.found && (
+                      <p className="text-muted-foreground">Receipt details were returned by MRA.</p>
                     )}
                   </div>
                 )}
@@ -1100,7 +1082,6 @@ export default function EisSalesAuditPage() {
                   <TableHead>Order</TableHead>
                   <TableHead>Fiscal Invoice</TableHead>
                   <TableHead>Date</TableHead>
-                  <TableHead>Session</TableHead>
                   <TableHead>Buyer</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">VAT</TableHead>
@@ -1112,13 +1093,13 @@ export default function EisSalesAuditPage() {
               <TableBody>
                 {allOrders === undefined ? (
                   <TableRow>
-                    <TableCell colSpan={10} className="h-24 text-center">
+                    <TableCell colSpan={9} className="h-24 text-center">
                       <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
                     </TableCell>
                   </TableRow>
                 ) : filteredOrders.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={10} className="h-24 text-center text-muted-foreground">
+                    <TableCell colSpan={9} className="h-24 text-center text-muted-foreground">
                       No sales found for this search.
                     </TableCell>
                   </TableRow>
@@ -1137,7 +1118,6 @@ export default function EisSalesAuditPage() {
                         </TableCell>
                         <TableCell className="max-w-[220px] break-all font-mono text-xs">{fiscalInvoice || 'N/A'}</TableCell>
                         <TableCell className="whitespace-nowrap">{formatDateTime(createdAt)}</TableCell>
-                        <TableCell className="max-w-[180px] truncate text-xs text-muted-foreground">{(order as any).sessionId ?? (order as any).session_id ?? 'N/A'}</TableCell>
                         <TableCell className="max-w-[180px] truncate">{resolveBuyerText(order) || 'Walk-in'}</TableCell>
                         <TableCell>
                           <Badge variant={getStatusBadgeVariant(status)} className="gap-1">

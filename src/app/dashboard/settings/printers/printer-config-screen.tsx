@@ -177,28 +177,6 @@ export function PrinterConfigScreen() {
     }
   };
 
-  const handlePrinterPaperWidthChange = async (printerId: string, value: string) => {
-    try {
-      const printer = printers.find(p => p.id === printerId);
-      if (!printer) return;
-
-      const updated: PrinterConfig = {
-        ...printer,
-        paperWidth: normalizePrinterPaperWidth(value),
-        updatedAt: new Date().toISOString(),
-      };
-      await printerService.savePrinterConfig(updated);
-      setPrinters(printers.map(p => (p.id === printerId ? updated : p)));
-    } catch (error) {
-      console.error('Error updating printer width:', error);
-      toast({
-        variant: 'destructive',
-        title: 'Error',
-        description: 'Failed to update printer width',
-      });
-    }
-  };
-
   const handleSaveSettings = async () => {
     if (!settings) return;
 
@@ -224,7 +202,10 @@ export function PrinterConfigScreen() {
   const handleTestPrinter = async (printer: PrinterConfig) => {
     try {
       setTestingPrinterId(printer.id);
-      const result = await unifiedPrintingService.testPrint(printer);
+      const result = await unifiedPrintingService.testPrint(
+        printer,
+        normalizePrinterPaperWidth(settings?.receiptPaperWidth, printer.paperWidth)
+      );
 
       if (result.success) {
         toast({
@@ -537,25 +518,10 @@ export function PrinterConfigScreen() {
                       )}
                     </div>
                     <p className="text-sm text-muted-foreground">
-                      {printer.type.charAt(0).toUpperCase() + printer.type.slice(1)} • {printer.paperWidth}
+                      {printer.type.charAt(0).toUpperCase() + printer.type.slice(1)}
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <Select
-                      value={printer.paperWidth}
-                      onValueChange={(value) => handlePrinterPaperWidthChange(printer.id, value)}
-                    >
-                      <SelectTrigger className="h-9 w-[112px]">
-                        <SelectValue placeholder="Width" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {SUPPORTED_PRINTER_PAPER_WIDTHS.map((width) => (
-                          <SelectItem key={width} value={width}>
-                            {width}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
                     <Switch
                       checked={printer.isEnabled}
                       onCheckedChange={(checked) =>

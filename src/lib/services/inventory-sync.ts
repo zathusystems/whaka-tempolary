@@ -2,6 +2,7 @@
 
 import { db, type InventoryItem } from '@/lib/db';
 import { authFetch } from '@/lib/auth-fetch';
+import { ensureTauriDeviceIdentity, getDeviceSerial } from '@/lib/device-identity';
 import { recordMraMappingCacheRefresh } from '@/lib/mra-mapping-cache';
 import {
   getMraStockReconciliationWarnings,
@@ -21,6 +22,46 @@ function toBackendBranchId(id: string): string {
 
   if (/^\d+$/.test(normalized)) return normalized;
   return normalized;
+}
+
+function normalizeBranchId(id: string): string {
+  return toBackendBranchId(id).trim().toLowerCase();
+}
+
+function extractApiList<T>(response: any): T[] {
+  if (Array.isArray(response)) return response as T[];
+  if (Array.isArray(response?.results)) return response.results as T[];
+  if (Array.isArray(response?.data)) return response.data as T[];
+  return [];
+}
+
+function getApiBranchId(item: any): string {
+  const rawBranch = item?.branch;
+  if (rawBranch && typeof rawBranch === 'object') {
+    return String(rawBranch.id ?? rawBranch.pk ?? rawBranch.branch_id ?? '').trim();
+  }
+  return String(rawBranch ?? item?.branch_id ?? item?.branchId ?? '').trim();
+}
+
+function getApiDeviceSerial(item: any): string {
+  return String(item?.device_serial ?? item?.deviceSerial ?? item?.mac_address ?? item?.macAddress ?? '').trim();
+}
+
+function findCurrentDeviceTerminal(terminals: any[], branchId: string): any {
+  const currentDeviceSerial = getDeviceSerial().toLowerCase();
+  const normalizedBranchId = normalizeBranchId(branchId);
+  const branchTerminals = terminals.filter(
+    (item) => normalizeBranchId(getApiBranchId(item)) === normalizedBranchId
+  );
+
+  return (
+    branchTerminals.find((item) => (
+      String(item?.status || '').toLowerCase() === 'active' &&
+      getApiDeviceSerial(item).toLowerCase() === currentDeviceSerial
+    )) ||
+    branchTerminals.find((item) => getApiDeviceSerial(item).toLowerCase() === currentDeviceSerial) ||
+    null
+  );
 }
 
 /**
@@ -361,6 +402,95 @@ export async function syncInventoryFromBackend(branchId: string): Promise<{
       updated: 0,
       created: 0,
       error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+export async function refreshInventoryFromMraApprovedProducts(
+  branchId: string,
+  options: { refreshFromMra?: boolean; syncLocal?: boolean } = {}
+): Promise<{
+  ok: boolean;
+  created: number;
+  updated: number;
+  synced: number;
+  mraMappingsSynced?: number;
+  stockReconciliationWarnings?: StockReconciliationWarning[];
+  error?: string;
+}> {
+  const normalizedBranchId = toBackendBranchId(branchId);
+  if (!normalizedBranchId) {
+    return {
+      ok: false,
+      created: 0,
+      updated: 0,
+      synced: 0,
+      error: 'Select a branch first.',
+    };
+  }
+
+  try {
+    await ensureTauriDeviceIdentity();
+    const terminalsResponse = await authFetch.fetch<any>('/mra-eis/terminals/');
+    const terminals = extractApiList<any>(terminalsResponse);
+    const terminal = findCurrentDeviceTerminal(terminals, normalizedBranchId);
+
+    if (!terminal?.id || String(terminal?.status || '').toLowerCase() !== 'active') {
+      return {
+        ok: false,
+        created: 0,
+        updated: 0,
+        synced: 0,
+        error: 'Activate this device first.',
+      };
+    }
+
+    const pullResponse = await authFetch.fetch<any>(
+      `/mra-eis/terminals/${terminal.id}/pull_approved_products/`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ refreshFromMra: options.refreshFromMra !== false }),
+      }
+    );
+
+    if (options.syncLocal === false) {
+      return {
+        ok: true,
+        created: Number(pullResponse?.created ?? 0),
+        updated: Number(pullResponse?.updated ?? 0),
+        synced: 0,
+      };
+    }
+
+    const syncResult = await syncInventoryFromBackend(branchId);
+    if (syncResult.error) {
+      return {
+        ok: false,
+        created: Number(pullResponse?.created ?? 0),
+        updated: Number(pullResponse?.updated ?? 0),
+        synced: syncResult.synced,
+        mraMappingsSynced: syncResult.mraMappingsSynced,
+        stockReconciliationWarnings: syncResult.stockReconciliationWarnings,
+        error: syncResult.error,
+      };
+    }
+
+    return {
+      ok: true,
+      created: Number(pullResponse?.created ?? syncResult.created ?? 0),
+      updated: Number(pullResponse?.updated ?? syncResult.updated ?? 0),
+      synced: syncResult.synced,
+      mraMappingsSynced: syncResult.mraMappingsSynced,
+      stockReconciliationWarnings: syncResult.stockReconciliationWarnings,
+    };
+  } catch (error) {
+    console.error('[InventorySync] Failed to refresh MRA approved products:', error);
+    return {
+      ok: false,
+      created: 0,
+      updated: 0,
+      synced: 0,
+      error: 'Could not sync products from MRA.',
     };
   }
 }

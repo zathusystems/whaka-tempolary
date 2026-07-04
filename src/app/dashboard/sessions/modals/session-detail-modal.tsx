@@ -5,6 +5,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { AlertTriangle, Loader2, Package, Printer } from 'lucide-react';
 
 import { db, type Session, type Order } from '@/lib/db';
+import { useAuth } from '@/hooks/use-auth';
 import { useCurrency } from '@/hooks/use-currency';
 import { toast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
@@ -249,6 +250,67 @@ const formatQuantityDisplay = (value: number): string => {
   return value.toFixed(3);
 };
 
+const STOCK_REPORT_PAGE_SIZE = 10;
+
+const getStockReportPageCount = (totalRows: number): number =>
+  Math.max(1, Math.ceil(totalRows / STOCK_REPORT_PAGE_SIZE));
+
+const getStockReportPageRows = <T,>(rows: T[], page: number): T[] => {
+  const pageCount = getStockReportPageCount(rows.length);
+  const safePage = Math.min(Math.max(1, page), pageCount);
+  const start = (safePage - 1) * STOCK_REPORT_PAGE_SIZE;
+  return rows.slice(start, start + STOCK_REPORT_PAGE_SIZE);
+};
+
+const StockReportPager = ({
+  page,
+  totalRows,
+  onPageChange,
+}: {
+  page: number;
+  totalRows: number;
+  onPageChange: (page: number) => void;
+}) => {
+  const pageCount = getStockReportPageCount(totalRows);
+  const safePage = Math.min(Math.max(1, page), pageCount);
+
+  if (totalRows <= STOCK_REPORT_PAGE_SIZE) {
+    return null;
+  }
+
+  return (
+    <div className="mt-3 flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+      <span>
+        Showing {(safePage - 1) * STOCK_REPORT_PAGE_SIZE + 1}-
+        {Math.min(safePage * STOCK_REPORT_PAGE_SIZE, totalRows)} of {totalRows}
+      </span>
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => onPageChange(safePage - 1)}
+          disabled={safePage <= 1}
+        >
+          Previous
+        </Button>
+        <span className="text-xs">
+          Page {safePage} of {pageCount}
+        </span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => onPageChange(safePage + 1)}
+          disabled={safePage >= pageCount}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
+  );
+};
+
 const SessionSalesListModal = ({ sessionId }: { sessionId: string }) => {
   const { format: formatCurrency } = useCurrency();
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -427,6 +489,7 @@ const SessionSalesListModal = ({ sessionId }: { sessionId: string }) => {
 
 const ZReportTabModal = ({ session }: { session: Session }) => {
     const { format: formatCurrency } = useCurrency();
+    const { business } = useAuth();
     const [isPrintingZReport, setIsPrintingZReport] = useState(false);
     
     const sessionOrders = useLiveQuery(
@@ -527,6 +590,7 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
 
             const htmlContent = buildZReportPrintHtml({
                 session,
+                business: business as any,
                 paymentBreakdown: reportPaymentBreakdown,
                 financialSummary: reportFinancialSummary,
                 eisSummary: reportSummary.eisSummary,
@@ -539,7 +603,7 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
                 printerId: defaultPrinter.id,
                 copies: 1,
                 paperSize: selectedPaperSize,
-                printerPaperSize: normalizePrinterPaperWidth(defaultPrinter.paperWidth),
+                printerPaperSize: selectedPaperSize,
                 timeout: 20000,
             });
 
@@ -569,7 +633,7 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
         } finally {
             setIsPrintingZReport(false);
         }
-    }, [formatCurrency, isSessionClosed, productMixSummary, session, sessionOrders]);
+    }, [business, formatCurrency, isSessionClosed, productMixSummary, session, sessionOrders]);
 
     return (
         <Card>
@@ -705,7 +769,7 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
 
                     <Card>
                         <CardHeader>
-                            <CardTitle className="text-base">EIS Compliance</CardTitle>
+                            <CardTitle className="text-base">Legal Receipts</CardTitle>
                         </CardHeader>
                         <CardContent className="space-y-3 text-sm">
                             <div className="flex justify-between">
@@ -775,6 +839,11 @@ const ZReportTabModal = ({ session }: { session: Session }) => {
 
 const StockReportTabModal = ({ session }: { session: Session }) => {
     const { format: formatCurrency } = useCurrency();
+    const [stockReportView, setStockReportView] = useState('sold');
+    const [soldPage, setSoldPage] = useState(1);
+    const [receivedPage, setReceivedPage] = useState(1);
+    const [wastePage, setWastePage] = useState(1);
+    const [trackingPage, setTrackingPage] = useState(1);
     
     const sessionOrders = useLiveQuery(
         () => db.orders.where({ sessionId: session.id }).toArray(),
@@ -1215,6 +1284,22 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
             ),
         [purchasesData]
     );
+    const pagedProductSalesData = useMemo(
+        () => getStockReportPageRows(productSalesData, soldPage),
+        [productSalesData, soldPage]
+    );
+    const pagedPurchasesData = useMemo(
+        () => getStockReportPageRows(purchasesData, receivedPage),
+        [purchasesData, receivedPage]
+    );
+    const pagedSessionWaste = useMemo(
+        () => getStockReportPageRows(sessionWaste, wastePage),
+        [sessionWaste, wastePage]
+    );
+    const pagedComprehensiveStockData = useMemo(
+        () => getStockReportPageRows(comprehensiveStockData, trackingPage),
+        [comprehensiveStockData, trackingPage]
+    );
 
     return (
         <Card>
@@ -1256,14 +1341,21 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                     </div>
                 </div>
 
-                <Separator />
+                <Tabs value={stockReportView} onValueChange={setStockReportView} className="space-y-4">
+                    <TabsList className="grid h-auto w-full grid-cols-2 gap-1 md:grid-cols-4">
+                        <TabsTrigger value="sold" className="text-xs sm:text-sm">Sold</TabsTrigger>
+                        <TabsTrigger value="received" className="text-xs sm:text-sm">Received</TabsTrigger>
+                        <TabsTrigger value="waste" className="text-xs sm:text-sm">Waste</TabsTrigger>
+                        <TabsTrigger value="tracking" className="text-xs sm:text-sm">Tracking</TabsTrigger>
+                    </TabsList>
 
+                    <TabsContent value="sold" className="mt-0">
                 <div>
                     <h3 className="font-semibold mb-3">Products Sold</h3>
                     {productSalesData.length > 0 ? (
                         <>
                             <div className="space-y-3 md:hidden">
-                                {productSalesData.map((product) => (
+                                {pagedProductSalesData.map((product) => (
                                     <div key={product.key} className="rounded-lg border bg-card p-4">
                                         <div className="flex items-start justify-between gap-3">
                                             <p className="font-medium">{product.name}</p>
@@ -1296,7 +1388,7 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                                             </TableRow>
                                         </TableHeader>
                                         <TableBody>
-                                            {productSalesData.map((product) => (
+                                            {pagedProductSalesData.map((product) => (
                                                 <TableRow key={product.key}>
                                                     <TableCell className="font-medium">{product.name}</TableCell>
                                                     <TableCell>{renderProductCategoryBadge(product.category)}</TableCell>
@@ -1310,14 +1402,16 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                                     </Table>
                                 </ScrollArea>
                             </div>
+                            <StockReportPager page={soldPage} totalRows={productSalesData.length} onPageChange={setSoldPage} />
                         </>
                     ) : (
                         <p className="text-muted-foreground text-center py-4">No products sold in this session.</p>
                     )}
                 </div>
 
-                <Separator />
+                    </TabsContent>
 
+                    <TabsContent value="received" className="mt-0">
                 <div>
                     <h3 className="font-semibold mb-3 flex items-center gap-2">
                         <Package className="h-4 w-4" />
@@ -1326,7 +1420,7 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                     {purchasesData.length > 0 ? (
                         <>
                             <div className="space-y-3 md:hidden">
-                                {purchasesData.map((purchase) => (
+                                {pagedPurchasesData.map((purchase) => (
                                     <div key={purchase.key} className="rounded-lg border bg-card p-4">
                                         <div className="flex items-start justify-between gap-3">
                                             <p className="font-medium">{purchase.name}</p>
@@ -1375,7 +1469,7 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                                             </TableRow>
                                         </TableHeader>
                                         <TableBody>
-                                            {purchasesData.map((purchase) => (
+                                            {pagedPurchasesData.map((purchase) => (
                                                 <TableRow key={purchase.key}>
                                                     <TableCell className="font-medium">{purchase.name}</TableCell>
                                                     <TableCell>{renderProductCategoryBadge(purchase.category)}</TableCell>
@@ -1394,14 +1488,16 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                                     </Table>
                                 </ScrollArea>
                             </div>
+                            <StockReportPager page={receivedPage} totalRows={purchasesData.length} onPageChange={setReceivedPage} />
                         </>
                     ) : (
                         <p className="text-muted-foreground text-center py-4">No stock received in this session.</p>
                     )}
                 </div>
 
-                <Separator />
+                    </TabsContent>
 
+                    <TabsContent value="waste" className="mt-0">
                 <div>
                     <h3 className="font-semibold mb-3 flex items-center gap-2">
                         <AlertTriangle className="h-4 w-4 text-red-500" />
@@ -1410,7 +1506,7 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                     {sessionWaste.length > 0 ? (
                         <>
                             <div className="space-y-3 md:hidden">
-                                {sessionWaste.map((waste) => (
+                                {pagedSessionWaste.map((waste) => (
                                     <div key={waste.id} className="rounded-lg border bg-card p-4">
                                         <div className="flex items-start justify-between gap-3">
                                             <p className="font-medium">{waste.itemName}</p>
@@ -1445,7 +1541,7 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                                             </TableRow>
                                         </TableHeader>
                                         <TableBody>
-                                            {sessionWaste.map((waste) => (
+                                            {pagedSessionWaste.map((waste) => (
                                                 <TableRow key={waste.id}>
                                                     <TableCell className="font-medium">{waste.itemName}</TableCell>
                                                     <TableCell className="text-right text-red-600 font-medium">{waste.quantity.toFixed(2)}</TableCell>
@@ -1460,20 +1556,22 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                                     </Table>
                                 </ScrollArea>
                             </div>
+                            <StockReportPager page={wastePage} totalRows={sessionWaste.length} onPageChange={setWastePage} />
                         </>
                     ) : (
                         <p className="text-muted-foreground text-center py-4">No waste recorded in this session.</p>
                     )}
                 </div>
 
-                <Separator />
+                    </TabsContent>
 
+                    <TabsContent value="tracking" className="mt-0">
                 <div>
                     <h3 className="font-semibold mb-3">Complete Stock Tracking (Opening + Received - Sold - Waste = Closing)</h3>
                     {comprehensiveStockData.length > 0 ? (
                         <>
                             <div className="space-y-3 md:hidden">
-                                {comprehensiveStockData.map((item) => (
+                                {pagedComprehensiveStockData.map((item) => (
                                     <div key={item.key} className="rounded-lg border bg-card p-4">
                                         <p className="font-medium">{item.name}</p>
                                         <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
@@ -1517,7 +1615,7 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                                             </TableRow>
                                         </TableHeader>
                                         <TableBody>
-                                            {comprehensiveStockData.map((item) => (
+                                            {pagedComprehensiveStockData.map((item) => (
                                                 <TableRow key={item.key}>
                                                     <TableCell className="font-medium">{item.name}</TableCell>
                                                     <TableCell>{renderProductCategoryBadge(item.category)}</TableCell>
@@ -1532,11 +1630,14 @@ const StockReportTabModal = ({ session }: { session: Session }) => {
                                     </Table>
                                 </ScrollArea>
                             </div>
+                            <StockReportPager page={trackingPage} totalRows={comprehensiveStockData.length} onPageChange={setTrackingPage} />
                         </>
                     ) : (
                         <p className="text-muted-foreground text-center py-4">No stock data available for this session.</p>
                     )}
                 </div>
+                    </TabsContent>
+                </Tabs>
             </CardContent>
         </Card>
     );

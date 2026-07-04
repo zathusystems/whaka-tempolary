@@ -28,7 +28,7 @@ body {
 html[data-tauri-android='true'] .tauri-android-safe-top {
   --tauri-android-top-inset: max(env(safe-area-inset-top, 0px), 24px);
   height: auto;
-  min-height: calc(4rem + var(--tauri-android-top-inset));
+  min-height: calc(6.25rem + var(--tauri-android-top-inset));
   padding-top: calc(0.75rem + var(--tauri-android-top-inset));
 }
 
@@ -47,6 +47,50 @@ html[data-tauri-android='true'][data-tauri-app-ready='true'] body {
 html[data-tauri-android='true'] .tauri-android-sidebar-safe-top {
   --tauri-android-top-inset: max(env(safe-area-inset-top, 0px), 24px);
   padding-top: var(--tauri-android-top-inset);
+}
+
+/* Keep fixed buttons and modal actions above Android gesture/navigation bars. */
+html[data-tauri-android='true'] .tauri-android-safe-bottom {
+  --tauri-android-bottom-inset: max(env(safe-area-inset-bottom, 0px), 24px);
+  padding-bottom: calc(1rem + var(--tauri-android-bottom-inset));
+}
+
+html[data-tauri-android='true'] .tauri-android-floating-bottom {
+  --tauri-android-bottom-inset: max(env(safe-area-inset-bottom, 0px), 24px);
+  bottom: calc(1rem + var(--tauri-android-bottom-inset));
+}
+
+html[data-tauri-android='true'] .tauri-android-dialog-content {
+  --tauri-android-top-inset: max(env(safe-area-inset-top, 0px), 24px);
+  --tauri-android-bottom-inset: max(env(safe-area-inset-bottom, 0px), 24px);
+  top: calc(var(--tauri-android-top-inset) + ((100dvh - var(--tauri-android-top-inset) - var(--tauri-android-bottom-inset)) / 2)) !important;
+  max-height: calc(100dvh - var(--tauri-android-top-inset) - var(--tauri-android-bottom-inset) - 1rem) !important;
+  padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px)) !important;
+}
+
+html[data-tauri-android='true'] .tauri-android-sheet-content {
+  --tauri-android-top-inset: max(env(safe-area-inset-top, 0px), 24px);
+  --tauri-android-bottom-inset: max(env(safe-area-inset-bottom, 0px), 24px);
+  max-height: calc(100dvh - var(--tauri-android-top-inset) - var(--tauri-android-bottom-inset)) !important;
+}
+
+html[data-tauri-android='true'] .tauri-android-sheet-content[data-state] {
+  padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px)) !important;
+}
+
+html[data-tauri-android='true'] .tauri-android-sheet-content[data-side='left'],
+html[data-tauri-android='true'] .tauri-android-sheet-content[data-side='right'] {
+  top: var(--tauri-android-top-inset) !important;
+  bottom: var(--tauri-android-bottom-inset) !important;
+  height: auto !important;
+}
+
+html[data-tauri-android='true'] .tauri-android-sheet-content[data-side='top'] {
+  top: var(--tauri-android-top-inset) !important;
+}
+
+html[data-tauri-android='true'] .tauri-android-sheet-content[data-side='bottom'] {
+  bottom: var(--tauri-android-bottom-inset) !important;
 }
 
 code, pre {

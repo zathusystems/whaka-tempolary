@@ -829,7 +829,7 @@ export default function LoginPage() {
 
       toast({
         title: 'Login Successful',
-        description: `Welcome to ${selectedBiz.name}! (Role: ${user.role})`,
+        description: `Welcome to ${selectedBiz.name}!`,
       });
 
       router.replace('/dashboard');

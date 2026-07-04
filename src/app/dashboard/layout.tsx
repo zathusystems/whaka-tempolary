@@ -352,7 +352,7 @@ const navItems = [
     { href: '/dashboard/branches', icon: Building, label: 'Branches', permission: 'manage_settings' as Permission },
     { href: '/dashboard/pos', icon: MonitorPlay, label: 'POS', permission: 'access_pos' as Permission },
     { href: '/dashboard/sessions', icon: History, label: 'Sessions', permission: 'view_sessions' as Permission },
-    { href: '/dashboard/eis-sales', icon: FileText, label: 'EIS Sales', permission: 'view_sessions' as Permission },
+    { href: '/dashboard/eis-sales', icon: FileText, label: 'Sales', permission: 'view_sessions' as Permission },
     { href: '/dashboard/sales', icon: BarChart2, label: 'Reports', permission: 'view_reports' as Permission },
     { href: '/dashboard/expenses', icon: CreditCard, label: 'Expenses', permission: 'view_expenses' as Permission },
     { href: '/dashboard/inventory', icon: Boxes, label: 'Inventory', permission: 'view_inventory' as Permission },
@@ -1116,13 +1116,59 @@ function Header({ onPosClick }: { onPosClick?: () => void }) {
       <DashboardHeader branchId={activeBranchId}>
         <div className="flex min-w-0 items-center gap-2 sm:gap-4">
           <SidebarTrigger className="h-9 w-9 shrink-0" />
-          <Badge
-            variant="secondary"
-            className="max-w-[42vw] truncate px-2 py-1 text-[11px] font-medium lg:hidden"
-            title={activeBranch?.name || (isWarehouseBranchId(activeBranchId) ? 'Warehouse' : 'Select Branch')}
-          >
-            {activeBranch?.name || (isWarehouseBranchId(activeBranchId) ? 'Warehouse' : 'Select Branch')}
-          </Badge>
+          {user.role === 'Admin' ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="h-7 max-w-[44vw] gap-1 truncate px-2 text-[11px] font-medium lg:hidden"
+                  title={activeBranch?.name || (isWarehouseBranchId(activeBranchId) ? 'Warehouse' : 'Select Branch')}
+                >
+                  <span className="min-w-0 truncate">
+                    {activeBranch?.name || (isWarehouseBranchId(activeBranchId) ? 'Warehouse' : 'Select Branch')}
+                  </span>
+                  <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="max-h-[70vh] w-56 overflow-y-auto">
+                <DropdownMenuLabel>Switch Branch</DropdownMenuLabel>
+                <DropdownMenuItem
+                  key={WAREHOUSE_BRANCH.id}
+                  onSelect={() => handleSetBranch(WAREHOUSE_BRANCH)}
+                  className={isWarehouseBranchId(activeBranchId) ? 'bg-accent font-medium' : ''}
+                >
+                  <Archive className="mr-2 h-4 w-4" />
+                  Warehouse
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                {branches.length > 0 ? (
+                  branches.map((branch) => (
+                    <DropdownMenuItem
+                      key={branch.id}
+                      onSelect={() => handleSetBranch(branch)}
+                      className={String(branch.id) === String(activeBranchId) ? 'bg-accent font-medium' : ''}
+                    >
+                      {branch.name}
+                    </DropdownMenuItem>
+                  ))
+                ) : (
+                  <DropdownMenuItem disabled>
+                    No branches configured
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <Badge
+              variant="secondary"
+              className="max-w-[42vw] truncate px-2 py-1 text-[11px] font-medium lg:hidden"
+              title={activeBranch?.name || (isWarehouseBranchId(activeBranchId) ? 'Warehouse' : 'Select Branch')}
+            >
+              {activeBranch?.name || (isWarehouseBranchId(activeBranchId) ? 'Warehouse' : 'Select Branch')}
+            </Badge>
+          )}
           <div className="hidden lg:flex items-center gap-2">
             <h1 className="text-xl font-semibold">{businessName}</h1>
             {user.role === 'Admin' ? (
@@ -2094,7 +2140,7 @@ export default function DashboardLayout({
         </Sidebar>
         <div className="flex-1 flex flex-col overflow-y-auto">
           <Header onPosClick={handleOpenPos} />
-          <main className="flex-1 w-full bg-background/95">
+          <main className="tauri-android-safe-bottom flex-1 w-full bg-background/95">
             <div className="mx-auto flex h-full w-full max-w-[1540px] flex-col px-4 py-4 sm:px-6 lg:px-8 xl:py-6 2xl:px-10">
               {eisActivationGate.required && (
                 <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-amber-950 dark:text-amber-200">

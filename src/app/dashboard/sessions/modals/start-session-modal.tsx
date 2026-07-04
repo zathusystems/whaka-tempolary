@@ -10,6 +10,7 @@ import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
 import { syncService } from '@/lib/services/sync-service';
+import { refreshInventoryFromMraApprovedProducts } from '@/lib/services/inventory-sync';
 import {
   Card,
   CardContent,
@@ -37,6 +38,18 @@ const LOCAL_STORAGE_KEYS = {
   BUSINESS_SETTINGS: 'handypos-business-settings',
 };
 
+const readBooleanFlag = (value: unknown): boolean | undefined => {
+    if (value === undefined || value === null || value === '') return undefined;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (['true', '1', 'yes', 'y'].includes(normalized)) return true;
+        if (['false', '0', 'no', 'n'].includes(normalized)) return false;
+    }
+    return undefined;
+};
+
 export default function StartSessionForm({ onSessionStarted }: { onSessionStarted: () => void }) {
     const { register, handleSubmit, formState: { errors }, getValues, control } = useForm<{ openingFloat: number; pumpName?: string }>({
         defaultValues: {
@@ -44,7 +57,7 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
             pumpName: '',
         },
     });
-    const { user } = useAuth();
+    const { user, business } = useAuth();
     const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
     const [step, setStep] = useState(1);
     const [isLoading, setIsLoading] = useState(false);
@@ -58,6 +71,41 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
     const [availablePumps, setAvailablePumps] = useState<string[]>([]);
     const [backendIsFuelAttendant, setBackendIsFuelAttendant] = useState<boolean | null>(null);
     const staffRecords = useLiveQuery(() => db.staff.toArray(), []);
+    const activeBusinessId = business?.id || user?.businessId || null;
+    const businessSettingsRecord = useLiveQuery(
+        () => {
+            if (!activeBusinessId) return undefined;
+            return db.businessSettings.get(String(activeBusinessId));
+        },
+        [activeBusinessId],
+        undefined
+    );
+    const isEisEnabled = React.useMemo(() => {
+        let cachedSettings: any = {};
+        if (typeof window !== 'undefined') {
+            try {
+                const raw = window.localStorage.getItem(LOCAL_STORAGE_KEYS.BUSINESS_SETTINGS);
+                cachedSettings = raw ? JSON.parse(raw) : {};
+            } catch {
+                cachedSettings = {};
+            }
+        }
+
+        const settingsBelongToBusiness =
+            !cachedSettings?.businessId ||
+            !activeBusinessId ||
+            String(cachedSettings.businessId) === String(activeBusinessId);
+
+        return Boolean(
+            readBooleanFlag(businessSettingsRecord?.enableEis) ??
+            readBooleanFlag((business as any)?.enableEis) ??
+            readBooleanFlag((business as any)?.enable_eis) ??
+            (settingsBelongToBusiness
+                ? readBooleanFlag(cachedSettings?.enableEis ?? cachedSettings?.enable_eis)
+                : undefined) ??
+            false
+        );
+    }, [activeBusinessId, business, businessSettingsRecord]);
     const currentUserEmail = (user?.email || '').trim().toLowerCase();
     const currentUserId = String(user?.uid || '').trim();
     const matchedStaff = staffRecords?.find((staff) => {
@@ -226,14 +274,30 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                     setInventoryRefreshStage('Refreshing inventory...');
 
                     console.log('[Sessions] Refreshing inventory cache for branch:', activeBranchId);
-                    const refreshed = await syncService.fetchAllInventoryFromBackend(activeBranchId, {
-                        onProgress: (progress) => {
-                            if (cancelled) return;
-                            if (typeof progress.percent === 'number') {
-                                setInventoryRefreshProgress(Math.max(0, Math.min(100, Math.round(progress.percent))));
-                            }
-                        },
-                    });
+                    let refreshed = false;
+                    let refreshError = '';
+
+                    if (isEisEnabled) {
+                        setInventoryRefreshStage('Syncing products...');
+                        const mraRefresh = await refreshInventoryFromMraApprovedProducts(activeBranchId);
+                        refreshed = mraRefresh.ok;
+                        refreshError = mraRefresh.error || '';
+                        if (!refreshed) {
+                            console.warn('[Sessions] EIS product sync skipped/failed:', refreshError);
+                        }
+                    }
+
+                    if (!refreshed) {
+                        setInventoryRefreshStage('Refreshing inventory...');
+                        refreshed = await syncService.fetchAllInventoryFromBackend(activeBranchId, {
+                            onProgress: (progress) => {
+                                if (cancelled) return;
+                                if (typeof progress.percent === 'number') {
+                                    setInventoryRefreshProgress(Math.max(0, Math.min(100, Math.round(progress.percent))));
+                                }
+                            },
+                        });
+                    }
 
                     if (cancelled) return;
 
@@ -250,7 +314,7 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
                         setInventoryRefreshStage('Inventory ready');
                     } else {
                         setHasFreshInventorySnapshot(false);
-                        setInventoryRefreshError('Failed to refresh inventory from backend. Retry before starting the session.');
+                        setInventoryRefreshError(refreshError || 'Failed to refresh inventory. Retry before starting the session.');
                         setInventoryRefreshStage('Refresh failed');
                     }
                 } catch (error) {
@@ -280,7 +344,7 @@ export default function StartSessionForm({ onSessionStarted }: { onSessionStarte
         return () => {
             cancelled = true;
         };
-    }, [activeBranchId, inventoryRefreshAttempt]);
+    }, [activeBranchId, inventoryRefreshAttempt, isEisEnabled]);
 
     // Use backend inventory for form display (ensures fresh data on session creation)
     const inventory = backendInventory;

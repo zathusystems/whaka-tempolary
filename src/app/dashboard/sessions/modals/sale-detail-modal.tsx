@@ -647,6 +647,10 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
         : 1;
       const copiesToPrint = Math.max(1, Math.floor(configuredCopies));
       const startingCopyNumber = getNextReceiptCopyNumber(orderId);
+      const isBluetoothPrinter =
+        defaultPrinter.connectionType === 'bluetooth' ||
+        String(defaultPrinter.id || '').toLowerCase().startsWith('bt:');
+      const printAttemptTimeoutMs = isBluetoothPrinter ? 60000 : 20000;
 
       toast({
         title: 'Printing...',
@@ -682,10 +686,10 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
             printerId: defaultPrinter.id,
             copies: 1,
             paperSize: selectedPaperWidth,
-            printerPaperSize: normalizePrinterPaperWidth(defaultPrinter.paperWidth),
+            printerPaperSize: selectedPaperWidth,
           }).then((success) => ({ success, timedOut: false })),
           new Promise<{ success: false; timedOut: true }>((resolve) =>
-            setTimeout(() => resolve({ success: false, timedOut: true }), 20000)
+            setTimeout(() => resolve({ success: false, timedOut: true }), printAttemptTimeoutMs)
           ),
         ]);
 
@@ -813,17 +817,17 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
                         <p>Original receipt: {fiscalInvoiceNumber || 'N/A'}</p>
                         {voidEisFiscalNumber && <p className="break-all">Cancellation fiscal number: {voidEisFiscalNumber}</p>}
                         {!voidEisIsConfirmed && !voidEisIsFailed && (
-                          <p>MRA portal may not show the cancellation until the pending EIS void retry is accepted.</p>
+                          <p>The cancellation may not show until the pending retry is accepted.</p>
                         )}
                         {voidEisIsFailed && (
-                          <p>Retry EIS correction.</p>
+                          <p>Retry correction.</p>
                         )}
                         {voidEisIsConfirmed && (
                           <p>Cancellation submitted separately.</p>
                         )}
                       </div>
                     ) : (
-                      <p className="mt-1 text-xs text-muted-foreground">No linked EIS void transaction was loaded yet.</p>
+                      <p className="mt-1 text-xs text-muted-foreground">No linked void record was loaded yet.</p>
                     )}
                   </div>
                 </div>
@@ -833,7 +837,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
             {isFiscalLocked && (
               <div className="bg-blue-500/10 dark:bg-blue-500/20 border border-blue-500/30 p-3 rounded-lg flex items-center gap-2">
                 <FileText className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-                <span className="text-sm font-medium text-blue-700 dark:text-blue-300">Original fiscal receipt is locked after MRA submission</span>
+                <span className="text-sm font-medium text-blue-700 dark:text-blue-300">Original legal receipt is locked after submission</span>
               </div>
             )}
 
@@ -1128,7 +1132,7 @@ export default function SaleDetailModal({ order, isOpen, onOpenChange }: { order
             {(loadingCorrections || correctionRows.length > 0) && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">EIS Corrections</CardTitle>
+                  <CardTitle className="text-base">Corrections</CardTitle>
                   <CardDescription>Fiscal credit, debit, and void documents linked to this sale.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">

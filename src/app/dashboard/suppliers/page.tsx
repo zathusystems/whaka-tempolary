@@ -852,7 +852,7 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
 
     return (
         <Dialog open={isOpen} onOpenChange={onOpenChange}>
-            <DialogContent className="sm:max-w-4xl">
+            <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-4xl">
                 <DialogHeader>
                     <DialogTitle>{supplier.name}</DialogTitle>
                     <DialogDescription>
@@ -861,13 +861,15 @@ const SupplierDetailDialog = ({ supplier, isOpen, onOpenChange, activeBranchId }
                             : 'Supplier details and purchase history.'}
                     </DialogDescription>
                 </DialogHeader>
-                <Tabs defaultValue="account">
-                    <TabsList className="grid w-full grid-cols-4">
-                        <TabsTrigger value="account">Account / Debts</TabsTrigger>
-                        <TabsTrigger value="history">Purchase History</TabsTrigger>
-                        <TabsTrigger value="products">Products</TabsTrigger>
-                        <TabsTrigger value="details">Details</TabsTrigger>
-                    </TabsList>
+                <Tabs defaultValue="account" className="min-w-0">
+                    <div className="-mx-1 overflow-x-auto px-1 pb-1">
+                        <TabsList className="inline-flex h-auto min-w-max gap-1 sm:grid sm:w-full sm:min-w-0 sm:grid-cols-4">
+                            <TabsTrigger value="account" className="shrink-0 whitespace-nowrap px-3 py-2 text-xs sm:text-sm">Account</TabsTrigger>
+                            <TabsTrigger value="history" className="shrink-0 whitespace-nowrap px-3 py-2 text-xs sm:text-sm">Purchases</TabsTrigger>
+                            <TabsTrigger value="products" className="shrink-0 whitespace-nowrap px-3 py-2 text-xs sm:text-sm">Products</TabsTrigger>
+                            <TabsTrigger value="details" className="shrink-0 whitespace-nowrap px-3 py-2 text-xs sm:text-sm">Details</TabsTrigger>
+                        </TabsList>
+                    </div>
                      <TabsContent value="account">
                         <Card>
                             <CardHeader>

@@ -573,6 +573,7 @@ export const Receipt = ({
     longBusinessNameTextClass: string;
     payableTextClass: string;
     inlineValueMaxWidthClass: string;
+    fontSizePx: number;
     qrSize: string;
     qrMinHeight: string;
     lineWidth: number;
@@ -583,10 +584,11 @@ export const Receipt = ({
       contentPaddingClass: 'px-1 py-2',
       bodyTextClass: 'text-[7px]',
       metaTextClass: 'text-[6px]',
-      businessNameTextClass: 'text-[8px]',
+      businessNameTextClass: 'text-[7px]',
       longBusinessNameTextClass: 'text-[7px] tracking-normal',
       payableTextClass: 'text-[9px]',
       inlineValueMaxWidthClass: 'min-w-0 max-w-[52px]',
+      fontSizePx: 6,
       qrSize: '18mm',
       qrMinHeight: '20mm',
       lineWidth: 16,
@@ -597,10 +599,11 @@ export const Receipt = ({
       contentPaddingClass: 'px-1.5 py-2',
       bodyTextClass: 'text-[8px]',
       metaTextClass: 'text-[7px]',
-      businessNameTextClass: 'text-[9px]',
+      businessNameTextClass: 'text-[8px]',
       longBusinessNameTextClass: 'text-[8px] tracking-normal',
       payableTextClass: 'text-[10px]',
       inlineValueMaxWidthClass: 'min-w-0 max-w-[72px]',
+      fontSizePx: 7,
       qrSize: '20mm',
       qrMinHeight: '22mm',
       lineWidth: 21,
@@ -611,10 +614,11 @@ export const Receipt = ({
       contentPaddingClass: 'px-2 py-2',
       bodyTextClass: 'text-[8px]',
       metaTextClass: 'text-[7px]',
-      businessNameTextClass: 'text-[9px]',
+      businessNameTextClass: 'text-[8px]',
       longBusinessNameTextClass: 'text-[8px] tracking-normal',
       payableTextClass: 'text-[10px]',
       inlineValueMaxWidthClass: 'min-w-0 max-w-[92px]',
+      fontSizePx: 8,
       qrSize: '22mm',
       qrMinHeight: '24mm',
       lineWidth: 25,
@@ -625,24 +629,26 @@ export const Receipt = ({
       contentPaddingClass: 'px-2 py-2',
       bodyTextClass: 'text-[9px]',
       metaTextClass: 'text-[8px]',
-      businessNameTextClass: 'text-[10px]',
+      businessNameTextClass: 'text-[9px]',
       longBusinessNameTextClass: 'text-[9px] tracking-normal',
       payableTextClass: 'text-[11px]',
       inlineValueMaxWidthClass: 'min-w-0 max-w-[108px]',
+      fontSizePx: 9,
       qrSize: '24mm',
       qrMinHeight: '26mm',
-      lineWidth: 28,
-      compactTextMax: 22,
+      lineWidth: 32,
+      compactTextMax: 14,
     },
     '80mm': {
       containerWidthClass: 'w-[300px]',
       contentPaddingClass: 'px-3 py-2',
       bodyTextClass: 'text-[10px]',
       metaTextClass: 'text-[9px]',
-      businessNameTextClass: 'text-[12px]',
+      businessNameTextClass: 'text-[10px]',
       longBusinessNameTextClass: 'text-[10px] tracking-normal',
       payableTextClass: 'text-sm',
       inlineValueMaxWidthClass: 'min-w-0 max-w-[170px]',
+      fontSizePx: 10,
       qrSize: '28mm',
       qrMinHeight: '30mm',
       lineWidth: 42,
@@ -655,12 +661,7 @@ export const Receipt = ({
   const bodyTextClass = layout.bodyTextClass;
   const metaTextClass = layout.metaTextClass;
   const businessNameTextClass = layout.businessNameTextClass;
-  const businessNameWidthClass =
-    businessNameLength > 30
-      ? layout.longBusinessNameTextClass
-      : businessNameLength > 20
-      ? 'tracking-[0.04em]'
-      : 'tracking-[0.08em]';
+  const businessNameWidthClass = businessNameLength > 30 ? layout.longBusinessNameTextClass : '';
   const payableTextClass = layout.payableTextClass;
   const inlineValueMaxWidthClass = layout.inlineValueMaxWidthClass;
   const qrSizeStyle = {
@@ -703,7 +704,12 @@ export const Receipt = ({
   const isCopyReceipt = copyNumber > 1;
   const receiptTypeLabel = `COPY${copyNumber > 2 ? ` #${copyNumber}` : ''}`;
 
-  const formatReceiptAmount = (value: unknown): string => currencyFormatter(toFiniteNumber(value, 0)).replace(/\s+/g, ' ');
+  const formatReceiptAmount = (value: unknown): string => {
+    return toFiniteNumber(value, 0).toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  };
   const formatReceiptQuantity = (value: unknown): string => {
     const parsed = toFiniteNumber(value, 0);
     if (Math.abs(parsed - Math.round(parsed)) < 0.0001) {
@@ -729,6 +735,10 @@ export const Receipt = ({
     return formatted || '0';
   };
   const receiptNumberDisplay = fiscalInvoiceNumber || orderNumberDisplay;
+  const localReceiptSequence = orderNumberDisplay !== '-'
+    ? orderNumberDisplay
+    : toTrimmedString((order as any).id) || '-';
+  const posReferenceDisplay = `${format(orderDate, 'yyyyMMdd-HHmmss')}-${localReceiptSequence}`;
   const sellerAddressLines = (businessAddress || '')
     .split(/\n|,/)
     .map((line) => line.trim())
@@ -847,14 +857,129 @@ export const Receipt = ({
   );
   const tenderedAmount = receiptAmountPaid > 0 ? receiptAmountPaid : normalizedFinalPayable;
   const legalRule = '-'.repeat(Math.max(16, receiptLineWidth - 2));
+  const thermalLine = (text = '') => text.replace(/\s+/g, ' ').trim();
+  const centerThermal = (text: string) => {
+    const value = thermalLine(text);
+    if (value.length >= receiptLineWidth) return value;
+    return `${' '.repeat(Math.floor((receiptLineWidth - value.length) / 2))}${value}`;
+  };
+  const alignThermal = (left: string, right: string) => {
+    const cleanLeft = thermalLine(left);
+    const cleanRight = thermalLine(right);
+    if (!cleanLeft) return cleanRight;
+    if (!cleanRight) return cleanLeft;
+    if (cleanLeft.length + cleanRight.length + 1 >= receiptLineWidth) {
+      const rightLine =
+        cleanRight.length < receiptLineWidth
+          ? `${' '.repeat(receiptLineWidth - cleanRight.length)}${cleanRight}`
+          : cleanRight;
+      return `${cleanLeft}\n${rightLine}`;
+    }
+    return `${cleanLeft}${' '.repeat(receiptLineWidth - cleanLeft.length - cleanRight.length)}${cleanRight}`;
+  };
+  const thermalAmount = (value: unknown) => formatReceiptAmount(value);
+  const thermalTextLines: string[] = [];
+  if (effectiveShowHeader) {
+    thermalTextLines.push(
+      centerThermal(legalReceiptTitle),
+      centerThermal(businessNameDisplay)
+    );
+    if (sellerAddressLines.length > 0) {
+      sellerAddressLines.forEach((line) => thermalTextLines.push(centerThermal(line.toUpperCase())));
+    } else {
+      thermalTextLines.push(centerThermal('ADDRESS: N/A'));
+    }
+    thermalTextLines.push(
+      centerThermal(`CELL: ${businessPhone || 'N/A'}`),
+      centerThermal(`EMAIL: ${businessEmail || 'N/A'}`),
+      centerThermal(`TIN: ${sellerTin || 'N/A'}`),
+      centerThermal(vatRegistrationLabel.toUpperCase())
+    );
+    if (isCopyReceipt) thermalTextLines.push(centerThermal(receiptTypeLabel));
+    if (taxOfficeLabel) thermalTextLines.push(centerThermal(taxOfficeLabel.toUpperCase()));
+    if (pumpName) thermalTextLines.push(centerThermal(`PUMP: ${pumpName.toUpperCase()}`));
+    thermalTextLines.push('');
+  }
+  thermalTextLines.push(
+    alignThermal('Buyers Name:', buyerName),
+    alignThermal('Buyers Tin:', buyerTin),
+    alignThermal('Receipt Number:', receiptNumberDisplay),
+    alignThermal('POS Ref:', posReferenceDisplay),
+    legalRule
+  );
+  if (effectiveShowItemDetails) {
+    orderItems.forEach((item) => {
+      const itemPrice = toFiniteNumber(item.price, 0);
+      const itemQuantity = Math.max(1, toFiniteNumber(item.quantity, 1));
+      const itemTotal = toFiniteNumber(item.total, itemPrice * itemQuantity);
+      const itemSubtotal = toFiniteNumber(item.subtotal, Math.max(0, itemTotal - toFiniteNumber(item.tax_amount ?? item.taxAmount, 0)));
+      const itemVat = toFiniteNumber(item.tax_amount ?? item.taxAmount, Math.max(0, itemTotal - itemSubtotal));
+      const itemTaxRate = toFiniteNumber(item.tax_rate ?? item.taxRate, itemVat > 0 && itemSubtotal > 0 ? (itemVat / itemSubtotal) * 100 : 0);
+      const itemTaxCode = resolveTaxCode(itemTaxRate, item.tax_type ?? item.taxType);
+      const itemDiscount = Math.max(0, toFiniteNumber(item.discount_amount ?? item.discountAmount, 0));
+      const itemDiscountName = String(item.discount_name ?? item.discountName ?? 'Discount').trim() || 'Discount';
+      thermalTextLines.push(
+        alignThermal(`${formatReceiptQuantity(itemQuantity)} X ${thermalAmount(itemPrice)}`, `${thermalAmount(itemTotal)} ${itemTaxCode}`),
+        compactReceiptText(item.name, 14)
+      );
+      if (itemDiscount > 0) {
+        thermalTextLines.push(alignThermal(compactReceiptText(itemDiscountName, Math.max(8, receiptLineWidth - 14)), `-${thermalAmount(itemDiscount)}`));
+      }
+    });
+    thermalTextLines.push(legalRule);
+  }
+  if (effectiveShowTaxBreakdown && (legalTaxBreakdown.length > 0 || legalLevyBreakdown.length > 0)) {
+    legalTaxBreakdown.forEach((tax) => {
+      const rateLabel = `${tax.code}-${formatReceiptRate(tax.rate)}%`;
+      thermalTextLines.push(
+        alignThermal(`TAXABLE ${rateLabel}`, thermalAmount(tax.taxableValue)),
+        alignThermal(`VAT ${rateLabel}`, thermalAmount(tax.vatAmount))
+      );
+    });
+    thermalTextLines.push(alignThermal('TOTAL VAT:', thermalAmount(receiptVatTotal)));
+    legalLevyBreakdown.forEach((levy) => {
+      thermalTextLines.push(alignThermal(`LEVY ${levy.levyTypeId}-${formatReceiptRate(levy.levyRate)}%`, thermalAmount(levy.levyAmount)));
+    });
+    thermalTextLines.push(legalRule);
+  }
+  if (receiptDiscountTotal > 0) {
+    thermalTextLines.push(alignThermal('TOTAL DISCOUNT:', thermalAmount(receiptDiscountTotal)));
+  }
+  thermalTextLines.push(
+    alignThermal('TOTAL:', thermalAmount(normalizedFinalPayable)),
+    alignThermal('Amount Tendered:', thermalAmount(tenderedAmount)),
+    alignThermal('Change:', thermalAmount(receiptChangeDisplay))
+  );
+  if (paymentMethodDisplay) {
+    thermalTextLines.push(alignThermal('Payment:', paymentMethodDisplay));
+  }
+  thermalTextLines.push(
+    '',
+    centerThermal(`DATE: ${format(orderDate, 'yyyy-MM-dd')} TIME: ${format(orderDate, 'HH:mm:ss')}`)
+  );
+  if (hasEisVerificationData) {
+    thermalTextLines.push(centerThermal('Scan Here For Receipt Details'));
+  }
+  if (!shouldRenderQr && hasEisVerificationData) {
+    thermalTextLines.push(centerThermal('QR PENDING'));
+  }
+  if (effectiveShowFooter) {
+    thermalTextLines.push('', centerThermal(legalReceiptEndTitle), legalRule, 'THANK YOU!');
+  }
+  const thermalReceiptText = thermalTextLines.join('\n').replace(/\n{3,}/g, '\n\n');
   const receiptRootClass = `${containerWidthClass} ${contentPaddingClass} bg-white text-black font-mono ${bodyTextClass} leading-tight`;
+  const receiptRootStyle: React.CSSProperties = {
+    fontSize: `${layout.fontSizePx}px`,
+  };
 
   return (
     <div
       id={elementId}
       className={receiptRootClass}
+      style={receiptRootStyle}
       data-eis-qr-payload={qrPayload || undefined}
       data-eis-validation-mode={validationPayload.mode}
+      data-thermal-receipt-text={encodeURIComponent(thermalReceiptText)}
     >
       <style jsx global>{`
         #${elementId},
@@ -889,20 +1014,12 @@ export const Receipt = ({
         ` : ''}
       `}</style>
 
-      {isCopyReceipt && (
-        <div className="mb-1 text-center">
-          <p className="inline-block border border-black px-1.5 py-[1px] text-[8px] font-semibold leading-none">
-            {receiptTypeLabel}
-          </p>
-        </div>
-      )}
-
       {effectiveShowHeader && (
         <div className="mt-1 text-center">
          
          
-          <p className="mt-2 font-bold leading-tight">{legalReceiptTitle}</p>
-          <p className={`${businessNameTextClass} font-bold leading-tight`}>{businessNameDisplay}</p>
+          <p className="mt-2 whitespace-nowrap text-center font-bold leading-tight">{legalReceiptTitle}</p>
+          <p className={`${businessNameTextClass} ${businessNameWidthClass} font-bold leading-tight`}>{businessNameDisplay}</p>
           {sellerAddressLines.length > 0 ? (
             sellerAddressLines.map((line, index) => (
               <p key={`${line}-${index}`} className={`${metaTextClass} leading-tight`}>
@@ -916,6 +1033,11 @@ export const Receipt = ({
           <p className={`${metaTextClass} leading-tight`}>EMAIL: {businessEmail || 'N/A'}</p>
           <p className={`${bodyTextClass} leading-tight`}>TIN: {sellerTin || 'N/A'}</p>
           <p className={`${bodyTextClass} font-bold leading-tight`}>{vatRegistrationLabel.toUpperCase()}</p>
+          {isCopyReceipt && (
+            <p className={`${bodyTextClass} text-center font-bold leading-tight`}>
+              {receiptTypeLabel}
+            </p>
+          )}
           {taxOfficeLabel && <p className={`${metaTextClass} leading-tight`}>{taxOfficeLabel.toUpperCase()}</p>}
           {pumpName && <p className={`${metaTextClass} leading-tight`}>PUMP: {pumpName.toUpperCase()}</p>}
         </div>
@@ -934,9 +1056,13 @@ export const Receipt = ({
           <span>Receipt Number:</span>
           <span className="text-right break-all font-semibold">{receiptNumberDisplay}</span>
         </div>
+        <div className="grid grid-cols-[auto_1fr] gap-x-2">
+          <span>POS Ref:</span>
+          <span className="text-right break-all font-semibold">{posReferenceDisplay}</span>
+        </div>
         {!isFiscalizedReceipt && (
           <div className="grid grid-cols-[auto_1fr] gap-x-2">
-            <span>EIS Status:</span>
+            <span>Receipt Status:</span>
             <span className="text-right font-semibold">{fiscalStatusDisplay}</span>
           </div>
         )}
@@ -1040,7 +1166,7 @@ export const Receipt = ({
         {hasEisVerificationData && <p>Scan Here For Receipt Details</p>}
         {shouldRenderQr ? (
           <div className="flex flex-col items-center justify-center pt-2" style={qrContainerStyle}>
-            <div className="bg-white p-1" style={qrSizeStyle} aria-label="MRA EIS Validation QR Code">
+            <div className="bg-white p-1" style={qrSizeStyle} aria-label="Receipt validation QR code">
               <QRCode
                 value={qrPayload}
                 size={256}
@@ -1050,13 +1176,13 @@ export const Receipt = ({
             </div>
           </div>
         ) : hasEisVerificationData ? (
-          <p className={`${metaTextClass} mt-2 font-semibold`}>MRA QR PENDING</p>
+          <p className={`${metaTextClass} mt-2 font-semibold`}>QR PENDING</p>
         ) : null}
       </div>
 
       {effectiveShowFooter && (
         <div className={`mt-5 text-center ${bodyTextClass}`}>
-          <p className="font-bold">{legalReceiptEndTitle}</p>
+          <p className="whitespace-nowrap text-center font-bold">{legalReceiptEndTitle}</p>
           <p className="mt-2">THANK YOU!</p>
         </div>
       )}

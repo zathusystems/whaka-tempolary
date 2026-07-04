@@ -424,6 +424,17 @@ const extractBackendErrorMessage = (errorData: any, fallback: string): string =>
   return message || fallback;
 };
 
+const cleanUserFacingOrderError = (message: string): string => {
+  const raw = String(message || '').trim();
+  if (!raw) return 'Sale could not be completed. Please try again.';
+
+  if (/backend rejected order|http \d+|mra request failed|traceback|stack|nameresolutionerror|max retries exceeded/i.test(raw)) {
+    return 'Sale could not be completed. Please try again.';
+  }
+
+  return raw.length > 180 ? `${raw.slice(0, 177).trim()}...` : raw;
+};
+
 const isRetryBlockedBackendOrderError = (statusCode: number, message: string): boolean => {
   if (statusCode < 400 || statusCode >= 500) return false;
 
@@ -515,9 +526,111 @@ const hasFiscalReceiptData = (order: Partial<Order> | Record<string, any> | null
     (order as any).eis_validation_metadata,
     (order as any).mra_submission,
     (order as any).mraSubmission,
+    (order as any).order?.mra_submission,
+    (order as any).order?.mraSubmission,
+    (order as any).data?.mra_submission,
+    (order as any).data?.mraSubmission,
   ]);
 
   return Boolean(fiscalNumber && validationUrl);
+};
+
+const readBackendOrderField = (source: any, keys: string[]): any => {
+  const candidates = [
+    source,
+    source?.order,
+    source?.data,
+    source?.result,
+    source?.invoice,
+    source?.receipt,
+    source?.eis_validation_metadata,
+    source?.eisValidationMetadata,
+    source?.mra_submission,
+    source?.mraSubmission,
+    source?.order?.eis_validation_metadata,
+    source?.order?.eisValidationMetadata,
+    source?.order?.mra_submission,
+    source?.order?.mraSubmission,
+    source?.data?.eis_validation_metadata,
+    source?.data?.eisValidationMetadata,
+    source?.data?.mra_submission,
+    source?.data?.mraSubmission,
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') {
+      continue;
+    }
+    for (const key of keys) {
+      const value = candidate[key];
+      if (value !== undefined && value !== null && String(value).trim() !== '') {
+        return value;
+      }
+    }
+  }
+
+  return undefined;
+};
+
+const normalizeBackendOrderResponse = (data: any) => {
+  const fiscalInvoiceNumber = readBackendOrderField(data, [
+    'fiscal_invoice_number',
+    'fiscalInvoiceNumber',
+    'invoiceNumber',
+    'receiptNumber',
+  ]);
+  const eisStatus = readBackendOrderField(data, ['eis_status', 'eisStatus', 'status']);
+  const eisUuid = readBackendOrderField(data, ['eis_uuid', 'eisUuid', 'uuid']);
+  const eisSubmittedAt = readBackendOrderField(data, ['eis_submitted_at', 'eisSubmittedAt', 'submittedAt']);
+  const qrCodePayload =
+    readBackendOrderField(data, [
+      'qr_code_payload',
+      'qrCodePayload',
+      'validationUrl',
+      'validationURL',
+      'offline_validation_url',
+      'offlineValidationUrl',
+    ]) ||
+    findReceiptValidationUrl(data);
+  const digitalSignature = readBackendOrderField(data, [
+    'digital_signature',
+    'digitalSignature',
+    'offline_signature',
+    'offlineSignature',
+    'invoiceSignature',
+    'signature',
+  ]);
+  const netAmount = readBackendOrderField(data, ['net_amount', 'netAmount']);
+  const vatAmount = readBackendOrderField(data, ['vat_amount', 'vatAmount', 'tax']);
+  const grossAmount = readBackendOrderField(data, ['gross_amount', 'grossAmount', 'total']);
+  const eisValidationMetadata =
+    data?.eis_validation_metadata ??
+    data?.eisValidationMetadata ??
+    data?.order?.eis_validation_metadata ??
+    data?.order?.eisValidationMetadata ??
+    data?.data?.eis_validation_metadata ??
+    data?.data?.eisValidationMetadata;
+  const mraSubmission =
+    data?.mra_submission ??
+    data?.mraSubmission ??
+    eisValidationMetadata?.mra_submission ??
+    eisValidationMetadata?.mraSubmission ??
+    data?.order?.mra_submission ??
+    data?.order?.mraSubmission;
+
+  return {
+    fiscalInvoiceNumber,
+    eisStatus,
+    eisUuid,
+    eisSubmittedAt,
+    qrCodePayload,
+    digitalSignature,
+    netAmount,
+    vatAmount,
+    grossAmount,
+    eisValidationMetadata,
+    mraSubmission,
+  };
 };
 
 
@@ -1402,8 +1515,8 @@ export default function PosPage() {
     if (shouldEnforceTaxMapping && unmappedProducts.length > 0) {
       toast({
         variant: 'destructive',
-        title: 'MRA Mapping Required',
-        description: `Cannot complete sale. Missing mapping for: ${unmappedProducts.join(', ')}`,
+        title: 'Product Setup Required',
+        description: `Cannot complete sale. Setup missing for: ${unmappedProducts.join(', ')}`,
       });
       return null;
     }
@@ -1754,7 +1867,8 @@ export default function PosPage() {
             if (response.ok) {
               const data = await response.json();
               console.log('[Order] Successfully synced order to backend:', finalOrderId, data);
-              const mraSubmission = data?.mra_submission || data?.eis_validation_metadata?.mra_submission;
+              const normalizedResponse = normalizeBackendOrderResponse(data);
+              const mraSubmission = normalizedResponse.mraSubmission;
               const mraSubmissionState = String(mraSubmission?.state || '').trim();
               const mraSubmissionMessage = String(mraSubmission?.message || '').trim();
               const mraIncomplete = Boolean(
@@ -1762,40 +1876,41 @@ export default function PosPage() {
                 !['accepted', 'offline_queued'].includes(mraSubmissionState)
               );
 
-              await db.orders.update(finalOrderId, {
-                fiscal_invoice_number: data?.fiscal_invoice_number,
-                fiscalInvoiceNumber: data?.fiscal_invoice_number,
-                eis_status: data?.eis_status,
-                eisStatus: data?.eis_status,
-                eis_uuid: data?.eis_uuid,
-                eisUuid: data?.eis_uuid,
-                eis_submitted_at: data?.eis_submitted_at,
-                eisSubmittedAt: data?.eis_submitted_at,
-                qr_code_payload: data?.qr_code_payload,
-                qrCodePayload: data?.qr_code_payload,
-                digital_signature: data?.digital_signature,
-                digitalSignature: data?.digital_signature,
-                net_amount: data?.net_amount,
-                netAmount: data?.net_amount,
-                vat_amount: data?.vat_amount,
-                vatAmount: data?.vat_amount,
-                gross_amount: data?.gross_amount,
-                grossAmount: data?.gross_amount,
-                eis_validation_metadata: data?.eis_validation_metadata,
-                eisValidationMetadata: data?.eis_validation_metadata,
+              const fiscalUpdate: Record<string, any> = {
                 _dirty: false,
                 _operation: undefined,
                 _synced_at: new Date().toISOString(),
                 syncStatus: mraIncomplete ? 'failed' : 'synced',
-                syncError: mraIncomplete ? (mraSubmissionMessage || 'MRA EIS submission is not complete.') : undefined,
+                syncError: mraIncomplete ? (mraSubmissionMessage || 'Legal receipt submission is not complete.') : undefined,
                 syncRetryBlocked: mraIncomplete && mraSubmissionState === 'rejected',
                 syncFailedAt: mraIncomplete ? new Date().toISOString() : undefined,
-              });
+              };
+              const setFiscalUpdate = (snakeKey: string, camelKey: string, value: unknown) => {
+                if (value !== undefined && value !== null && String(value).trim() !== '') {
+                  fiscalUpdate[snakeKey] = value;
+                  fiscalUpdate[camelKey] = value;
+                }
+              };
+              setFiscalUpdate('fiscal_invoice_number', 'fiscalInvoiceNumber', normalizedResponse.fiscalInvoiceNumber);
+              setFiscalUpdate('eis_status', 'eisStatus', normalizedResponse.eisStatus);
+              setFiscalUpdate('eis_uuid', 'eisUuid', normalizedResponse.eisUuid);
+              setFiscalUpdate('eis_submitted_at', 'eisSubmittedAt', normalizedResponse.eisSubmittedAt);
+              setFiscalUpdate('qr_code_payload', 'qrCodePayload', normalizedResponse.qrCodePayload);
+              setFiscalUpdate('digital_signature', 'digitalSignature', normalizedResponse.digitalSignature);
+              setFiscalUpdate('net_amount', 'netAmount', normalizedResponse.netAmount);
+              setFiscalUpdate('vat_amount', 'vatAmount', normalizedResponse.vatAmount);
+              setFiscalUpdate('gross_amount', 'grossAmount', normalizedResponse.grossAmount);
+              if (normalizedResponse.eisValidationMetadata) {
+                fiscalUpdate.eis_validation_metadata = normalizedResponse.eisValidationMetadata;
+                fiscalUpdate.eisValidationMetadata = normalizedResponse.eisValidationMetadata;
+              }
+
+              await db.orders.update(finalOrderId, fiscalUpdate);
 
               if (mraIncomplete) {
                 markSaleAsFailed(
                   finalOrderId,
-                  mraSubmissionMessage || 'MRA EIS submission is not complete.',
+                  mraSubmissionMessage || 'Legal receipt submission is not complete.',
                   { retryBlocked: mraSubmissionState === 'rejected' }
                 );
               } else {
@@ -1803,14 +1918,14 @@ export default function PosPage() {
               }
               if (mraSubmissionState === 'offline_queued') {
                 toast({
-                  title: 'Offline EIS Receipt Queued',
-                  description: mraSubmissionMessage || 'Sale was signed offline and queued for MRA upload.',
+                  title: 'Offline Receipt Queued',
+                  description: mraSubmissionMessage || 'Sale was signed offline and queued for upload.',
                 });
               } else if (mraSubmissionState && mraSubmissionState !== 'accepted') {
                 toast({
                   variant: mraSubmissionState === 'rejected' ? 'destructive' : 'default',
-                  title: mraSubmissionState === 'rejected' ? 'MRA Rejected Sale' : 'MRA Submission Pending',
-                  description: mraSubmissionMessage || 'MRA EIS submission is not complete.',
+                  title: mraSubmissionState === 'rejected' ? 'Sale Rejected' : 'Receipt Submission Pending',
+                  description: mraSubmissionMessage || 'Legal receipt submission is not complete.',
                 });
               }
 
@@ -1818,18 +1933,20 @@ export default function PosPage() {
               const orderWithFiscalData = (latestOrder || {
                 ...finalOrder,
                 ...data,
-                fiscalInvoiceNumber: data?.fiscal_invoice_number,
-                fiscal_invoice_number: data?.fiscal_invoice_number,
-                qrCodePayload: data?.qr_code_payload,
-                qr_code_payload: data?.qr_code_payload,
-                digitalSignature: data?.digital_signature,
-                digital_signature: data?.digital_signature,
-                eisStatus: data?.eis_status,
-                eis_status: data?.eis_status,
+                fiscalInvoiceNumber: normalizedResponse.fiscalInvoiceNumber,
+                fiscal_invoice_number: normalizedResponse.fiscalInvoiceNumber,
+                qrCodePayload: normalizedResponse.qrCodePayload,
+                qr_code_payload: normalizedResponse.qrCodePayload,
+                digitalSignature: normalizedResponse.digitalSignature,
+                digital_signature: normalizedResponse.digitalSignature,
+                eisStatus: normalizedResponse.eisStatus,
+                eis_status: normalizedResponse.eisStatus,
+                eisValidationMetadata: normalizedResponse.eisValidationMetadata,
+                eis_validation_metadata: normalizedResponse.eisValidationMetadata,
               }) as Order;
 
               if (eisEnabled && (mraIncomplete || !hasFiscalReceiptData(orderWithFiscalData))) {
-                const failureMessage = mraSubmissionMessage || 'MRA EIS did not return fiscal invoice number and validation QR.';
+                const failureMessage = mraSubmissionMessage || 'Legal receipt details are not ready.';
                 markSaleAsFailed(finalOrderId, failureMessage, { retryBlocked: mraSubmissionState === 'rejected' });
                 toast({
                   variant: 'destructive',
@@ -1844,15 +1961,16 @@ export default function PosPage() {
               const errorData = await response.json().catch(() => ({}));
               const errorMessage = extractBackendErrorMessage(
                 errorData,
-                `Backend rejected order with HTTP ${response.status}`
+                'Sale could not be completed. Please try again.'
               );
+              const userMessage = cleanUserFacingOrderError(errorMessage);
               const retryBlocked = isRetryBlockedBackendOrderError(response.status, errorMessage);
               console.warn('[Order] Backend rejected order:', response.status, errorData);
-              markSaleAsFailed(finalOrderId, errorMessage, { retryBlocked });
+              markSaleAsFailed(finalOrderId, userMessage, { retryBlocked });
               toast({
                 variant: 'destructive',
                 title: eisEnabled ? 'Legal Receipt Not Issued' : 'Sale Not Synced',
-                description: errorMessage,
+                description: userMessage,
               });
               return null;
             }

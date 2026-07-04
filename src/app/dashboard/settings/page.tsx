@@ -716,7 +716,7 @@ export default function BusinessSettingsPage() {
         toast({
           variant: 'destructive',
           title: 'Error',
-          description: 'No branches found in the server response.',
+          description: 'No branches were found for this business.',
         });
       }
     } catch (error) {
@@ -1062,9 +1062,6 @@ export default function BusinessSettingsPage() {
                   >
                     <div className="flex-1">
                       <p className="font-medium">{branch.name}</p>
-                      <p className="text-sm text-muted-foreground">
-                        ID: <code className="bg-background px-2 py-1 rounded text-xs">{branch.id}</code>
-                      </p>
                       {branch.address && (
                         <p className="text-sm text-muted-foreground mt-1">{branch.address}</p>
                       )}

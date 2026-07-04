@@ -35,9 +35,10 @@ class SilentPrintService {
         printerId,
         copies = 1,
         paperSize = '80mm',
-        printerPaperSize = paperSize,
         timeout = 5000
       } = options;
+      const resolvedPaperSize = normalizePrinterPaperWidth(paperSize);
+      const resolvedPrinterPaperSize = resolvedPaperSize;
 
       console.log('[SilentPrint] Attempting system print to:', printerName);
 
@@ -50,13 +51,13 @@ class SilentPrintService {
             htmlContent,
             resolvedPrinterId,
             copies,
-            paperSize,
-            printerPaperSize
+            resolvedPaperSize,
+            resolvedPrinterPaperSize
           );
 
           if (!tauriResult && this.isWindowsEnvironment()) {
             console.warn('[SilentPrint] Tauri print failed on Windows, trying browser fallback.');
-            return await this.printViaIframe(htmlContent, copies, paperSize);
+            return await this.printViaIframe(htmlContent, copies, resolvedPaperSize);
           }
 
           return tauriResult;
@@ -65,17 +66,17 @@ class SilentPrintService {
         // No usable native printer ID: fallback to browser print path.
         console.warn('[SilentPrint] Could not resolve a native printer ID, falling back to browser print.');
         return this.isWindowsEnvironment()
-          ? await this.printViaIframe(htmlContent, copies, paperSize)
-          : await this.printViaAutoSubmit(htmlContent, copies, paperSize);
+          ? await this.printViaIframe(htmlContent, copies, resolvedPaperSize)
+          : await this.printViaAutoSubmit(htmlContent, copies, resolvedPaperSize);
       }
 
       // Check if running in Electron environment
       if (this.isElectronAvailable()) {
-        return await this.printViaElectron(htmlContent, printerName, copies, paperSize);
+        return await this.printViaElectron(htmlContent, printerName, copies, resolvedPaperSize);
       }
 
       // Fallback: Use browser's print API with auto-submit
-      return await this.printViaAutoSubmit(htmlContent, copies, paperSize);
+      return await this.printViaAutoSubmit(htmlContent, copies, resolvedPaperSize);
     } catch (error) {
       console.error('[SilentPrint] Error in system print:', error);
       return false;

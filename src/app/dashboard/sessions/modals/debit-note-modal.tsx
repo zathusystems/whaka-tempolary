@@ -103,7 +103,7 @@ export function DebitNoteModal({
         const eisStatus = String((response as any).eis_result?.eis_status || debitNote.eis_status || '').trim();
         toast({
           title: 'Debit Note Created',
-          description: `Debit Note ${debitNote.debit_note_number} created${eisStatus ? ` with EIS status ${eisStatus}` : ''}.`,
+          description: `Debit Note ${debitNote.debit_note_number} created${eisStatus ? ` with receipt status ${eisStatus}` : ''}.`,
         });
         reset();
         onOpenChange(false);

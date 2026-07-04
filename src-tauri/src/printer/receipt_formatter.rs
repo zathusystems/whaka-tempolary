@@ -4,7 +4,7 @@
 pub const RECEIPT_LINE_WIDTH_30MM: usize = 16;
 pub const RECEIPT_LINE_WIDTH_40MM: usize = 21;
 pub const RECEIPT_LINE_WIDTH_50MM: usize = 25;
-pub const RECEIPT_LINE_WIDTH_58MM: usize = 28;
+pub const RECEIPT_LINE_WIDTH_58MM: usize = 32;
 pub const RECEIPT_LINE_WIDTH_80MM: usize = 42;
 pub const DEFAULT_RECEIPT_LINE_WIDTH: usize = RECEIPT_LINE_WIDTH_80MM;
 pub const COMPACT_RECEIPT_LINE_WIDTH: usize = RECEIPT_LINE_WIDTH_58MM;
@@ -19,6 +19,24 @@ pub fn resolve_line_width(paper_size: Option<&str>) -> usize {
     }
 }
 
+pub fn build_escpos_receipt(
+    html: &str,
+    paper_size: Option<&str>,
+    printer_paper_width: Option<&str>,
+) -> Vec<u8> {
+    let (line_width, horizontal_offset) = resolve_receipt_layout(paper_size, printer_paper_width);
+    html_to_escpos(html, line_width, horizontal_offset)
+}
+
+pub fn resolve_receipt_layout(
+    paper_size: Option<&str>,
+    _printer_paper_width: Option<&str>,
+) -> (usize, usize) {
+    let line_width = resolve_line_width(paper_size);
+
+    (line_width, 0)
+}
+
 pub fn cash_drawer_pulse() -> Vec<u8> {
     b"\x1B@\x1Bp\x00\x19\xFA".to_vec()
 }
@@ -28,14 +46,17 @@ pub fn html_to_escpos(html: &str, line_width: usize, horizontal_offset: usize) -
     let mut data = Vec::new();
     data.extend_from_slice(b"\x1B\x40"); // Initialize printer
     data.extend_from_slice(b"\x1B\x74\x00"); // Code page
-    data.extend_from_slice(b"\x1B\x21\x00"); // Normal mode
+    append_base_text_mode(&mut data, line_width);
     data.extend_from_slice(b"\x1B\x32"); // Restore default line spacing
 
-    let printable_text = html_to_printable_text(html, line_width);
+    let thermal_text = extract_thermal_receipt_text(html);
+    let uses_explicit_thermal_layout = thermal_text.is_some();
+    let printable_text = thermal_text.unwrap_or_else(|| html_to_printable_text(html, line_width));
     let mut emphasized_company_name = false;
-    let mut allow_company_name_detection = true;
+    let mut allow_company_name_detection = !uses_explicit_thermal_layout;
     let qr_payload = extract_qr_payload(html);
     let mut has_qr = false;
+    let mut bold_next_company_line = false;
 
     for line in printable_text.lines() {
         let trimmed = line.trim();
@@ -66,8 +87,31 @@ pub fn html_to_escpos(html: &str, line_width: usize, horizontal_offset: usize) -
             line.to_string()
         };
 
+        let bold_current_line = uses_explicit_thermal_layout
+            && !trimmed.is_empty()
+            && (is_legal_receipt_marker(trimmed)
+                || is_copy_marker_line(trimmed)
+                || bold_next_company_line);
+
+        if bold_current_line {
+            append_bold_mode(&mut data, line_width, true);
+        }
         data.extend_from_slice(line_with_offset.as_bytes());
+        if bold_current_line {
+            append_bold_mode(&mut data, line_width, false);
+        }
         data.extend_from_slice(b"\n");
+
+        if uses_explicit_thermal_layout && !trimmed.is_empty() {
+            if bold_next_company_line && !is_legal_receipt_marker(trimmed) {
+                bold_next_company_line = false;
+            }
+            if lower.starts_with("*** start of legal receipt")
+                || lower.starts_with("*** start of receipt")
+            {
+                bold_next_company_line = true;
+            }
+        }
 
         if !has_qr && lower.starts_with("scan here for receipt details") {
             if let Some(payload) = qr_payload.as_deref() {
@@ -86,6 +130,32 @@ pub fn html_to_escpos(html: &str, line_width: usize, horizontal_offset: usize) -
 
     append_feed_and_cut(&mut data, has_qr);
     data
+}
+
+fn append_base_text_mode(data: &mut Vec<u8>, line_width: usize) {
+    if line_width <= COMPACT_RECEIPT_LINE_WIDTH {
+        data.extend_from_slice(b"\x1B\x4D\x01"); // Font B, smaller on most ESC/POS printers
+        data.extend_from_slice(b"\x1B\x21\x01"); // Font B through ESC ! for compatible clones
+    } else {
+        data.extend_from_slice(b"\x1B\x4D\x00"); // Font A
+        data.extend_from_slice(b"\x1B\x21\x00"); // Normal mode
+    }
+}
+
+fn append_bold_mode(data: &mut Vec<u8>, line_width: usize, enabled: bool) {
+    if enabled {
+        data.extend_from_slice(b"\x1B\x45\x01"); // Emphasized on
+        data.extend_from_slice(b"\x1B\x47\x01"); // Double-strike on for printers with weak bold
+        if line_width <= COMPACT_RECEIPT_LINE_WIDTH {
+            data.extend_from_slice(b"\x1B\x21\x09"); // Font B + emphasized
+        } else {
+            data.extend_from_slice(b"\x1B\x21\x08"); // Font A + emphasized
+        }
+    } else {
+        data.extend_from_slice(b"\x1B\x45\x00"); // Emphasized off
+        data.extend_from_slice(b"\x1B\x47\x00"); // Double-strike off
+        append_base_text_mode(data, line_width);
+    }
 }
 
 fn is_receipt_section_title(line: &str) -> bool {
@@ -135,7 +205,16 @@ fn is_company_name_candidate(line: &str) -> bool {
         && !is_divider_line(trimmed)
         && !is_receipt_section_title(trimmed)
         && !is_copy_marker_line(trimmed)
+        && !is_legal_receipt_marker(trimmed)
         && !trimmed.contains(':')
+}
+
+fn is_legal_receipt_marker(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    lower.starts_with("*** start of legal receipt")
+        || lower.starts_with("*** end of legal receipt")
+        || lower.starts_with("*** start of receipt")
+        || lower.starts_with("*** end of receipt")
 }
 
 fn truncate_with_suffix(value: &str, max_chars: usize) -> String {
@@ -587,6 +666,10 @@ fn format_line_by_section(
         return Some(center_text(trimmed, line_width));
     }
 
+    if is_legal_receipt_marker(trimmed) {
+        return Some(center_text(trimmed, line_width));
+    }
+
     if section == ReceiptSection::Footer {
         return Some(center_text(trimmed, line_width));
     }
@@ -805,6 +888,17 @@ fn extract_qr_payload(html: &str) -> Option<String> {
     None
 }
 
+fn extract_thermal_receipt_text(html: &str) -> Option<String> {
+    let encoded = extract_attribute_value(html, "data-thermal-receipt-text")?;
+    let decoded = urlencoding::decode(&encoded).ok()?;
+    let value = decoded.replace('\r', "").trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 fn extract_attribute_value(html: &str, attr_name: &str) -> Option<String> {
     for quote in ['"', '\''] {
         let needle = format!("{}={}", attr_name, quote);
@@ -957,6 +1051,24 @@ mod tests {
     }
 
     #[test]
+    fn centers_legal_receipt_start_marker_without_banner_styling() {
+        let raw = "*** START OF LEGAL RECEIPT ***\nHANDYPOS\nTIN: 70267581\n*VAT REGISTERED*\nReceipt Number:\tCuQ-H-JY4Z-B";
+        let normalized = normalize_receipt_text_with_width(raw, DEFAULT_RECEIPT_LINE_WIDTH);
+        let lines: Vec<&str> = normalized.lines().collect();
+        let start_line = lines
+            .iter()
+            .find(|line| line.trim() == "*** START OF LEGAL RECEIPT ***")
+            .expect("missing legal receipt start marker");
+        let vat_line = lines
+            .iter()
+            .find(|line| line.trim() == "*VAT REGISTERED*")
+            .expect("missing VAT registration marker");
+
+        assert!(start_line.starts_with(' '), "start marker was not centered: {start_line}");
+        assert!(vat_line.starts_with(' '), "VAT marker was not centered: {vat_line}");
+    }
+
+    #[test]
     fn prints_qr_between_scan_instruction_and_legal_receipt_end() {
         let payload = "https://dev-eis-portal.mra.mw/ReceiptValidation/Validate/CuQ-D-JY4P-D";
         let html = format!(
@@ -971,5 +1083,20 @@ mod tests {
 
         assert!(scan_index < payload_index);
         assert!(payload_index < end_index);
+    }
+
+    #[test]
+    fn thermal_receipt_text_attribute_overrides_css_html_layout() {
+        let thermal = "*** START OF LEGAL RECEIPT ***\n1 X 19350.00                 19350.00 A\nCOKE 01X20 300 R...\nTOTAL:                       19350.00\nScan Here For Receipt Details\n*** END OF LEGAL RECEIPT ***";
+        let encoded = urlencoding::encode(thermal);
+        let html = format!(
+            r#"<div id="receipt-printable-area" data-thermal-receipt-text="{encoded}" data-eis-qr-payload="https://example.test/qr"><div style="display:flex"><span>broken css</span><span>layout</span></div></div>"#
+        );
+        let bytes = html_to_escpos(&html, DEFAULT_RECEIPT_LINE_WIDTH, 0);
+        let rendered = String::from_utf8_lossy(&bytes);
+
+        assert!(rendered.contains("1 X 19350.00                 19350.00 A"));
+        assert!(rendered.contains("TOTAL:                       19350.00"));
+        assert!(!rendered.contains("broken css"));
     }
 }

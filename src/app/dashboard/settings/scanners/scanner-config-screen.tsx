@@ -460,7 +460,7 @@ export function ScannerConfigScreen() {
                 await scannerService.testScan('1234567890');
                 toast({
                   title: 'Success',
-                  description: 'Test scan completed - check console for barcode',
+                  description: 'Test scan completed.',
                 });
               } catch (error) {
                 console.error('Error testing scanner:', error);

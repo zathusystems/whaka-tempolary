@@ -16,18 +16,21 @@ export class UnifiedPrintingService {
   async printReceipt(
     receiptHtml: string,
     printer: PrinterConfig,
-    copies: number = 1
+    copies: number = 1,
+    receiptPaperWidth: PrinterConfig['paperWidth'] = printer.paperWidth || '80mm'
   ): Promise<{ success: boolean; message: string }> {
     try {
       console.log('[UnifiedPrinting] Printing to:', printer.name, 'Type:', printer.connectionType);
 
       if (printer.connectionType === 'bluetooth') {
-        if (this.shouldUseNativeBluetoothPath(printer)) {
-          return await this.printViaNativeSystem(receiptHtml, printer, copies);
+        const nativeResult = await this.printViaNativeSystem(receiptHtml, printer, copies, receiptPaperWidth);
+        if (nativeResult.success || this.isLikelyNativeRuntime()) {
+          return nativeResult;
         }
+        console.warn('[UnifiedPrinting] Native Bluetooth print failed, trying Web Bluetooth fallback:', nativeResult.message);
         return await this.printViaBluetoothESCPOS(receiptHtml, printer, copies);
       } else {
-        return await this.printViaNativeSystem(receiptHtml, printer, copies);
+        return await this.printViaNativeSystem(receiptHtml, printer, copies, receiptPaperWidth);
       }
     } catch (error) {
       console.error('[UnifiedPrinting] Print error:', error);
@@ -141,7 +144,8 @@ export class UnifiedPrintingService {
   private async printViaNativeSystem(
     receiptHtml: string,
     printer: PrinterConfig,
-    copies: number
+    copies: number,
+    receiptPaperWidth: PrinterConfig['paperWidth'] = printer.paperWidth || '80mm'
   ): Promise<{ success: boolean; message: string }> {
     try {
       console.log('[UnifiedPrinting] Using native/system print path for:', printer.name);
@@ -149,8 +153,8 @@ export class UnifiedPrintingService {
         printerName: printer.name,
         printerId: printer.id,
         copies,
-        paperSize: printer.paperWidth,
-        printerPaperSize: printer.paperWidth,
+        paperSize: receiptPaperWidth || printer.paperWidth,
+        printerPaperSize: receiptPaperWidth || printer.paperWidth,
       });
 
       if (success) {
@@ -176,6 +180,19 @@ export class UnifiedPrintingService {
   private shouldUseNativeBluetoothPath(printer: PrinterConfig): boolean {
     const printerId = String(printer.id || '').trim().toLowerCase();
     return printerId.startsWith('cups:') || printerId.startsWith('bt:');
+  }
+
+  private isLikelyNativeRuntime(): boolean {
+    try {
+      return (
+        typeof (window as any).__TAURI__?.invoke === 'function' ||
+        typeof (window as any).__TAURI_INTERNALS__?.invoke === 'function' ||
+        navigator.userAgent.toLowerCase().includes('tauri') ||
+        navigator.userAgent.toLowerCase().includes('wry')
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -314,8 +331,11 @@ export class UnifiedPrintingService {
   /**
    * Test print to verify printer works
    */
-  async testPrint(printer: PrinterConfig): Promise<{ success: boolean; message: string }> {
-    const testWidth = printer.paperWidth || '80mm';
+  async testPrint(
+    printer: PrinterConfig,
+    receiptPaperWidth: PrinterConfig['paperWidth'] = printer.paperWidth || '80mm'
+  ): Promise<{ success: boolean; message: string }> {
+    const testWidth = receiptPaperWidth || printer.paperWidth || '80mm';
     const testReceipt = `
       <div style="font-family: monospace; width: ${testWidth}; padding: 4mm;">
         <div style="text-align: center; margin-bottom: 10mm;">
@@ -353,7 +373,7 @@ export class UnifiedPrintingService {
       </div>
     `;
 
-    return await this.printReceipt(testReceipt, printer, 1);
+    return await this.printReceipt(testReceipt, printer, 1, testWidth);
   }
 }
 

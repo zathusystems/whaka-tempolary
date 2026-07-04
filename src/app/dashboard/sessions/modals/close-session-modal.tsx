@@ -53,7 +53,7 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
   });
   
   const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
-  const { user } = useAuth();
+  const { user, business } = useAuth();
   const { format: formatCurrency } = useCurrency();
   const [isLoading, setIsLoading] = useState(false);
   const [isPrintingZReport, setIsPrintingZReport] = useState(false);
@@ -162,6 +162,7 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
 
       const htmlContent = buildZReportPrintHtml({
         session: closedSession,
+        business: business as any,
         paymentBreakdown: reportPaymentBreakdown,
         financialSummary: reportFinancialSummary,
         eisSummary: reportSummary.eisSummary,
@@ -174,7 +175,7 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
         printerId: defaultPrinter.id,
         copies: 1,
         paperSize: selectedPaperSize,
-        printerPaperSize: normalizePrinterPaperWidth(defaultPrinter.paperWidth),
+        printerPaperSize: selectedPaperSize,
         timeout: 20000,
       });
 
@@ -204,7 +205,7 @@ export default function CloseSessionForm({ session, onSessionClosed, onDone }: C
     } finally {
       setIsPrintingZReport(false);
     }
-  }, [activeBranchId, closedSession, formatCurrency, productMixSummary, sessionOrders]);
+  }, [activeBranchId, business, closedSession, formatCurrency, productMixSummary, sessionOrders]);
 
   const onSubmit = async (data: { actualCash: number }) => {
     if (!user || !activeBranchId) {

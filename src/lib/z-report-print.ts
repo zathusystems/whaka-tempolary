@@ -94,6 +94,22 @@ type ZReportSessionSnapshot = Pick<
 
 type BuildZReportPrintHtmlInput = {
   session: ZReportSessionSnapshot;
+  business?: {
+    name?: string | null;
+    tin?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    address?: string | null;
+    city?: string | null;
+    region?: string | null;
+    country?: string | null;
+    taxOffice?: string | null;
+    tax_office?: string | null;
+    isVatRegistered?: boolean | null;
+    is_vat_registered?: boolean | null;
+    vatRegistered?: boolean | null;
+    vat_registered?: boolean | null;
+  } | null;
   paymentBreakdown: ZReportPaymentBreakdown;
   financialSummary?: ZReportFinancialSummary;
   eisSummary?: ZReportEisSummary;
@@ -307,6 +323,39 @@ const formatSessionDate = (value?: string): string => {
   }
 };
 
+const centerLine = (line: string, width = 42): string => {
+  const normalized = toTrimmedString(line);
+  if (!normalized || normalized.length >= width) return normalized;
+  const padding = Math.floor((width - normalized.length) / 2);
+  return `${' '.repeat(Math.max(0, padding))}${normalized}`;
+};
+
+const normalizeBusinessDetails = (business: BuildZReportPrintHtmlInput['business']) => {
+  const name = toTrimmedString(business?.name) || 'HandyPOS';
+  const addressParts = [
+    toTrimmedString(business?.address),
+    toTrimmedString(business?.city),
+    toTrimmedString(business?.region),
+    toTrimmedString(business?.country),
+  ].filter(Boolean);
+  const vatRegistered = Boolean(
+    business?.isVatRegistered ??
+    business?.is_vat_registered ??
+    business?.vatRegistered ??
+    business?.vat_registered
+  );
+
+  return {
+    name,
+    address: addressParts.join(', '),
+    phone: toTrimmedString(business?.phone),
+    email: toTrimmedString(business?.email),
+    tin: toTrimmedString(business?.tin),
+    taxOffice: toTrimmedString(business?.taxOffice ?? business?.tax_office),
+    vatRegistered,
+  };
+};
+
 export const isSessionClosedForZReport = (
   session: Pick<Session, 'status' | 'closedAt'>
 ): boolean => {
@@ -316,6 +365,7 @@ export const isSessionClosedForZReport = (
 
 export const buildZReportPrintHtml = ({
   session,
+  business,
   paymentBreakdown,
   financialSummary = DEFAULT_FINANCIAL_SUMMARY,
   eisSummary = DEFAULT_EIS_SUMMARY,
@@ -333,91 +383,65 @@ export const buildZReportPrintHtml = ({
   const difference = toFiniteNumber(session.difference);
   const cashSales = toFiniteNumber(paymentBreakdown.cash);
   const expectedDrawer = openingFloat + cashSales;
-  const fiscalAssigned = toFiniteNumber(eisSummary.ordersWithFiscalNumber);
-  const fiscalPending = toFiniteNumber(eisSummary.pendingFiscalNumber);
-  const ordersWithQr = toFiniteNumber(eisSummary.ordersWithQr);
-  const ordersWithSignature = toFiniteNumber(eisSummary.ordersWithSignature);
-  const hasProductMixSummary = PRODUCT_REPORTING_CATEGORIES.some((category) => {
-    const entry = productMixSummary?.[category];
-    return (
-      toFiniteNumber(entry?.amount) > 0 ||
-      toFiniteNumber(entry?.quantity) > 0 ||
-      toFiniteNumber(entry?.itemCount) > 0
-    );
-  });
+  const businessDetails = normalizeBusinessDetails(business);
 
   const lines: string[] = [
+    centerLine('*** START OF SESSION REPORT ***'),
+    centerLine(businessDetails.name.toUpperCase()),
+    ...(businessDetails.address ? [centerLine(businessDetails.address)] : []),
+    ...(businessDetails.phone ? [centerLine(`CELL: ${businessDetails.phone}`)] : []),
+    ...(businessDetails.email ? [centerLine(`EMAIL: ${businessDetails.email}`)] : []),
+    ...(businessDetails.tin ? [centerLine(`TIN: ${businessDetails.tin}`)] : []),
+    centerLine(businessDetails.vatRegistered ? '*VAT REGISTERED*' : '*NON VAT REGISTERED*'),
+    ...(businessDetails.taxOffice ? [centerLine(businessDetails.taxOffice)] : []),
+    '--------------------------------',
     SESSION_END_REPORT_TITLE.toUpperCase(),
-    `Session ID: ${session.id}`,
-    `Session By: ${toTrimmedString(session.userName) || 'Unknown'}`,
-    `Generated: ${format(generatedAt, 'PPpp')}`,
+    `Cashier: ${toTrimmedString(session.userName) || 'Unknown'}`,
     `Started: ${formatSessionDate(session.startedAt)}`,
     `Closed: ${formatSessionDate(session.closedAt)}`,
+    `Printed: ${format(generatedAt, 'PPpp')}`,
     '--------------------------------',
-    'FINANCIAL SUMMARY',
+    `TOTAL SALES: ${formatCurrency(totalSales)}`,
+    '--------------------------------',
     `Orders: ${Math.max(0, Math.floor(toFiniteNumber(financialSummary.orderCount)))}`,
-    `Revenue: ${formatCurrency(netSales)}`,
-    `Tax Collected: ${formatCurrency(totalTax)}`,
-    `Total Sales: ${formatCurrency(totalSales)}`,
+    `Net Sales: ${formatCurrency(netSales)}`,
+    `Tax: ${formatCurrency(totalTax)}`,
+    `Gross Sales: ${formatCurrency(totalSales)}`,
+    ...(totalTips > 0 ? [`Tips: ${formatCurrency(totalTips)}`, `Total: ${formatCurrency(totalCollected)}`] : []),
     '--------------------------------',
-    'PAYMENT BREAKDOWN',
-    `Cash Sales: ${formatCurrency(cashSales)}`,
-    `Card Sales: ${formatCurrency(toFiniteNumber(paymentBreakdown.card))}`,
-    `Mobile Money: ${formatCurrency(toFiniteNumber(paymentBreakdown.mobileMoney))}`,
-    `On Account: ${formatCurrency(toFiniteNumber(paymentBreakdown.onAccount))}`,
-    `Other: ${formatCurrency(toFiniteNumber(paymentBreakdown.other))}`,
+    'PAYMENTS',
+    ...(cashSales > 0 ? [`Cash: ${formatCurrency(cashSales)}`] : []),
+    ...(toFiniteNumber(paymentBreakdown.card) > 0 ? [`Card: ${formatCurrency(toFiniteNumber(paymentBreakdown.card))}`] : []),
+    ...(toFiniteNumber(paymentBreakdown.mobileMoney) > 0
+      ? [`Mobile: ${formatCurrency(toFiniteNumber(paymentBreakdown.mobileMoney))}`]
+      : []),
+    ...(toFiniteNumber(paymentBreakdown.onAccount) > 0
+      ? [`On Account: ${formatCurrency(toFiniteNumber(paymentBreakdown.onAccount))}`]
+      : []),
+    ...(toFiniteNumber(paymentBreakdown.other) > 0 ? [`Other: ${formatCurrency(toFiniteNumber(paymentBreakdown.other))}`] : []),
     '--------------------------------',
-    ...(totalTips > 0
-      ? [
-          `Tips: ${formatCurrency(totalTips)}`,
-          `Total Collected: ${formatCurrency(totalCollected)}`,
-          '--------------------------------',
-        ]
-      : []),
-    ...(hasProductMixSummary
-      ? [
-          'PRODUCT MIX',
-          ...PRODUCT_REPORTING_CATEGORIES.flatMap((category) => {
-            const entry = productMixSummary?.[category];
-            const meta = getProductReportingCategoryMeta(category);
-            return [
-              `${meta.label}: ${formatCurrency(toFiniteNumber(entry?.amount))}`,
-              `  Qty: ${formatQuantity(entry?.quantity)} | Items: ${Math.max(
-                0,
-                Math.floor(toFiniteNumber(entry?.itemCount))
-              )}`,
-            ];
-          }),
-          '--------------------------------',
-        ]
-      : []),
-    'CASH RECONCILIATION',
     `Opening Float: ${formatCurrency(openingFloat)}`,
-    `Expected in Drawer: ${formatCurrency(expectedDrawer)}`,
+    `Expected Cash: ${formatCurrency(expectedDrawer)}`,
     `Actual Cash: ${formatCurrency(actualCash)}`,
     `Difference: ${formatCurrency(difference)}`,
-    // '--------------------------------',
-    // 'EIS COMPLIANCE',
-    // `Fiscal Assigned: ${Math.max(0, Math.floor(fiscalAssigned))}`,
-    // `Fiscal Pending: ${Math.max(0, Math.floor(fiscalPending))}`,
-    // `EIS Pending: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.pending)))}`,
-    // `EIS Submitted: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.submitted)))}`,
-    // `EIS Accepted: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.accepted)))}`,
-    // `EIS Rejected: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.rejected)))}`,
-    // `EIS Unknown: ${Math.max(0, Math.floor(toFiniteNumber(eisSummary.eisStatusCounts?.unknown)))}`,
-    // `With QR Payload: ${Math.max(0, Math.floor(ordersWithQr))}`,
-    // `With Signature: ${Math.max(0, Math.floor(ordersWithSignature))}`,
-    // `First Fiscal #: ${eisSummary.firstFiscalInvoice || 'N/A'}`,
-    // `Last Fiscal #: ${eisSummary.lastFiscalInvoice || 'N/A'}`,
-    // `First Submission: ${formatSessionDate(eisSummary.firstSubmissionAt)}`,
-    // `Last Submission: ${formatSessionDate(eisSummary.lastSubmissionAt)}`,
     '--------------------------------',
-    `END OF ${SESSION_END_REPORT_TITLE.toUpperCase()}`,
+    centerLine(`*** END OF ${SESSION_END_REPORT_TITLE.toUpperCase()} ***`),
   ];
 
   return `
 <div id="receipt-printable-area" style="font-family:'Courier New',monospace;font-size:12px;line-height:1.35;">
-  ${lines.map((line) => `<div>${escapeHtml(line)}</div>`).join('')}
+  ${lines.map((line) => {
+    const escaped = escapeHtml(line);
+    if (
+      line.includes('START OF SESSION REPORT') ||
+      line.includes(`END OF ${SESSION_END_REPORT_TITLE.toUpperCase()}`) ||
+      line === businessDetails.name.toUpperCase() ||
+      line.startsWith('TOTAL SALES:')
+    ) {
+      return `<div style="font-weight:700;">${escaped}</div>`;
+    }
+    return `<div>${escaped}</div>`;
+  }).join('')}
 </div>
 `.trim();
 };

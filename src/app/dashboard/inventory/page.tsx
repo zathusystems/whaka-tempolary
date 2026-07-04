@@ -18,7 +18,12 @@ import { db, type EisStockReceiptSource, type InventoryItem, type PurchaseRecord
 import { type BusinessType } from '@/lib/inventory/config';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useAuth } from '@/hooks/use-auth';
-import { syncInventoryFromBackend, getInventorySyncStatus, markInventorySynced } from '@/lib/services/inventory-sync';
+import {
+  syncInventoryFromBackend,
+  refreshInventoryFromMraApprovedProducts,
+  getInventorySyncStatus,
+  markInventorySynced,
+} from '@/lib/services/inventory-sync';
 import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/auth-fetch';
 import { logAuditAction } from '@/lib/audit';
@@ -347,9 +352,18 @@ export default function InventoryPage() {
       const backendBranchId = toBackendBranchId(branchId);
 
       try {
-        // Fetch all inventory items from backend
-        console.log('[InventoryPage] Fetching inventory from backend');
-        await syncService.fetchAllInventoryFromBackend(branchId);
+        if (isEisEnabled) {
+          console.log('[InventoryPage] Refreshing inventory from MRA approved products');
+          const mraRefresh = await refreshInventoryFromMraApprovedProducts(branchId);
+          if (!mraRefresh.ok) {
+            console.warn('[InventoryPage] MRA product refresh skipped/failed:', mraRefresh.error);
+            await syncService.fetchAllInventoryFromBackend(branchId);
+          }
+        } else {
+          // Fetch all inventory items from backend
+          console.log('[InventoryPage] Fetching inventory from backend');
+          await syncService.fetchAllInventoryFromBackend(branchId);
+        }
         console.log('[InventoryPage] Inventory fetch completed');
       } catch (error) {
         console.error('[InventoryPage] Failed to fetch inventory from backend:', error);
@@ -868,7 +882,9 @@ export default function InventoryPage() {
 
     setIsSyncing(true);
     try {
-      const result = await syncInventoryFromBackend(activeBranchId);
+      const result = isEisEnabled
+        ? await refreshInventoryFromMraApprovedProducts(activeBranchId)
+        : await syncInventoryFromBackend(activeBranchId);
       
       if (result.error) {
         toast({
@@ -881,7 +897,9 @@ export default function InventoryPage() {
         setSyncStatus({ hasPendingSync: false });
         toast({
           title: 'Sync Complete',
-          description: `Synced ${result.synced} products (${result.created} new, ${result.updated} updated)`,
+          description: isEisEnabled
+            ? `Synced ${result.synced} products from MRA-approved catalog`
+            : `Synced ${result.synced} products (${result.created} new, ${result.updated} updated)`,
         });
         if ((result.stockReconciliationWarnings || []).length > 0) {
           const warningCount = result.stockReconciliationWarnings?.length || 0;
@@ -1046,6 +1064,15 @@ export default function InventoryPage() {
   const transferCountLabel = `(${stockTransfersData.length} item${stockTransfersData.length === 1 ? '' : 's'})`;
   const wasteCountLabel = `(${wasteLogData.length} item${wasteLogData.length === 1 ? '' : 's'})`;
   const mraCountLabel = `(${mraMappingsData.length} item${mraMappingsData.length === 1 ? '' : 's'})`;
+
+  useEffect(() => {
+    if (!isEisEnabled || !activeBranchId || isWarehouseBranchId(activeBranchId)) {
+      return;
+    }
+
+    console.log('[InventoryPage] EIS enabled, refreshing products from MRA for branch:', activeBranchId);
+    pullServerData(activeBranchId);
+  }, [isEisEnabled, activeBranchId]);
 
   useEffect(() => {
     if (!isDeleteAllInventoryOpen && !isDeletingAllInventory) {

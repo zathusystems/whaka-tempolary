@@ -64,15 +64,32 @@ const actionDisplay: Record<AuditLog['actionType'], { label: string; variant: 'd
 
 
 const DetailsDialog = ({ details, isOpen, onOpenChange }: { details: Record<string, any>, isOpen: boolean, onOpenChange: (open: boolean) => void }) => {
+    const formatDetailLabel = (key: string) => key.replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+    const formatDetailValue = (value: unknown): string => {
+        if (value === null || value === undefined || value === '') return '-';
+        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+        if (typeof value === 'object') return 'Updated details';
+        return String(value);
+    };
+
     return (
         <Dialog open={isOpen} onOpenChange={onOpenChange}>
             <DialogContent>
                 <DialogHeader>
                     <DialogTitle>Action Details</DialogTitle>
                 </DialogHeader>
-                <pre className="mt-2 w-full overflow-y-auto rounded-lg bg-muted p-4">
-                    <code>{JSON.stringify(details, null, 2)}</code>
-                </pre>
+                <div className="mt-2 max-h-80 space-y-2 overflow-y-auto rounded-lg bg-muted/40 p-4 text-sm">
+                    {Object.entries(details || {}).length === 0 ? (
+                        <p className="text-muted-foreground">No extra details recorded.</p>
+                    ) : (
+                        Object.entries(details).map(([key, value]) => (
+                            <div key={key} className="flex flex-col gap-1 rounded-md bg-background/70 p-2 sm:flex-row sm:items-center sm:justify-between">
+                                <span className="font-medium capitalize text-muted-foreground">{formatDetailLabel(key)}</span>
+                                <span className="break-words text-right">{formatDetailValue(value)}</span>
+                            </div>
+                        ))
+                    )}
+                </div>
             </DialogContent>
         </Dialog>
     );

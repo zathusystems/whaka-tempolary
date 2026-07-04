@@ -111,13 +111,11 @@ pub fn print_receipt(
     }
 
     let printer_id = printer_id.trim().to_string();
-    let line_width = super::receipt_formatter::resolve_line_width(paper_size.as_deref());
-    let printer_line_width =
-        super::receipt_formatter::resolve_line_width(printer_paper_width.as_deref());
-    let horizontal_offset = printer_line_width.saturating_sub(line_width) / 2;
-
-    let escpos_data =
-        super::receipt_formatter::html_to_escpos(&html, line_width, horizontal_offset);
+    let escpos_data = super::receipt_formatter::build_escpos_receipt(
+        &html,
+        paper_size.as_deref(),
+        printer_paper_width.as_deref(),
+    );
 
     if let Some(queue_name) = printer_id.strip_prefix("cups:") {
         print_to_cups(queue_name, &escpos_data, copies)?;

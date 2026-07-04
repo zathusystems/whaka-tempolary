@@ -771,14 +771,6 @@ const getConfigurationLabel = (configType: string): string => {
     .join(' ');
 };
 
-const formatConfigJson = (value: unknown): string => {
-  try {
-    return JSON.stringify(value ?? {}, null, 2);
-  } catch {
-    return String(value ?? '');
-  }
-};
-
 const getConfigDataObject = (config: SyncedConfiguration): Record<string, any> => {
   return config.config_data && typeof config.config_data === 'object' && !Array.isArray(config.config_data)
     ? config.config_data as Record<string, any>
@@ -1890,7 +1882,7 @@ export default function EISSettingsPage() {
       toast({
         variant: 'destructive',
         title: 'No configurations',
-        description: 'There are no synced MRA configurations to export.',
+        description: 'There are no synced MRA configurations to download.',
       });
       return;
     }
@@ -1915,14 +1907,14 @@ export default function EISSettingsPage() {
       toast({
         variant: 'destructive',
         title: 'Download blocked',
-        description: 'The browser blocked the configuration export.',
+        description: 'The browser blocked the configuration download.',
       });
       return;
     }
 
     toast({
-      title: 'Configurations exported',
-      description: `${syncedConfigurations.length} synced configuration record${syncedConfigurations.length === 1 ? '' : 's'} exported.`,
+      title: 'Configurations downloaded',
+      description: `${syncedConfigurations.length} synced configuration record${syncedConfigurations.length === 1 ? '' : 's'} downloaded.`,
     });
   };
 
@@ -2012,77 +2004,6 @@ export default function EISSettingsPage() {
       });
     } finally {
       setIsExportingInitialStock(false);
-    }
-  };
-
-  const onExportInitialStockApiPayload = async () => {
-    if (!activeBranchId) {
-      toast({
-        variant: 'destructive',
-        title: 'Select a branch',
-        description: 'Choose the branch whose opening stock should be exported for MRA.',
-      });
-      return;
-    }
-
-    const exportLimit = resolveInitialStockExportLimit(initialStockExportMode, initialStockCustomLimit);
-    if (exportLimit === 0) {
-      toast({
-        variant: 'destructive',
-        title: 'Enter product count',
-        description: 'Use a custom product count greater than zero.',
-      });
-      return;
-    }
-
-    try {
-      const branchName = branches.find((branch) => branch.id === activeBranchId)?.name || activeBranchId;
-      const inventoryItems = await getInventoryItemsForBranch(activeBranchId);
-      const exportableItems = inventoryItems
-        .filter((item) => item._operation !== 'delete')
-        .filter((item) => String(item.name || '').trim().length > 0)
-        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
-      const selectedItems = exportLimit === null ? exportableItems : exportableItems.slice(0, exportLimit);
-
-      if (selectedItems.length === 0) {
-        toast({
-          variant: 'destructive',
-          title: 'No products to export',
-          description: 'No inventory products were found for the selected branch.',
-        });
-        return;
-      }
-
-      const rows = selectedItems.map(mapItemToInitialStockRow);
-      const payload = {
-        TIN: String(tinValue || '').trim(),
-        IsLastBatch: true,
-        Products: rows.map(mapInitialStockRowToApiProduct),
-      };
-      const datePart = new Date().toISOString().slice(0, 10);
-      const limitLabel = exportLimit === null ? 'all' : `${selectedItems.length}`;
-      const filename = `mra-initial-stock-api-${sanitizeFilenamePart(branchName)}-${limitLabel}-${datePart}.json`;
-      const downloadStarted = downloadTextFile(
-        JSON.stringify(payload, null, 2),
-        filename,
-        'application/json;charset=utf-8;'
-      );
-
-      if (!downloadStarted) {
-        throw new Error('The browser blocked the JSON download.');
-      }
-
-      toast({
-        title: 'API payload exported',
-        description: `${selectedItems.length} product${selectedItems.length === 1 ? '' : 's'} exported as MRA initial inventory JSON.${payload.TIN ? '' : ' Add your TIN before API submission.'}`,
-      });
-    } catch (error: any) {
-      console.error('Initial stock API payload export error:', error);
-      toast({
-        variant: 'destructive',
-        title: 'Export failed',
-        description: error?.message || 'Could not export the initial stock API payload.',
-      });
     }
   };
 
@@ -2490,13 +2411,6 @@ export default function EISSettingsPage() {
     }
   };
 
-  const initialStockPreviewPayload = initialStockSubmissionPreview
-    ? {
-        TIN: initialStockSubmissionPreview.tin,
-        IsLastBatch: initialStockSubmissionPreview.isLastBatch,
-        Products: initialStockSubmissionPreview.products,
-      }
-    : null;
   const initialStockPreviewRows = initialStockSubmissionPreview?.products.slice(0, 50) || [];
 
   return (
@@ -2540,7 +2454,7 @@ export default function EISSettingsPage() {
             </DialogDescription>
           </DialogHeader>
 
-          {initialStockSubmissionPreview && initialStockPreviewPayload && (
+          {initialStockSubmissionPreview && (
             <div className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="rounded-lg border p-3">
@@ -2624,16 +2538,9 @@ export default function EISSettingsPage() {
 
               {initialStockSubmissionPreview.products.length > initialStockPreviewRows.length && (
                 <p className="text-xs text-muted-foreground">
-                  Showing first {initialStockPreviewRows.length} of {initialStockSubmissionPreview.products.length} products. The full payload below contains every product that will be submitted.
+                  Showing first {initialStockPreviewRows.length} of {initialStockSubmissionPreview.products.length} products.
                 </p>
               )}
-
-              <details className="rounded-lg border p-3">
-                <summary className="cursor-pointer text-sm font-medium">View exact MRA API JSON</summary>
-                <pre className="mt-3 max-h-80 overflow-auto rounded bg-muted/40 p-3 text-xs">
-                  {JSON.stringify(initialStockPreviewPayload, null, 2)}
-                </pre>
-              </details>
 
               <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                 <Button
@@ -2766,19 +2673,6 @@ export default function EISSettingsPage() {
                 />
               </div>
             </div>
-
-            <details className="rounded-lg border p-3">
-              <summary className="cursor-pointer text-sm font-medium">View exact add-product payload</summary>
-              <pre className="mt-3 max-h-56 overflow-auto rounded bg-muted/40 p-3 text-xs">
-                {JSON.stringify({
-                  barcode: mraProductForm.barcode.trim() || null,
-                  hsCode: mraProductForm.hsCode.trim(),
-                  name: mraProductForm.name.trim(),
-                  description: mraProductForm.description.trim(),
-                  uom: mraProductForm.uom.trim(),
-                }, null, 2)}
-              </pre>
-            </details>
 
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <Button
@@ -3569,7 +3463,7 @@ export default function EISSettingsPage() {
                 <div className="mt-4 space-y-3">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <p className="text-sm font-medium">Synced configuration payloads</p>
+                    <p className="text-sm font-medium">Synced configurations</p>
                     <p className="text-xs text-muted-foreground">
                       {syncedConfigurations.length > 0
                         ? `${syncedConfigurations.length} active configuration record${syncedConfigurations.length === 1 ? '' : 's'} available`
@@ -3585,18 +3479,17 @@ export default function EISSettingsPage() {
                     onClick={onDownloadSyncedConfigurations}
                   >
                     <Download className="h-4 w-4" />
-                    Export JSON
+                    Download records
                   </Button>
                 </div>
 
                 {syncedConfigurations.length === 0 && !isLoadingConfigurationStatus ? (
                   <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                    No synced MRA configuration payloads available.
+                    No synced MRA configurations available.
                   </div>
                 ) : (
                   syncedConfigurations.map((config) => {
                     const summary = summarizeConfiguration(config);
-                    const jsonPayload = formatConfigJson(config.config_data);
                     return (
                       <div key={config.id} className="rounded-lg border bg-background p-4">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -3638,9 +3531,11 @@ export default function EISSettingsPage() {
                           </div>
                         )}
 
-                        <pre className="mt-3 max-h-80 overflow-auto rounded-md border bg-muted p-3 text-xs leading-relaxed">
-                          {jsonPayload}
-                        </pre>
+                        {summary.length === 0 && (
+                          <p className="mt-3 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+                            Configuration downloaded.
+                          </p>
+                        )}
                       </div>
                     );
                   })
@@ -3845,17 +3740,6 @@ export default function EISSettingsPage() {
                         Export Excel Data
                       </>
                     )}
-                  </Button>
-
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="w-full"
-                    disabled={!activeBranchId || isExportingInitialStock || isPreparingInitialStockPreview || isSubmittingInitialStock || isImportingInitialStock || isPullingApprovedProducts}
-                    onClick={onExportInitialStockApiPayload}
-                  >
-                    <Download className="mr-2 h-4 w-4" />
-                    Export API JSON
                   </Button>
 
                   <Button

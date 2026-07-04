@@ -61,7 +61,8 @@ const SheetContent = React.forwardRef<
     <SheetOverlay />
     <SheetPrimitive.Content
       ref={ref}
-      className={cn(sheetVariants({ side }), className)}
+      data-side={side}
+      className={cn("tauri-android-sheet-content", sheetVariants({ side }), className)}
       {...props}
     >
       {children}

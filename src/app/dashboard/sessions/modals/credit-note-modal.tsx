@@ -123,7 +123,7 @@ export function CreditNoteModal({
         const eisStatus = String((response as any).eis_result?.eis_status || creditNote.eis_status || '').trim();
         toast({
           title: 'Credit Note Created',
-          description: `Credit Note ${creditNote.credit_note_number} created${eisStatus ? ` with EIS status ${eisStatus}` : ''}.`,
+          description: `Credit Note ${creditNote.credit_note_number} created${eisStatus ? ` with receipt status ${eisStatus}` : ''}.`,
         });
         reset();
         onOpenChange(false);

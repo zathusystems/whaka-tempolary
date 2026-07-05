@@ -509,62 +509,135 @@ const findReceiptValidationUrl = (source: unknown): string => {
   return '';
 };
 
+const findReceiptStringByKeys = (source: unknown, keys: string[]): string => {
+  const wantedKeys = new Set(keys.map((key) => key.replace(/[^a-z0-9]/gi, '').toLowerCase()));
+  const normalizeKey = (key: string): string => key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+  const queue: unknown[] = [source];
+  const seen = new Set<unknown>();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === null || current === undefined) {
+      continue;
+    }
+
+    if (typeof current === 'string') {
+      const raw = current.trim();
+      if (raw.startsWith('{') || raw.startsWith('[')) {
+        try {
+          queue.push(JSON.parse(raw));
+        } catch {
+          // Ignore non-JSON strings.
+        }
+      }
+      continue;
+    }
+
+    if (typeof current !== 'object' || seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+
+    for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
+      if (wantedKeys.has(normalizeKey(key)) && value !== undefined && value !== null && String(value).trim() !== '') {
+        return String(value).trim();
+      }
+      if (value && typeof value === 'object') {
+        queue.push(value);
+      } else if (typeof value === 'string' && (value.trim().startsWith('{') || value.trim().startsWith('['))) {
+        try {
+          queue.push(JSON.parse(value.trim()));
+        } catch {
+          // Ignore non-JSON strings.
+        }
+      }
+    }
+  }
+
+  return '';
+};
+
 const hasFiscalReceiptData = (order: Partial<Order> | Record<string, any> | null | undefined): boolean => {
   if (!order) {
     return false;
   }
 
-  const fiscalNumber = String(
-    (order as any).fiscalInvoiceNumber ??
-    (order as any).fiscal_invoice_number ??
-    ''
-  ).trim();
-  const validationUrl = findReceiptValidationUrl([
-    (order as any).qrCodePayload,
-    (order as any).qr_code_payload,
-    (order as any).eisValidationMetadata,
-    (order as any).eis_validation_metadata,
-    (order as any).mra_submission,
-    (order as any).mraSubmission,
-    (order as any).order?.mra_submission,
-    (order as any).order?.mraSubmission,
-    (order as any).data?.mra_submission,
-    (order as any).data?.mraSubmission,
+  const fiscalNumber = findReceiptStringByKeys(order, [
+    'fiscalInvoiceNumber',
+    'fiscal_invoice_number',
+    'invoiceNumber',
+    'invoice_number',
+    'receiptNumber',
+    'receipt_number',
+  ]);
+  const validationUrl = findReceiptValidationUrl(order);
+  const signature = findReceiptStringByKeys(order, [
+    'digitalSignature',
+    'digital_signature',
+    'offlineSignature',
+    'offline_signature',
+    'invoiceSignature',
+    'invoice_signature',
+    'signature',
   ]);
 
-  return Boolean(fiscalNumber && validationUrl);
+  return Boolean(fiscalNumber && (validationUrl || signature));
 };
 
 const readBackendOrderField = (source: any, keys: string[]): any => {
-  const candidates = [
-    source,
-    source?.order,
-    source?.data,
-    source?.result,
-    source?.invoice,
-    source?.receipt,
-    source?.eis_validation_metadata,
-    source?.eisValidationMetadata,
-    source?.mra_submission,
-    source?.mraSubmission,
-    source?.order?.eis_validation_metadata,
-    source?.order?.eisValidationMetadata,
-    source?.order?.mra_submission,
-    source?.order?.mraSubmission,
-    source?.data?.eis_validation_metadata,
-    source?.data?.eisValidationMetadata,
-    source?.data?.mra_submission,
-    source?.data?.mraSubmission,
-  ];
+  const preferredKeys = new Set(keys.map((key) => key.replace(/[^a-z0-9]/gi, '').toLowerCase()));
+  const normalizeKey = (key: string): string => key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+  const queue: any[] = [source];
+  const seen = new Set<any>();
 
-  for (const candidate of candidates) {
-    if (!candidate || typeof candidate !== 'object') {
+  while (queue.length > 0) {
+    const candidate = queue.shift();
+    if (candidate === null || candidate === undefined) {
       continue;
     }
-    for (const key of keys) {
-      const value = candidate[key];
-      if (value !== undefined && value !== null && String(value).trim() !== '') {
+
+    if (typeof candidate === 'string') {
+      const raw = candidate.trim();
+      if (raw.startsWith('{') || raw.startsWith('[')) {
+        try {
+          queue.push(JSON.parse(raw));
+        } catch {
+          // Ignore non-JSON strings.
+        }
+      }
+      continue;
+    }
+
+    if (typeof candidate !== 'object' || seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+
+    if (Array.isArray(candidate)) {
+      queue.push(...candidate);
+      continue;
+    }
+
+    for (const [key, value] of Object.entries(candidate)) {
+      if (preferredKeys.has(normalizeKey(key)) && value !== undefined && value !== null && String(value).trim() !== '') {
         return value;
+      }
+      if (value && typeof value === 'object') {
+        queue.push(value);
+      } else if (typeof value === 'string') {
+        const raw = value.trim();
+        if (raw.startsWith('{') || raw.startsWith('[')) {
+          try {
+            queue.push(JSON.parse(raw));
+          } catch {
+            // Ignore non-JSON strings.
+          }
+        }
       }
     }
   }
@@ -1904,6 +1977,10 @@ export default function PosPage() {
                 fiscalUpdate.eis_validation_metadata = normalizedResponse.eisValidationMetadata;
                 fiscalUpdate.eisValidationMetadata = normalizedResponse.eisValidationMetadata;
               }
+              if (mraSubmission) {
+                fiscalUpdate.mra_submission = mraSubmission;
+                fiscalUpdate.mraSubmission = mraSubmission;
+              }
 
               await db.orders.update(finalOrderId, fiscalUpdate);
 
@@ -1991,10 +2068,14 @@ export default function PosPage() {
 
         if (eisEnabled) {
           const fiscalizedOrder = await submitOrderToBackend();
-          if (!fiscalizedOrder || !hasFiscalReceiptData(fiscalizedOrder)) {
-            return null;
+          if (fiscalizedOrder) {
+            finalOrder = fiscalizedOrder;
+          } else if (finalOrderId) {
+            const latestOrder = await db.orders.get(finalOrderId);
+            if (latestOrder) {
+              finalOrder = latestOrder as Order;
+            }
           }
-          finalOrder = fiscalizedOrder;
         } else {
           void submitOrderToBackend();
         }

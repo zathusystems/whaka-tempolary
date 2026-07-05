@@ -432,13 +432,19 @@ export const Receipt = ({
   const validationMetadata =
     (order as any).eisValidationMetadata ??
     (order as any).eis_validation_metadata ??
-    (order as any).mraResponse ??
-    (order as any).mra_response ??
     {};
+  const validationSources = [
+    (order as any).eisValidationMetadata,
+    (order as any).eis_validation_metadata,
+    (order as any).mraSubmission,
+    (order as any).mra_submission,
+    (order as any).mraResponse,
+    (order as any).mra_response,
+  ];
   const validationPayload = resolveReceiptValidationPayload(
     (order as any).qrCodePayload,
     (order as any).qr_code_payload,
-    validationMetadata
+    ...validationSources
   );
   const hasSubmittedEisStatus = ['SUBMITTED', 'ACCEPTED'].includes(eisStatus);
   const hasRejectedEisStatus = eisStatus === 'REJECTED';
@@ -853,7 +859,7 @@ export const Receipt = ({
     (order as any).levyBreakDown,
     (order as any).levyBreakdown,
     (order as any).levy_breakdown,
-    validationMetadata
+    ...validationSources
   );
   const tenderedAmount = receiptAmountPaid > 0 ? receiptAmountPaid : normalizedFinalPayable;
   const legalRule = '-'.repeat(Math.max(16, receiptLineWidth - 2));

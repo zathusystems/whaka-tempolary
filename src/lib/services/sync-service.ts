@@ -33,6 +33,8 @@ class SyncService {
 
   private syncInProgress = false;
   private readonly INVENTORY_SYNC_KEY = 'inventory_last_synced_at';
+  private readonly SALES_STORAGE_KEY = 'handypos-sales';
+  private readonly PENDING_SALES_KEY = 'handypos-pending-sales';
   private retryIntervalId: NodeJS.Timeout | null = null;
   private readonly RETRY_INTERVAL = 30000; // 30 seconds
   private readonly DEFAULT_SYNC_TIMESTAMP = '2000-01-01T00:00:00Z';
@@ -593,6 +595,9 @@ class SyncService {
 
             if (result.results?.errors && result.results.errors.length > 0) {
               console.error(`[Sync] ${result.results.errors.length} inventory sync errors:`, result.results.errors);
+              for (const inventoryError of result.results.errors) {
+                await this.markInventorySyncError(inventoryError);
+              }
             }
           }
         } catch (error) {
@@ -711,9 +716,23 @@ class SyncService {
     }
   }
 
-  private isRetryBlockedOrderError(error: unknown): boolean {
+  private isRetryBlockedOrderError(error: unknown, reason?: unknown): boolean {
     const message = String(error || '').toLowerCase();
+    const normalizedReason = String(reason || '').toLowerCase();
+    if (
+      normalizedReason === 'insufficient_stock' ||
+      normalizedReason === 'invalid_discount' ||
+      normalizedReason === 'tax_mapping_missing'
+    ) {
+      return true;
+    }
+
     return [
+      'insufficient stock',
+      'stock validation failed',
+      'requested',
+      'available',
+      'discount',
       'mra',
       'eis',
       'non-vat',
@@ -722,6 +741,142 @@ class SyncService {
       'compliance policy',
       'cannot submit an empty pos order',
     ].some((needle) => message.includes(needle));
+  }
+
+  private markStoredSaleSyncError(orderId: string, message: string, retryBlocked: boolean): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const failedAt = new Date().toISOString();
+    try {
+      const rawSales = window.localStorage.getItem(this.SALES_STORAGE_KEY);
+      const sales = rawSales ? JSON.parse(rawSales) : [];
+      if (Array.isArray(sales)) {
+        const nextSales = sales.map((sale: any) => {
+          if (String(sale?.id || '') !== orderId) {
+            return sale;
+          }
+          return {
+            ...sale,
+            syncStatus: 'failed',
+            syncError: message,
+            syncRetryBlocked: retryBlocked,
+            syncFailedAt: failedAt,
+          };
+        });
+        window.localStorage.setItem(this.SALES_STORAGE_KEY, JSON.stringify(nextSales));
+      }
+
+      const rawPending = window.localStorage.getItem(this.PENDING_SALES_KEY);
+      const pending = rawPending ? JSON.parse(rawPending) : [];
+      if (Array.isArray(pending)) {
+        const nextPending = retryBlocked
+          ? pending.filter((sale: any) => String(sale?.id || '') !== orderId)
+          : pending.map((sale: any) => {
+              if (String(sale?.id || '') !== orderId) {
+                return sale;
+              }
+              return {
+                ...sale,
+                syncStatus: 'failed',
+                syncError: message,
+                syncRetryBlocked: retryBlocked,
+                syncFailedAt: failedAt,
+              };
+            });
+        window.localStorage.setItem(this.PENDING_SALES_KEY, JSON.stringify(nextPending));
+      }
+    } catch (error) {
+      console.warn('[Sync] Failed to update stored sale sync state:', error);
+    }
+  }
+
+  private idsReferToSameEntity(left: unknown, right: unknown): boolean {
+    const leftId = String(left || '').trim();
+    const rightId = String(right || '').trim();
+    if (!leftId || !rightId) {
+      return false;
+    }
+    if (leftId === rightId) {
+      return true;
+    }
+
+    const shortestLength = Math.min(leftId.length, rightId.length);
+    return shortestLength >= 8 && (leftId.startsWith(rightId) || rightId.startsWith(leftId));
+  }
+
+  private queuedItemMatchesEntity(item: any, entityType: string, entityId: string): boolean {
+    const itemEntityType = String(item?.entityType || '').trim().toLowerCase();
+    const itemEntityId = String(item?.entityId || '').trim();
+    const url = String(item?.url || '').trim();
+    const urlParts = url.split(/[/?#]/).filter(Boolean);
+    const body = item?.body && typeof item.body === 'object' ? item.body : {};
+
+    if (itemEntityType && itemEntityType !== entityType.toLowerCase()) {
+      return false;
+    }
+
+    return (
+      this.idsReferToSameEntity(itemEntityId, entityId) ||
+      urlParts.some((part) => this.idsReferToSameEntity(decodeURIComponent(part), entityId)) ||
+      this.idsReferToSameEntity(body?.id, entityId) ||
+      this.idsReferToSameEntity(body?.orderId, entityId) ||
+      this.idsReferToSameEntity(body?.order_id, entityId) ||
+      this.idsReferToSameEntity(body?.inventoryItemId, entityId) ||
+      this.idsReferToSameEntity(body?.inventory_item_id, entityId)
+    );
+  }
+
+  private removeQueuedRequestsForEntity(entityType: string, entityId: string): void {
+    if (typeof window === 'undefined' || !entityId) {
+      return;
+    }
+
+    const queueItems = authFetch.getSyncQueueStatus().items || [];
+    const idsToRemove = queueItems
+      .filter((item: any) => this.queuedItemMatchesEntity(item, entityType, entityId))
+      .map((item: any) => String(item.id || '').trim())
+      .filter(Boolean);
+
+    if (idsToRemove.length > 0) {
+      authFetch.removeSyncQueueItems(idsToRemove);
+      console.log(`[Sync] Removed ${idsToRemove.length} stale ${entityType} queued request(s) for ${entityId}`);
+    }
+  }
+
+  private getOrderInventoryItemIds(order: Order | undefined): string[] {
+    const ids = new Set<string>();
+    for (const item of order?.items || []) {
+      const inventoryItemId =
+        (item as any).inventoryItemId ||
+        (item as any).inventory_item_id ||
+        (item as any).inventoryId ||
+        (item as any).inventory_id;
+      if (inventoryItemId) {
+        ids.add(String(inventoryItemId));
+      }
+    }
+    return Array.from(ids);
+  }
+
+  private async clearRejectedOrderInventorySideEffects(order: Order | undefined, message: string): Promise<void> {
+    const failedAt = new Date().toISOString();
+    const inventoryItemIds = this.getOrderInventoryItemIds(order);
+    for (const inventoryItemId of inventoryItemIds) {
+      const inventoryItem = await db.inventory.get(inventoryItemId);
+      if (inventoryItem) {
+        await db.inventory.update(inventoryItemId, {
+          _dirty: false,
+          _operation: undefined,
+          syncStatus: 'failed',
+          syncError: `Not synced because order ${order?.id || ''} was rejected: ${message}`,
+          syncRetryBlocked: true,
+          syncFailedAt: failedAt,
+        } as any);
+      }
+      this.removeQueuedRequestsForEntity('InventoryItem', inventoryItemId);
+    }
   }
 
   private getMraSubmissionDiagnostic(source: any): any | null {
@@ -783,14 +938,75 @@ class SyncService {
       ? { ...existingMetadata, mra_submission: diagnostic }
       : existingMetadata;
 
+    const retryBlocked = this.isRetryBlockedOrderError(message, errorItem?.reason);
     await db.orders.update(id, {
       syncStatus: 'failed',
       syncError: message,
-      syncRetryBlocked: this.isRetryBlockedOrderError(message),
+      syncRetryBlocked: retryBlocked,
       syncFailedAt: new Date().toISOString(),
       eisValidationMetadata: nextMetadata,
       eis_validation_metadata: nextMetadata,
     });
+
+    if (retryBlocked) {
+      await db.orders.update(id, {
+        _dirty: false,
+        _operation: undefined,
+      });
+      this.removeQueuedRequestsForEntity('Order', id);
+      await this.clearRejectedOrderInventorySideEffects(existingOrder, message);
+    }
+    this.markStoredSaleSyncError(id, message, retryBlocked);
+  }
+
+  private isRetryBlockedInventoryError(error: unknown): boolean {
+    const message = String(error || '').toLowerCase();
+    return [
+      'insufficient quantity',
+      'insufficient stock',
+      'no inventory transfers were processed',
+      'source',
+      'available',
+    ].some((needle) => message.includes(needle));
+  }
+
+  private async markInventorySyncError(errorItem: any): Promise<void> {
+    const id = String(errorItem?.id || '').trim();
+    const message = String(errorItem?.error || 'Inventory sync failed').trim();
+    if (!id || !message) {
+      return;
+    }
+
+    const retryBlocked = this.isRetryBlockedInventoryError(message);
+    const failedAt = new Date().toISOString();
+    const transfer = await db.stockTransfers.get(id);
+    if (transfer) {
+      await db.stockTransfers.update(id, {
+        ...(retryBlocked ? { _dirty: false, _operation: undefined } : {}),
+        syncStatus: 'failed',
+        syncError: message,
+        syncRetryBlocked: retryBlocked,
+        syncFailedAt: failedAt,
+      } as any);
+      if (retryBlocked) {
+        this.removeQueuedRequestsForEntity('StockTransfer', id);
+      }
+      return;
+    }
+
+    const inventoryItem = await db.inventory.get(id);
+    if (inventoryItem) {
+      await db.inventory.update(id, {
+        ...(retryBlocked ? { _dirty: false, _operation: undefined } : {}),
+        syncStatus: 'failed',
+        syncError: message,
+        syncRetryBlocked: retryBlocked,
+        syncFailedAt: failedAt,
+      } as any);
+      if (retryBlocked) {
+        this.removeQueuedRequestsForEntity('InventoryItem', id);
+      }
+    }
   }
 
   private async pushPendingMraMappings(branchId: string): Promise<void> {
@@ -1097,7 +1313,7 @@ class SyncService {
         .toArray();
 
       console.log(`[Sync] Total orders in branch: ${orders.length}`);
-      const dirtyOrders = orders.filter(o => o._dirty);
+      const dirtyOrders = orders.filter(o => o._dirty && o.syncRetryBlocked !== true);
       console.log(`[Sync] Dirty orders: ${dirtyOrders.length}`);
       
       for (const order of dirtyOrders) {
@@ -1140,7 +1356,7 @@ class SyncService {
         .toArray();
 
       for (const item of inventoryItems) {
-        if (item._dirty) {
+        if (item._dirty && (item as any).syncRetryBlocked !== true) {
           changes.push({
             id: item.id,
             entity_type: 'InventoryItem',
@@ -1151,7 +1367,7 @@ class SyncService {
         }
       }
 
-      console.log(`[Sync] Collected ${inventoryItems.filter(i => i._dirty).length} dirty inventory items`);
+      console.log(`[Sync] Collected ${inventoryItems.filter(i => i._dirty && (i as any).syncRetryBlocked !== true).length} dirty inventory items`);
 
       // Collect from suppliers (ensure suppliers sync before purchase orders)
       const suppliers = await db.suppliers.toArray();
@@ -3201,9 +3417,9 @@ class SyncService {
   private async countDirtyRecords(branchId: string): Promise<number> {
     try {
       // Use filter() instead of where().equals() for boolean fields as IndexedDB doesn't support boolean key ranges
-      const dirtyOrders = (await db.orders.toArray()).filter(r => r._dirty).length;
+      const dirtyOrders = (await db.orders.toArray()).filter(r => r._dirty && r.syncRetryBlocked !== true).length;
       const dirtySessions = (await db.sessions.toArray()).filter(r => r._dirty).length;
-      const dirtyInventory = (await db.inventory.toArray()).filter(r => r._dirty).length;
+      const dirtyInventory = (await db.inventory.toArray()).filter(r => r._dirty && (r as any).syncRetryBlocked !== true).length;
       const dirtyPurchaseOrders = (await db.purchaseOrders.toArray()).filter(r => r._dirty).length;
       const dirtyStockTransfers = (await db.stockTransfers.toArray()).filter(r => r._dirty).length;
       const dirtyWasteRecords = (await db.wasteLog.toArray()).filter(r => r._dirty).length;

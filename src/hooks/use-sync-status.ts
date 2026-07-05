@@ -64,6 +64,28 @@ export function useSyncStatus(branchId?: string | null) {
 
         const CANCELLED_KEY = 'handypos-cancelled-sync-items';
         const cancelledIds = new Set<string>(JSON.parse(localStorage.getItem(CANCELLED_KEY) || '[]'));
+        const idsReferToSameEntity = (left: unknown, right: unknown): boolean => {
+          const leftId = String(left || '').trim();
+          const rightId = String(right || '').trim();
+          if (!leftId || !rightId) return false;
+          if (leftId === rightId) return true;
+          const shortestLength = Math.min(leftId.length, rightId.length);
+          return shortestLength >= 8 && (leftId.startsWith(rightId) || rightId.startsWith(leftId));
+        };
+        const queueItemMatchesBlockedEntity = (item: any, blockedIds: Set<string>): boolean => {
+          if (blockedIds.size === 0) return false;
+          const urlParts = String(item?.url || '').split(/[/?#]/).filter(Boolean);
+          const body = item?.body && typeof item.body === 'object' ? item.body : {};
+          return Array.from(blockedIds).some((blockedId) => (
+            idsReferToSameEntity(item?.entityId, blockedId) ||
+            urlParts.some((part) => idsReferToSameEntity(decodeURIComponent(part), blockedId)) ||
+            idsReferToSameEntity(body?.id, blockedId) ||
+            idsReferToSameEntity(body?.orderId, blockedId) ||
+            idsReferToSameEntity(body?.order_id, blockedId) ||
+            idsReferToSameEntity(body?.inventoryItemId, blockedId) ||
+            idsReferToSameEntity(body?.inventory_item_id, blockedId)
+          ));
+        };
 
         // Get authFetch sync queue (includes sessions, settings, etc.)
         const authFetchStatus = authFetch.getSyncQueueStatus();
@@ -80,11 +102,23 @@ export function useSyncStatus(branchId?: string | null) {
 
         // Get dirty records from Sync Service (inventory, orders, transfers, waste, purchases, suppliers, etc.)
         // Note: Use filter() instead of where().equals() for boolean fields as IndexedDB doesn't support boolean key ranges
-        const dirtyInventory = (await db.inventory.toArray()).filter(r => r._dirty === true && (!branchId || String(r.branchId) === String(branchId)));
+        const localInventory = await db.inventory.toArray();
+        const dirtyInventory = localInventory.filter(
+          r => r._dirty === true && (r as any).syncRetryBlocked !== true && (!branchId || String(r.branchId) === String(branchId))
+        );
         const dirtySessions = (await db.sessions.toArray()).filter(r => r._dirty === true && (!branchId || String(r.branchId) === String(branchId)));
         const localOrders = (await db.orders.toArray()).filter(r => !branchId || String(r.branchId) === String(branchId));
         const failedLocalOrders = localOrders.filter(r => Boolean(r.syncRetryBlocked && String(r.syncError || '').trim()));
         const dirtyOrders = localOrders.filter(r => r._dirty === true && r.syncRetryBlocked !== true);
+        const blockedOrderIds = new Set(
+          failedLocalOrders.map((order) => String(order.id || '').trim()).filter(Boolean)
+        );
+        const blockedInventoryIds = new Set(
+          localInventory
+            .filter((item) => Boolean((item as any).syncRetryBlocked && String((item as any).syncError || '').trim()))
+            .map((item) => String(item.id || '').trim())
+            .filter(Boolean)
+        );
         const dirtyPurchaseOrders = (await db.purchaseOrders.toArray()).filter(r => r._dirty === true && (!branchId || String(r.branchId) === String(branchId)));
         const dirtyStockTransfers = (await db.stockTransfers.toArray()).filter(r => r._dirty === true && (!branchId || String(r.branchId) === String(branchId)));
         const dirtyWasteRecords = (await db.wasteLog.toArray()).filter(r => r._dirty === true && (!branchId || String(r.branchId) === String(branchId)));
@@ -108,7 +142,10 @@ export function useSyncStatus(branchId?: string | null) {
           (item: any) => Boolean(String(item?.error || '').trim())
         );
         const pendingQueueItems = authFetchPending.filter(
-          (item: any) => !String(item?.error || '').trim()
+          (item: any) =>
+            !String(item?.error || '').trim() &&
+            !queueItemMatchesBlockedEntity(item, blockedOrderIds) &&
+            !queueItemMatchesBlockedEntity(item, blockedInventoryIds)
         );
         const failedLocalQueueItems = failedLocalOrders.map((order) => ({
           id: `local-order-${order.id}`,

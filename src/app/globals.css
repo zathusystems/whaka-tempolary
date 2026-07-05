@@ -49,6 +49,14 @@ html[data-tauri-android='true'] .tauri-android-sidebar-safe-top {
   padding-top: var(--tauri-android-top-inset);
 }
 
+/* Keep toast popups below the Android status bar in edge-to-edge mode. */
+html[data-tauri-android='true'] .tauri-android-toast-viewport {
+  --tauri-android-top-inset: max(env(safe-area-inset-top, 0px), 24px);
+  top: 0 !important;
+  padding-top: calc(0.75rem + var(--tauri-android-top-inset)) !important;
+  max-height: calc(100dvh - var(--tauri-android-top-inset)) !important;
+}
+
 /* Keep fixed buttons and modal actions above Android gesture/navigation bars. */
 html[data-tauri-android='true'] .tauri-android-safe-bottom {
   --tauri-android-bottom-inset: max(env(safe-area-inset-bottom, 0px), 24px);

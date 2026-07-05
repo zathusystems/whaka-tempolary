@@ -698,9 +698,33 @@ class AuthenticatedFetch {
             item.error = 'Retry after token refresh';
           }
         } else if (!response.ok) {
-          // Keep item and record error
+          let errorMessage = `HTTP ${response.status}`;
+          try {
+            const errorData = await response.json();
+            if (errorData?.detail) {
+              errorMessage = String(errorData.detail);
+            } else if (errorData?.message) {
+              errorMessage = String(errorData.message);
+            } else if (errorData?.error) {
+              errorMessage = String(errorData.error);
+            } else if (errorData?.errors && Array.isArray(errorData.errors) && errorData.errors[0]) {
+              errorMessage = String(errorData.errors[0]?.error || errorData.errors[0]?.message || errorMessage);
+            } else if (errorData && typeof errorData === 'object') {
+              const firstKey = Object.keys(errorData)[0];
+              const firstValue = firstKey ? errorData[firstKey] : undefined;
+              if (Array.isArray(firstValue) && firstValue[0]) {
+                errorMessage = String(firstValue[0]);
+              } else if (typeof firstValue === 'string') {
+                errorMessage = firstValue;
+              }
+            }
+          } catch {
+            // Keep the HTTP status if the response is not JSON.
+          }
+
+          // Keep item and record the useful backend error for later cleanup.
           item.retries += 1;
-          item.error = `HTTP ${response.status}`;
+          item.error = errorMessage;
         } else {
           // Success → remove from queue
           this.syncQueue.splice(idx, 1);

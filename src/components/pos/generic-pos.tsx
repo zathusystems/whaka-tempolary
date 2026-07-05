@@ -241,23 +241,18 @@ const normalizeBuyerDetails = (details?: BuyerDetails | null): BuyerDetails | un
   };
 };
 
-const extractFiscalInvoiceNumber = (order: Partial<Order> | null | undefined): string => {
-  return String((order as any)?.fiscalInvoiceNumber ?? (order as any)?.fiscal_invoice_number ?? '').trim();
-};
-
 const hasCompleteFiscalInvoiceNumber = (value: string | null | undefined): boolean => {
   const fiscal = String(value ?? '').trim();
   if (!fiscal) {
+    return false;
+  }
+  if (/^(pending|draft|null|undefined)$/i.test(fiscal)) {
     return false;
   }
 
   const suffix = fiscal.split('-').pop() ?? '';
   if (!/^\d+$/.test(suffix)) {
     return true;
-  }
-
-  if (suffix.length < 8) {
-    return false;
   }
 
   return Number.parseInt(suffix, 10) > 0;
@@ -276,6 +271,66 @@ const parseReceiptJson = (value: string): unknown | null => {
   } catch {
     return null;
   }
+};
+
+const findNestedStringByKeys = (source: unknown, keys: string[]): string => {
+  const preferredKeys = new Set(keys.map((key) => key.replace(/[^a-z0-9]/gi, '').toLowerCase()));
+  const normalizeKey = (key: string): string => key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+  const queue: unknown[] = [source];
+  const seen = new Set<unknown>();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === null || current === undefined) {
+      continue;
+    }
+
+    if (typeof current === 'string') {
+      const raw = current.trim();
+      const parsed = parseReceiptJson(raw);
+      if (parsed && typeof parsed === 'object') {
+        queue.push(parsed);
+      }
+      continue;
+    }
+
+    if (typeof current !== 'object' || seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+
+    for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
+      if (preferredKeys.has(normalizeKey(key)) && value !== undefined && value !== null && String(value).trim() !== '') {
+        return String(value).trim();
+      }
+      if (value && typeof value === 'object') {
+        queue.push(value);
+      } else if (typeof value === 'string') {
+        const parsed = parseReceiptJson(value.trim());
+        if (parsed && typeof parsed === 'object') {
+          queue.push(parsed);
+        }
+      }
+    }
+  }
+
+  return '';
+};
+
+const extractFiscalInvoiceNumber = (order: Partial<Order> | null | undefined): string => {
+  return findNestedStringByKeys(order, [
+    'fiscalInvoiceNumber',
+    'fiscal_invoice_number',
+    'invoiceNumber',
+    'invoice_number',
+    'receiptNumber',
+    'receipt_number',
+  ]);
 };
 
 const findReceiptValidationUrl = (source: unknown): string => {
@@ -341,24 +396,113 @@ const findReceiptValidationUrl = (source: unknown): string => {
   return '';
 };
 
-const extractReceiptValidationPayload = (order: Partial<Order> | null | undefined): string => {
-  return findReceiptValidationUrl([
-    (order as any)?.qrCodePayload,
-    (order as any)?.qr_code_payload,
-    (order as any)?.eisValidationMetadata,
-    (order as any)?.eis_validation_metadata,
-    (order as any)?.mraSubmission,
-    (order as any)?.mra_submission,
-    (order as any)?.mraResponse,
-    (order as any)?.mra_response,
+const extractReceiptSignature = (order: Partial<Order> | null | undefined): string => {
+  return findNestedStringByKeys(order, [
+    'digitalSignature',
+    'digital_signature',
+    'offlineSignature',
+    'offline_signature',
+    'invoiceSignature',
+    'invoice_signature',
+    'signature',
   ]);
 };
 
+const extractReceiptValidationPayload = (order: Partial<Order> | null | undefined): string => {
+  return findReceiptValidationUrl(order);
+};
+
 const hasFiscalReceiptPrintData = (order: Partial<Order> | null | undefined): boolean => {
+  const fiscalNumber = extractFiscalInvoiceNumber(order);
+  const validationPayload = extractReceiptValidationPayload(order);
+  const signature = extractReceiptSignature(order);
+
   return (
-    hasCompleteFiscalInvoiceNumber(extractFiscalInvoiceNumber(order)) &&
-    Boolean(extractReceiptValidationPayload(order))
+    hasCompleteFiscalInvoiceNumber(fiscalNumber) &&
+    Boolean(validationPayload || signature)
   );
+};
+
+const refreshFiscalReceiptDataFromBackend = async (order: Order): Promise<Order | null> => {
+  const orderId = String((order as any)?.id ?? '').trim();
+  if (!orderId || typeof window === 'undefined') {
+    return null;
+  }
+
+  const tokensStr = window.localStorage.getItem('handypos-auth-tokens');
+  const tokens = tokensStr ? JSON.parse(tokensStr) : null;
+  const accessToken = tokens?.access;
+  if (!accessToken) {
+    return null;
+  }
+
+  const response = await fetch(
+    `${process.env.NEXT_PUBLIC_API_URL || 'https://pos3.express-travel-ticketing.online/api'}/sessions/orders/${orderId}/`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const data = await response.json();
+  const fiscalInvoiceNumber = extractFiscalInvoiceNumber(data);
+  const qrCodePayload = extractReceiptValidationPayload(data);
+  const digitalSignature = extractReceiptSignature(data);
+  const eisStatus = findNestedStringByKeys(data, ['eis_status', 'eisStatus', 'status']);
+  const eisUuid = findNestedStringByKeys(data, ['eis_uuid', 'eisUuid', 'uuid']);
+  const eisSubmittedAt = findNestedStringByKeys(data, ['eis_submitted_at', 'eisSubmittedAt', 'submittedAt']);
+  const eisValidationMetadata =
+    (data as any)?.eis_validation_metadata ??
+    (data as any)?.eisValidationMetadata ??
+    (data as any)?.order?.eis_validation_metadata ??
+    (data as any)?.order?.eisValidationMetadata ??
+    (data as any)?.data?.eis_validation_metadata ??
+    (data as any)?.data?.eisValidationMetadata;
+  const mraSubmission =
+    (data as any)?.mra_submission ??
+    (data as any)?.mraSubmission ??
+    eisValidationMetadata?.mra_submission ??
+    eisValidationMetadata?.mraSubmission ??
+    (data as any)?.order?.mra_submission ??
+    (data as any)?.order?.mraSubmission;
+
+  const update: Record<string, unknown> = {};
+  const setUpdate = (snakeKey: string, camelKey: string, value: unknown) => {
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      update[snakeKey] = value;
+      update[camelKey] = value;
+    }
+  };
+
+  setUpdate('fiscal_invoice_number', 'fiscalInvoiceNumber', fiscalInvoiceNumber);
+  setUpdate('qr_code_payload', 'qrCodePayload', qrCodePayload);
+  setUpdate('digital_signature', 'digitalSignature', digitalSignature);
+  setUpdate('eis_status', 'eisStatus', eisStatus);
+  setUpdate('eis_uuid', 'eisUuid', eisUuid);
+  setUpdate('eis_submitted_at', 'eisSubmittedAt', eisSubmittedAt);
+  if (eisValidationMetadata) {
+    update.eis_validation_metadata = eisValidationMetadata;
+    update.eisValidationMetadata = eisValidationMetadata;
+  }
+  if (mraSubmission) {
+    update.mra_submission = mraSubmission;
+    update.mraSubmission = mraSubmission;
+  }
+
+  if (!Object.keys(update).length) {
+    return null;
+  }
+
+  await db.orders.update(orderId, update as any);
+  return {
+    ...order,
+    ...update,
+  } as Order;
 };
 
 const resolveCompletedSaleSubmissionDisplay = (
@@ -371,26 +515,43 @@ const resolveCompletedSaleSubmissionDisplay = (
   tone: 'accepted' | 'pending' | 'offline' | 'rejected';
 } => {
   const status = String((order as any)?.eisStatus ?? (order as any)?.eis_status ?? '').trim().toUpperCase();
+  const syncStatus = String((order as any)?.syncStatus ?? (order as any)?.sync_status ?? '').trim().toLowerCase();
+  const syncError = String((order as any)?.syncError ?? (order as any)?.sync_error ?? '').trim();
+  const metadata =
+    (order as any)?.eisValidationMetadata ||
+    (order as any)?.eis_validation_metadata ||
+    {};
+  const mraSubmission =
+    (order as any)?.mraSubmission ||
+    (order as any)?.mra_submission ||
+    metadata?.mraSubmission ||
+    metadata?.mra_submission ||
+    {};
+  const submissionState = String(mraSubmission?.state || '').trim().toLowerCase();
+  const submissionMessage = String(mraSubmission?.message || '').trim();
   const hasFiscalData = hasFiscalReceiptPrintData(order);
 
   if (eisEnabled) {
-    if (status === 'REJECTED') {
+    if (status === 'REJECTED' || submissionState === 'rejected' || syncStatus === 'failed') {
       return {
-        label: 'Receipt Rejected',
-        description: 'The sale was saved locally, but the legal receipt was rejected.',
+        label: submissionState === 'rejected' || status === 'REJECTED' ? 'Receipt Rejected' : 'Receipt Failed',
+        description: submissionMessage || syncError || 'The legal receipt was not issued.',
         tone: 'rejected',
       };
     }
 
-    if (status === 'ACCEPTED' || (status === 'SUBMITTED' && hasFiscalData)) {
+    if (submissionState === 'accepted' || status === 'ACCEPTED' || (status === 'SUBMITTED' && hasFiscalData)) {
       return {
         label: status === 'ACCEPTED' ? 'Receipt Accepted' : 'Receipt Submitted',
-        description: 'Legal receipt details are available for this sale.',
+        description: submissionMessage || 'Legal receipt details are available for this sale.',
         tone: 'accepted',
       };
     }
 
     if (
+      submissionState === 'offline_queued' ||
+      mraSubmission?.queued_offline === true ||
+      mraSubmission?.queuedOffline === true ||
       status.includes('OFFLINE') ||
       status.includes('QUEUED') ||
       (status === 'PENDING' && hasFiscalData) ||
@@ -398,9 +559,7 @@ const resolveCompletedSaleSubmissionDisplay = (
     ) {
       return {
         label: 'Offline Queued',
-        description: hasFiscalData
-          ? 'Queued for upload.'
-          : 'Will upload later.',
+        description: submissionMessage || (hasFiscalData ? 'Queued for upload.' : 'Will upload later.'),
         tone: 'offline',
       };
     }
@@ -2007,7 +2166,7 @@ const PaymentDialog = ({
     );
 
     const waitForFiscalReceiptData = useCallback(
-        async (orderToPrint: Order, timeoutMs: number = 15000): Promise<Order> => {
+        async (orderToPrint: Order, timeoutMs: number = 45000): Promise<Order> => {
             if (!orderToPrint?.id) {
                 return orderToPrint;
             }
@@ -2018,6 +2177,7 @@ const PaymentDialog = ({
 
             const startedAt = Date.now();
             let latestKnownOrder: Order = orderToPrint;
+            let nextBackendRefreshAt = 0;
 
             while (Date.now() - startedAt < timeoutMs) {
                 const latestOrder = await db.orders.get(orderToPrint.id);
@@ -2025,6 +2185,21 @@ const PaymentDialog = ({
                     latestKnownOrder = latestOrder as Order;
                     if (hasFiscalReceiptPrintData(latestKnownOrder)) {
                         return latestKnownOrder;
+                    }
+                }
+
+                if (Date.now() >= nextBackendRefreshAt) {
+                    nextBackendRefreshAt = Date.now() + 1000;
+                    try {
+                        const refreshedOrder = await refreshFiscalReceiptDataFromBackend(latestKnownOrder);
+                        if (refreshedOrder) {
+                            latestKnownOrder = refreshedOrder;
+                            if (hasFiscalReceiptPrintData(latestKnownOrder)) {
+                                return latestKnownOrder;
+                            }
+                        }
+                    } catch (error) {
+                        console.warn('[Receipt] Backend fiscal receipt refresh failed:', error);
                     }
                 }
 
@@ -2235,13 +2410,13 @@ const PaymentDialog = ({
                     description: 'Waiting for legal receipt details...',
                 });
 
-                receiptOrder = await waitForFiscalReceiptData(receiptOrder, 15000);
+                receiptOrder = await waitForFiscalReceiptData(receiptOrder, 45000);
                 setCompletedOrder(receiptOrder);
             }
 
             const fiscalNumber = extractFiscalInvoiceNumber(receiptOrder);
             const qrPayload = extractReceiptValidationPayload(receiptOrder);
-            const signature = String((receiptOrder as any)?.digitalSignature ?? (receiptOrder as any)?.digital_signature ?? '').trim();
+            const signature = extractReceiptSignature(receiptOrder);
             const status = String((receiptOrder as any)?.eisStatus ?? (receiptOrder as any)?.eis_status ?? '').trim().toUpperCase();
             const hasReceiptData = Boolean((fiscalNumber && qrPayload) || signature || ['SUBMITTED', 'ACCEPTED'].includes(status));
 
@@ -2370,6 +2545,54 @@ const PaymentDialog = ({
             return;
         }
 
+        let cancelled = false;
+        let refreshCount = 0;
+        const orderId = String((completedOrder as any)?.id || '').trim();
+        if (!orderId) {
+            return;
+        }
+
+        const refreshCompletedOrder = async () => {
+            try {
+                const latestOrder = await db.orders.get(orderId);
+                if (!latestOrder || cancelled) {
+                    return;
+                }
+
+                setCompletedOrder((previousOrder) => {
+                    if (!previousOrder || String((previousOrder as any)?.id || '') !== orderId) {
+                        return previousOrder;
+                    }
+                    return {
+                        ...previousOrder,
+                        ...(latestOrder as Order),
+                    } as Order;
+                });
+            } catch (error) {
+                console.warn('[Receipt] Failed to refresh completed order state:', error);
+            }
+        };
+
+        void refreshCompletedOrder();
+        const intervalId = window.setInterval(() => {
+            refreshCount += 1;
+            void refreshCompletedOrder();
+            if (refreshCount >= 60) {
+                window.clearInterval(intervalId);
+            }
+        }, 1000);
+
+        return () => {
+            cancelled = true;
+            window.clearInterval(intervalId);
+        };
+    }, [step, completedOrder?.id]);
+
+    useEffect(() => {
+        if (step !== 'confirmation' || !completedOrder) {
+            return;
+        }
+
         const handlePrinterUpdate = (event: Event) => {
             const customEvent = event as CustomEvent<{ branchId?: string }>;
             const updatedBranchId = String(customEvent.detail?.branchId || '').trim();
@@ -2417,8 +2640,8 @@ const PaymentDialog = ({
             })) || []
         };
         const enrichedFiscalNumber = extractFiscalInvoiceNumber(enrichedOrder);
-        const enrichedQrPayload = String((enrichedOrder as any).qrCodePayload ?? (enrichedOrder as any).qr_code_payload ?? '').trim();
-        const enrichedSignature = String((enrichedOrder as any).digitalSignature ?? (enrichedOrder as any).digital_signature ?? '').trim();
+        const enrichedQrPayload = extractReceiptValidationPayload(enrichedOrder);
+        const enrichedSignature = extractReceiptSignature(enrichedOrder);
         const enrichedEisStatus = String((enrichedOrder as any).eisStatus ?? (enrichedOrder as any).eis_status ?? '').trim().toUpperCase();
         const completedSaleSubmission = resolveCompletedSaleSubmissionDisplay(
             enrichedOrder,

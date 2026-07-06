@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import Link from 'next/link';
 import Papa from 'papaparse';
+import { useLiveQuery } from 'dexie-react-hooks';
 import {
   MoreHorizontal,
   PlusCircle,
@@ -62,7 +63,17 @@ const statusBadgeVariant = {
   'In Stock': 'secondary',
   'Low Stock': 'default',
   'Out of Stock': 'destructive',
+  'Service': 'outline',
 } as const;
+
+const isMraServiceMapping = (mapping?: MRAMapping | null): boolean => (
+    mapping?.isProduct === false || mapping?.is_product === false
+);
+
+const isServiceInventoryItem = (item: InventoryItem, mapping?: MRAMapping | null): boolean => {
+    if (isMraServiceMapping(mapping)) return true;
+    return String(item.category || '').toLowerCase().includes('service');
+};
 
 const toCsvBoolean = (value: boolean | undefined): string => (value ? 'true' : 'false');
 const toSafeNumber = (value: unknown): number => {
@@ -107,7 +118,7 @@ const toTemplateExportCsvRow = (
         category: item.category || '',
         barcode: item.barcode || '',
         isProduced: toCsvBoolean(item.isProduced),
-        currentStock: Number(item.stockUnits || 0),
+        currentStock: isServiceInventoryItem(item, mapping) ? '' : Number(item.stockUnits || 0),
         price: item.price ?? '',
         cost: item.cost ?? '',
         taxRate: toOptionalCsvNumber(itemWithOptionalTax.taxRate ?? mapping?.mraTaxRate),
@@ -184,6 +195,21 @@ export function InventoryTab({
     const exportTemplateColumns = React.useMemo(
         () => getInventoryTemplateColumnsForBusinessType(currentBusinessType),
         [currentBusinessType]
+    );
+    const mraMappingByItemId = useLiveQuery(
+        async () => {
+            const mappings = await db.mraMappings.toArray();
+            const byItemId = new Map<string, MRAMapping>();
+            for (const mapping of mappings) {
+                if (mapping._operation === 'delete') continue;
+                const itemId = String(mapping.inventoryItemId || mapping.inventory_item_id || '').trim();
+                if (!itemId || byItemId.has(itemId)) continue;
+                byItemId.set(itemId, mapping);
+            }
+            return byItemId;
+        },
+        [],
+        new Map<string, MRAMapping>()
     );
     
     // Product details modal state
@@ -365,6 +391,8 @@ export function InventoryTab({
     };
 
     const getDisplayValue = (item: InventoryItem) => {
+        if (isServiceInventoryItem(item, mraMappingByItemId?.get(String(item.id)))) return 0;
+
         const storedValue = toSafeNumber(item.value);
         if (storedValue > 0) return storedValue;
 
@@ -388,6 +416,8 @@ export function InventoryTab({
     );
 
     const renderTableRow = (item: InventoryItem) => {
+        const mapping = mraMappingByItemId?.get(String(item.id));
+        const isService = isServiceInventoryItem(item, mapping);
         const isSellable = item.itemType === 'sellable';
         const portionLabel = item.portionName || 'portion';
         const estimatedRecipeCost = calculateCost(item.recipe);
@@ -410,6 +440,9 @@ export function InventoryTab({
                     <div className='grid gap-0.5'>
                         <div className="flex items-center gap-2">
                         <span className="font-medium">{item.name}</span>
+                        {isService && (
+                            <Badge variant="outline">Service</Badge>
+                        )}
                         {item.isVariablePrice && (
                             <Badge variant="outline">{getVariablePriceLabel(item.unitType)}</Badge>
                         )}
@@ -419,15 +452,21 @@ export function InventoryTab({
                     </div>
                 </TableCell>
                 <TableCell>
-                    {item.status && <Badge variant={statusBadgeVariant[item.status]}>{item.status === 'Low Stock' && <AlertCircle className="mr-1 h-3 w-3" />}{item.status}</Badge>}
+                    {isService ? (
+                        <Badge variant={statusBadgeVariant.Service}>Service</Badge>
+                    ) : (
+                        item.status && <Badge variant={statusBadgeVariant[item.status]}>{item.status === 'Low Stock' && <AlertCircle className="mr-1 h-3 w-3" />}{item.status}</Badge>
+                    )}
                 </TableCell>
                 <TableCell className="text-right font-medium">
                     {isSellable ? `${currencySymbol}${(Number(item.price) || 0).toFixed(2)}` : formattedStockUnits}
                 </TableCell>
-                <TableCell className="text-muted-foreground">{item.unitType || 'N/A'}</TableCell>
+                <TableCell className="text-muted-foreground">{isService ? 'N/A' : (item.unitType || 'N/A')}</TableCell>
                 <TableCell>{item.isProduced ? 'In-house' : (item.supplier || (isSellable ? 'In-house' : 'N/A'))}</TableCell>
                 <TableCell className="text-right">
-                    {isSellable && item.isSoldInPortions && item.portionsPerUnit ? (
+                    {isService ? (
+                        <span className="font-medium text-muted-foreground">Not tracked</span>
+                    ) : isSellable && item.isSoldInPortions && item.portionsPerUnit ? (
                         <div className="text-sm">
                             <div className="font-semibold">{formattedStockUnits} {item.unitType}</div>
                             <div className="text-xs text-muted-foreground">
@@ -439,7 +478,7 @@ export function InventoryTab({
                     )}
                 </TableCell>
                 <TableCell className="text-right font-semibold">
-                        {isSellable ? `${currencySymbol}${toSafeNumber(cost).toFixed(2)}` : `${currencySymbol}${toSafeNumber(displayValue).toFixed(2)}`}
+                        {isService ? 'N/A' : (isSellable ? `${currencySymbol}${toSafeNumber(cost).toFixed(2)}` : `${currencySymbol}${toSafeNumber(displayValue).toFixed(2)}`)}
                 </TableCell>
                 {!readOnly && (
                     <TableCell>
@@ -464,6 +503,8 @@ export function InventoryTab({
     };
 
     const renderMobileCard = (item: InventoryItem) => {
+        const mapping = mraMappingByItemId?.get(String(item.id));
+        const isService = isServiceInventoryItem(item, mapping);
         const isSellable = item.itemType === 'sellable';
         const portionLabel = item.portionName || 'portion';
         const estimatedRecipeCost = calculateCost(item.recipe);
@@ -485,6 +526,9 @@ export function InventoryTab({
                         <div className="flex-1 grid gap-0.5">
                             <div className="flex items-center gap-2">
                             <p className="font-semibold">{item.name}</p>
+                            {isService && (
+                                <Badge variant="outline">Service</Badge>
+                            )}
                             {item.isVariablePrice && (
                                 <Badge variant="outline">{getVariablePriceLabel(item.unitType)}</Badge>
                             )}
@@ -496,7 +540,11 @@ export function InventoryTab({
                                         {item.itemType}
                                     </Badge>
                                 )}
-                                {item.status && (
+                                {isService ? (
+                                    <Badge variant="outline" className="w-fit">
+                                        Service
+                                    </Badge>
+                                ) : item.status && (
                                     <Badge variant={statusBadgeVariant[item.status]} className="w-fit">
                                         {item.status === 'Low Stock' && <AlertCircle className="mr-1 h-3 w-3" />}
                                         {item.status}
@@ -531,14 +579,18 @@ export function InventoryTab({
                                 </div>
                                 <div>
                                     <p className="text-muted-foreground">Est. Cost</p>
-                                    <p className="font-medium">{currencySymbol}{(Number(cost) || 0).toFixed(2)}</p>
+                                    <p className="font-medium">{isService ? 'N/A' : `${currencySymbol}${(Number(cost) || 0).toFixed(2)}`}</p>
                                 </div>
                                 <div>
                                     <p className="text-muted-foreground">Remaining</p>
+                                    {isService ? (
+                                        <p className="font-medium text-muted-foreground">Not tracked</p>
+                                    ) : (
                                     <p className="font-medium">
                                         {formattedStockUnits} <span className="text-muted-foreground">{item.unitType || 'unit'}</span>
                                     </p>
-                                    {item.isSoldInPortions && item.portionsPerUnit && (
+                                    )}
+                                    {!isService && item.isSoldInPortions && item.portionsPerUnit && (
                                         <p className="text-xs text-muted-foreground mt-1">
                                             {Math.floor((item.stockUnits || 0) * item.portionsPerUnit)} {portionLabel}
                                         </p>
@@ -649,6 +701,11 @@ export function InventoryTab({
                     onOpenChange={setIsDetailsModalOpen}
                     onEdit={handleEditFromDetails}
                     currentBusinessType={currentBusinessType}
+                    isServiceProduct={
+                        selectedProduct
+                            ? isServiceInventoryItem(selectedProduct, mraMappingByItemId?.get(String(selectedProduct.id)))
+                            : false
+                    }
                 />
             )}
         </CardContent>

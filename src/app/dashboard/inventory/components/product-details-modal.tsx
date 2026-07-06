@@ -22,6 +22,7 @@ interface ProductDetailsModalProps {
   onOpenChange: (open: boolean) => void;
   onEdit?: (product: InventoryItem) => void;
   currentBusinessType: BusinessType;
+  isServiceProduct?: boolean;
 }
 
 export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
@@ -30,6 +31,7 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
   onOpenChange,
   onEdit,
   currentBusinessType,
+  isServiceProduct = false,
 }) => {
   const { currencyCode } = useCurrency();
   
@@ -72,8 +74,8 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
   const isExpiringoon = product.expiry && !isExpired ? isWithinInterval(new Date(product.expiry), { start: new Date(), end: addDays(new Date(), 30) }) : false;
   
   // Check if low stock
-  const isLowStock = product.status === 'Low Stock';
-  const isOutOfStock = product.status === 'Out of Stock';
+  const isLowStock = !isServiceProduct && product.status === 'Low Stock';
+  const isOutOfStock = !isServiceProduct && product.status === 'Out of Stock';
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
@@ -157,8 +159,8 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
                 <CardContent className="pt-6">
                   <div className="space-y-2">
                     <p className="text-sm text-muted-foreground">Status</p>
-                    <Badge className={`${statusColor[product.status as keyof typeof statusColor] || 'bg-gray-100'} text-base py-1 px-3`}>
-                      {product.status || 'Unknown'}
+                    <Badge className={`${isServiceProduct ? 'bg-slate-100 text-slate-800 dark:bg-slate-900/30 dark:text-slate-300' : (statusColor[product.status as keyof typeof statusColor] || 'bg-gray-100')} text-base py-1 px-3`}>
+                      {isServiceProduct ? 'Service' : (product.status || 'Unknown')}
                     </Badge>
                   </div>
                 </CardContent>
@@ -181,7 +183,20 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
                 </Card>
               )}
 
-              {product.stockUnits !== undefined && product.stockUnits !== null && (
+              {isServiceProduct ? (
+                <Card>
+                  <CardContent className="pt-6">
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <Package className="h-4 w-4 text-muted-foreground" />
+                        <p className="text-sm text-muted-foreground">Stock Tracking</p>
+                      </div>
+                      <p className="text-2xl font-bold text-muted-foreground">N/A</p>
+                      <p className="text-sm text-muted-foreground">Service items do not track quantity.</p>
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : product.stockUnits !== undefined && product.stockUnits !== null && (
                 <Card>
                   <CardContent className="pt-6">
                     <div className="space-y-2">
@@ -313,7 +328,7 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
               </CardContent>
             </Card>
 
-            {!isSellable && (
+            {!isSellable && !isServiceProduct && (
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">Stock Management</CardTitle>
@@ -336,7 +351,7 @@ export const ProductDetailsModal: React.FC<ProductDetailsModalProps> = ({
             {isSellable && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">Sellable Product Details</CardTitle>
+                  <CardTitle className="text-base">{isServiceProduct ? 'Service Details' : 'Sellable Product Details'}</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="grid grid-cols-2 gap-4">

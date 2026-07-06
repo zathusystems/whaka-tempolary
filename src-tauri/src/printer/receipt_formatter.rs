@@ -110,10 +110,10 @@ pub fn html_to_escpos(html: &str, line_width: usize, horizontal_offset: usize) -
         if bold_current_line {
             append_bold_mode(&mut data, line_width, false);
         }
+        data.extend_from_slice(b"\n");
         if should_center_current_line {
             data.extend_from_slice(b"\x1B\x61\x00"); // left align
         }
-        data.extend_from_slice(b"\n");
 
         if uses_explicit_thermal_layout && !trimmed.is_empty() {
             if bold_next_company_line && !is_legal_receipt_marker(trimmed) {
@@ -146,7 +146,7 @@ pub fn html_to_escpos(html: &str, line_width: usize, horizontal_offset: usize) -
 }
 
 fn append_base_text_mode(data: &mut Vec<u8>, line_width: usize) {
-    if line_width <= COMPACT_RECEIPT_LINE_WIDTH {
+    if line_width < COMPACT_RECEIPT_LINE_WIDTH {
         data.extend_from_slice(b"\x1B\x4D\x01"); // Font B, smaller on most ESC/POS printers
         data.extend_from_slice(b"\x1B\x21\x01"); // Font B through ESC ! for compatible clones
     } else {
@@ -159,7 +159,7 @@ fn append_bold_mode(data: &mut Vec<u8>, line_width: usize, enabled: bool) {
     if enabled {
         data.extend_from_slice(b"\x1B\x45\x01"); // Emphasized on
         data.extend_from_slice(b"\x1B\x47\x01"); // Double-strike on for printers with weak bold
-        if line_width <= COMPACT_RECEIPT_LINE_WIDTH {
+        if line_width < COMPACT_RECEIPT_LINE_WIDTH {
             data.extend_from_slice(b"\x1B\x21\x09"); // Font B + emphasized
         } else {
             data.extend_from_slice(b"\x1B\x21\x08"); // Font A + emphasized
@@ -1177,5 +1177,19 @@ mod tests {
         let center_index = rendered[..marker_index].rfind(center_on).unwrap();
 
         assert!(center_index < marker_index);
+    }
+
+    #[test]
+    fn explicit_thermal_receipt_preserves_centered_copy_marker_padding() {
+        let thermal = "                   COPY\nBuyers Name:              Walk-in Customer";
+        let encoded = urlencoding::encode(thermal);
+        let html = format!(
+            r#"<div id="receipt-printable-area" data-thermal-receipt-text="{encoded}"></div>"#
+        );
+        let bytes = html_to_escpos(&html, DEFAULT_RECEIPT_LINE_WIDTH, 0);
+        let rendered = String::from_utf8_lossy(&bytes);
+
+        assert!(rendered.contains("                   COPY\n"));
+        assert!(rendered.contains("Buyers Name:              Walk-in Customer"));
     }
 }

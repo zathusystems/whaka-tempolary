@@ -1,8 +1,9 @@
 'use client';
 
 import React from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 
-import { db, type InventoryItem, type StockTransfer } from '@/lib/db';
+import { db, type InventoryItem, type MRAMapping, type StockTransfer } from '@/lib/db';
 import { useAuth } from '@/hooks/use-auth';
 import { toast } from '@/hooks/use-toast';
 import { logAuditAction } from '@/lib/audit';
@@ -33,6 +34,32 @@ type TransferDraft = {
   quantity: string;
 };
 
+const normalizeBranchId = (value?: string | number | null): string => {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) return '';
+  const brnMatch = /^BRN-(\d+)$/i.exec(normalized);
+  if (brnMatch) return brnMatch[1];
+  const legacyMatch = /^branch-(\d+)$/i.exec(normalized);
+  if (legacyMatch) return legacyMatch[1];
+  return normalized;
+};
+
+const getMappingInventoryItemId = (mapping: MRAMapping): string => (
+  String(mapping.inventoryItemId || mapping.inventory_item_id || '').trim()
+);
+
+const mappingReadinessRank = (mapping: MRAMapping): number => {
+  let score = 0;
+  if (mapping.isApproved || (mapping as any).is_approved) score += 2;
+  if (mapping.mraSynced || (mapping as any).mra_synced) score += 1;
+  return score;
+};
+
+const isServiceInventoryItem = (item: InventoryItem, mapping?: MRAMapping): boolean => {
+  if (mapping?.isProduct === false || mapping?.is_product === false) return true;
+  return String(item.category || '').toLowerCase().includes('service');
+};
+
 export const TransferStockForm = ({
   branchId,
   branches,
@@ -49,6 +76,31 @@ export const TransferStockForm = ({
   const [selectedItems, setSelectedItems] = React.useState<Record<string, TransferDraft>>({});
   const [toBranchId, setToBranchId] = React.useState('');
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const mraMappings = useLiveQuery(
+    async () => {
+      const allMappings = await db.mraMappings.toArray();
+      const normalizedBranchId = normalizeBranchId(branchId);
+      return allMappings.filter((mapping) => {
+        if (!mapping.branchId && !(mapping as any).branch_id) return true;
+        return normalizeBranchId(mapping.branchId || (mapping as any).branch_id) === normalizedBranchId;
+      });
+    },
+    [branchId],
+    []
+  ) || [];
+
+  const mappingByItemId = React.useMemo(() => {
+    const map = new Map<string, MRAMapping>();
+    for (const mapping of mraMappings) {
+      const itemId = getMappingInventoryItemId(mapping);
+      if (!itemId) continue;
+      const existing = map.get(itemId);
+      if (!existing || mappingReadinessRank(mapping) > mappingReadinessRank(existing)) {
+        map.set(itemId, mapping);
+      }
+    }
+    return map;
+  }, [mraMappings]);
 
   const destinationBranches = React.useMemo(
     () => branches.filter((branch) => branch.id !== branchId),
@@ -57,7 +109,10 @@ export const TransferStockForm = ({
 
   const normalizedItemSearchTerm = itemSearchTerm.trim().toLowerCase();
   const filteredInventoryItems = React.useMemo(() => {
-    const inStockItems = inventoryItems.filter((item) => Number(item.stockUnits || 0) > 0);
+    const inStockItems = inventoryItems.filter((item) => (
+      Number(item.stockUnits || 0) > 0 &&
+      !isServiceInventoryItem(item, mappingByItemId.get(String(item.id)))
+    ));
     if (!normalizedItemSearchTerm) return inStockItems;
     return inStockItems.filter((item) =>
       [
@@ -71,7 +126,7 @@ export const TransferStockForm = ({
         item.price,
       ].some((value) => String(value || '').toLowerCase().includes(normalizedItemSearchTerm))
     );
-  }, [inventoryItems, normalizedItemSearchTerm]);
+  }, [inventoryItems, mappingByItemId, normalizedItemSearchTerm]);
 
   const visibleSearchResults = React.useMemo(
     () => filteredInventoryItems.slice(0, 30),
@@ -94,6 +149,9 @@ export const TransferStockForm = ({
     if (selectedRows.length === 0) return 'Select at least one product.';
 
     for (const { item, draft } of selectedRows) {
+      if (isServiceInventoryItem(item, mappingByItemId.get(String(item.id)))) {
+        return `${item.name} is a service and cannot be transferred.`;
+      }
       const quantity = Number(draft.quantity);
       if (!Number.isFinite(quantity) || quantity <= 0) {
         return `Enter quantity for ${item.name}.`;
@@ -103,7 +161,7 @@ export const TransferStockForm = ({
       }
     }
     return '';
-  }, [selectedRows, toBranchId]);
+  }, [mappingByItemId, selectedRows, toBranchId]);
 
   const updateTransferDraft = (itemId: string, updates: Partial<TransferDraft>) => {
     setSelectedItems((current) => {
@@ -117,6 +175,14 @@ export const TransferStockForm = ({
   };
 
   const toggleItemSelection = (item: InventoryItem, checked: boolean) => {
+    if (checked && isServiceInventoryItem(item, mappingByItemId.get(String(item.id)))) {
+      toast({
+        variant: 'destructive',
+        title: 'Service item',
+        description: 'Services do not track stock and cannot be transferred.',
+      });
+      return;
+    }
     setSelectedItems((current) => {
       const next = { ...current };
       if (checked) {

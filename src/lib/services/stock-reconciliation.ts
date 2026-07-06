@@ -58,6 +58,11 @@ function normalizeTaxCalculationMethod(value: unknown): 'inclusive' | 'exclusive
   return String(value || '').trim().toLowerCase() === 'inclusive' ? 'inclusive' : 'exclusive';
 }
 
+function isServiceProduct(product: InventoryItem, mapping?: MRAMapping): boolean {
+  if (mapping?.isProduct === false || mapping?.is_product === false) return true;
+  return String(product.category || '').toLowerCase().includes('service');
+}
+
 async function getBranchRows<T extends { branchId?: string }>(
   table: any,
   branchId: string,
@@ -109,12 +114,14 @@ export async function getMraStockReconciliationWarnings(branchId: string): Promi
     const productId = String(product.id || '').trim();
     if (!productId) continue;
 
+    const mapping = mappingByProduct.get(productId);
+    if (isServiceProduct(product, mapping)) continue;
+
     const stockUnits = Math.max(0, toSafeNumber(product.stockUnits));
     const localBatchQuantity = Math.max(0, batchQuantityByProduct.get(productId) || 0);
     const missingBatchQuantity = stockUnits - localBatchQuantity;
 
     if (missingBatchQuantity > 0.0001) {
-      const mapping = mappingByProduct.get(productId);
       const taxRate = toSafeNumber(
         mapping?.mraTaxRate ?? mapping?.mra_tax_rate ?? mapping?.taxRate ?? mapping?.tax_rate
       );

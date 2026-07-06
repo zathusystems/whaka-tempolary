@@ -504,6 +504,11 @@ const getMappingTaxCalculationMethod = (mapping: MRAMapping): 'inclusive' | 'exc
     resolveTaxMethod(mapping.taxCalculationMethod ?? (mapping as any).tax_calculation_method)
 );
 
+const isServiceInventoryItem = (item: InventoryItem, mapping?: MRAMapping): boolean => {
+    if (mapping?.isProduct === false || mapping?.is_product === false) return true;
+    return String(item.category || '').toLowerCase().includes('service');
+};
+
 type SessionChoice = {
     id: string;
     label: string;
@@ -1154,20 +1159,6 @@ export const ReceiveStockForm = ({
         replace([createEmptyReceiveStockItem()]);
     }, [replace, canToggleFuelModeInForm]);
 
-    const supplierFilteredProducts = supplierId 
-        ? inventoryItems.filter(item => {
-            // Match by supplier ID or supplier name
-            const itemSupplier = supplierOptions.find(s => String(s.id) === String(supplierId));
-            const matches = item.supplier === itemSupplier?.name || item.supplier === itemSupplier?.id;
-            console.log('[ReceiveStockForm] Checking item:', item.name, 'supplier:', item.supplier, 'matches:', matches, 'isProduced:', item.isProduced);
-            return matches && !item.isProduced;
-          })
-        : inventoryItems.filter(item => !item.isProduced);
-
-    const filteredProducts = supplierFilteredProducts.filter(
-        (item) => Boolean(item.isFuel) === isFuelMode
-    );
-
     const mraMappings = useLiveQuery(
         async () => {
             const allMappings = await db.mraMappings.toArray();
@@ -1195,6 +1186,25 @@ export const ReceiveStockForm = ({
         }
         return map;
     }, [mraMappings]);
+
+    const purchasableInventoryItems = React.useMemo(
+        () => inventoryItems.filter((item) => !isServiceInventoryItem(item, mappingByItemId.get(String(item.id)))),
+        [inventoryItems, mappingByItemId]
+    );
+
+    const supplierFilteredProducts = supplierId
+        ? purchasableInventoryItems.filter(item => {
+            // Match by supplier ID or supplier name
+            const itemSupplier = supplierOptions.find(s => String(s.id) === String(supplierId));
+            const matches = item.supplier === itemSupplier?.name || item.supplier === itemSupplier?.id;
+            console.log('[ReceiveStockForm] Checking item:', item.name, 'supplier:', item.supplier, 'matches:', matches, 'isProduced:', item.isProduced);
+            return matches && !item.isProduced;
+          })
+        : purchasableInventoryItems.filter(item => !item.isProduced);
+
+    const filteredProducts = supplierFilteredProducts.filter(
+        (item) => Boolean(item.isFuel) === isFuelMode
+    );
 
     const lastPurchaseByProduct = useLiveQuery(
         async () => {
@@ -1477,6 +1487,21 @@ export const ReceiveStockForm = ({
                 description: isFuelMode
                     ? 'Switch to non-fuel mode or remove non-fuel items from this receipt.'
                     : 'Switch to fuel mode or remove fuel items from this receipt.',
+            });
+            return;
+        }
+
+        const serviceItems = (data.items || []).filter((item) => {
+            const productId = String(item?.productId || '').trim();
+            if (!productId) return false;
+            const product = inventoryItems.find((candidate) => String(candidate.id) === productId);
+            return Boolean(product && isServiceInventoryItem(product, mappingByItemId.get(productId)));
+        });
+        if (serviceItems.length > 0) {
+            toast({
+                variant: 'destructive',
+                title: 'Service item',
+                description: 'Services do not use purchase, batch, expiry, or stock receiving records.',
             });
             return;
         }

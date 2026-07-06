@@ -633,13 +633,13 @@ export const Receipt = ({
     '58mm': {
       containerWidthClass: 'w-[218px]',
       contentPaddingClass: 'px-2 py-2',
-      bodyTextClass: 'text-[9px]',
-      metaTextClass: 'text-[8px]',
-      businessNameTextClass: 'text-[9px]',
-      longBusinessNameTextClass: 'text-[9px] tracking-normal',
-      payableTextClass: 'text-[11px]',
+      bodyTextClass: 'text-[10px]',
+      metaTextClass: 'text-[9px]',
+      businessNameTextClass: 'text-[10px]',
+      longBusinessNameTextClass: 'text-[10px] tracking-normal',
+      payableTextClass: 'text-sm',
       inlineValueMaxWidthClass: 'min-w-0 max-w-[108px]',
-      fontSizePx: 9,
+      fontSizePx: 10,
       qrSize: '24mm',
       qrMinHeight: '26mm',
       lineWidth: 32,
@@ -970,7 +970,7 @@ export const Receipt = ({
     thermalTextLines.push(centerThermal('QR PENDING'));
   }
   if (effectiveShowFooter) {
-    thermalTextLines.push('', centerThermal(legalReceiptEndTitle), legalRule, 'THANK YOU!');
+    thermalTextLines.push('', centerThermal(legalReceiptEndTitle), legalRule, centerThermal('THANK YOU!'));
   }
   const thermalReceiptText = thermalTextLines.join('\n').replace(/\n{3,}/g, '\n\n');
   const receiptRootClass = `${containerWidthClass} ${contentPaddingClass} bg-white text-black font-mono ${bodyTextClass} leading-tight`;
@@ -993,6 +993,29 @@ export const Receipt = ({
           overflow-wrap: anywhere;
           word-break: break-word;
           letter-spacing: 0;
+        }
+        #${elementId} .receipt-legal-marker,
+        #${elementId} .receipt-vat-status {
+          display: block;
+          width: 100%;
+          text-align: center !important;
+          font-weight: 700 !important;
+        }
+        #${elementId} .receipt-total-row,
+        #${elementId} .receipt-total-row * {
+          font-weight: 700 !important;
+        }
+        #${elementId} .receipt-qr-container {
+          display: flex !important;
+          width: 100% !important;
+          justify-content: center !important;
+          align-items: center !important;
+          text-align: center !important;
+        }
+        #${elementId} .receipt-qr-code {
+          display: block !important;
+          margin-left: auto !important;
+          margin-right: auto !important;
         }
 
         ${enablePrintStyles ? `
@@ -1024,7 +1047,7 @@ export const Receipt = ({
         <div className="mt-1 text-center">
          
          
-          <p className="mt-2 whitespace-nowrap text-center font-bold leading-tight">{legalReceiptTitle}</p>
+          <p className="receipt-legal-marker mt-2 whitespace-nowrap text-center font-bold leading-tight">{legalReceiptTitle}</p>
           <p className={`${businessNameTextClass} ${businessNameWidthClass} font-bold leading-tight`}>{businessNameDisplay}</p>
           {sellerAddressLines.length > 0 ? (
             sellerAddressLines.map((line, index) => (
@@ -1038,7 +1061,7 @@ export const Receipt = ({
           <p className={`${metaTextClass} leading-tight`}>CELL: {businessPhone || 'N/A'}</p>
           <p className={`${metaTextClass} leading-tight`}>EMAIL: {businessEmail || 'N/A'}</p>
           <p className={`${bodyTextClass} leading-tight`}>TIN: {sellerTin || 'N/A'}</p>
-          <p className={`${bodyTextClass} font-bold leading-tight`}>{vatRegistrationLabel.toUpperCase()}</p>
+          <p className={`receipt-vat-status ${bodyTextClass} font-bold leading-tight`}>{vatRegistrationLabel.toUpperCase()}</p>
           {isCopyReceipt && (
             <p className={`${bodyTextClass} text-center font-bold leading-tight`}>
               {receiptTypeLabel}
@@ -1147,7 +1170,7 @@ export const Receipt = ({
             <span>{formatReceiptAmount(receiptDiscountTotal)}</span>
           </div>
         )}
-        <div className="flex justify-between gap-2 font-bold">
+        <div className="receipt-total-row flex justify-between gap-2 font-bold">
           <span>TOTAL:</span>
           <span>{formatReceiptAmount(normalizedFinalPayable)}</span>
         </div>
@@ -1171,8 +1194,8 @@ export const Receipt = ({
         <p>DATE: {format(orderDate, 'yyyy-MM-dd')} TIME: {format(orderDate, 'HH:mm:ss')}</p>
         {hasEisVerificationData && <p>Scan Here For Receipt Details</p>}
         {shouldRenderQr ? (
-          <div className="flex flex-col items-center justify-center pt-2" style={qrContainerStyle}>
-            <div className="bg-white p-1" style={qrSizeStyle} aria-label="Receipt validation QR code">
+          <div className="receipt-qr-container flex flex-col items-center justify-center pt-2" style={qrContainerStyle}>
+            <div className="receipt-qr-code bg-white p-1" style={qrSizeStyle} aria-label="Receipt validation QR code">
               <QRCode
                 value={qrPayload}
                 size={256}
@@ -1188,7 +1211,7 @@ export const Receipt = ({
 
       {effectiveShowFooter && (
         <div className={`mt-5 text-center ${bodyTextClass}`}>
-          <p className="whitespace-nowrap text-center font-bold">{legalReceiptEndTitle}</p>
+          <p className="receipt-legal-marker whitespace-nowrap text-center font-bold">{legalReceiptEndTitle}</p>
           <p className="mt-2">THANK YOU!</p>
         </div>
       )}

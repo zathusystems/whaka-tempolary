@@ -2333,7 +2333,7 @@ const PaymentDialog = ({
             console.log('[Print] Available print methods:', availableMethods);
 
             let printedCopies = 0;
-            let failedResult: { timedOut: boolean } | null = null;
+            let failedResult: { timedOut: boolean; message?: string } | null = null;
 
             for (let copyIndex = 0; copyIndex < copiesToPrint; copyIndex += 1) {
                 const currentCopyNumber = startingCopyNumber + copyIndex;
@@ -2371,7 +2371,12 @@ const PaymentDialog = ({
 
                 const result = await printAttempt;
                 if (!result.success) {
-                    failedResult = { timedOut: result.timedOut };
+                    failedResult = {
+                        timedOut: result.timedOut,
+                        message: result.timedOut
+                            ? undefined
+                            : silentPrintService.getLastError() || undefined,
+                    };
                     break;
                 }
 
@@ -2398,7 +2403,7 @@ const PaymentDialog = ({
             console.warn('Print failed');
             const failedDescription = failedResult?.timedOut
                 ? 'Printer timed out.'
-                : 'Print failed.';
+                : failedResult?.message || 'Print failed.';
             toast({
                 variant: 'destructive',
                 title: failedResult?.timedOut ? 'Print Timed Out' : 'Print Failed',

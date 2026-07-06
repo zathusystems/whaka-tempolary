@@ -81,7 +81,12 @@ pub fn html_to_escpos(html: &str, line_width: usize, horizontal_offset: usize) -
             continue;
         }
 
-        let line_with_offset = if horizontal_offset > 0 && !line.trim().is_empty() {
+        let should_center_current_line = uses_explicit_thermal_layout
+            && !trimmed.is_empty()
+            && should_center_explicit_thermal_line(trimmed);
+        let printable_line = if should_center_current_line {
+            trimmed.to_string()
+        } else if horizontal_offset > 0 && !line.trim().is_empty() {
             format!("{}{}", " ".repeat(horizontal_offset), line)
         } else {
             line.to_string()
@@ -91,14 +96,22 @@ pub fn html_to_escpos(html: &str, line_width: usize, horizontal_offset: usize) -
             && !trimmed.is_empty()
             && (is_legal_receipt_marker(trimmed)
                 || is_copy_marker_line(trimmed)
+                || is_vat_registration_marker(trimmed)
+                || is_total_line(trimmed)
                 || bold_next_company_line);
 
+        if should_center_current_line {
+            data.extend_from_slice(b"\x1B\x61\x01"); // center align
+        }
         if bold_current_line {
             append_bold_mode(&mut data, line_width, true);
         }
-        data.extend_from_slice(line_with_offset.as_bytes());
+        data.extend_from_slice(printable_line.as_bytes());
         if bold_current_line {
             append_bold_mode(&mut data, line_width, false);
+        }
+        if should_center_current_line {
+            data.extend_from_slice(b"\x1B\x61\x00"); // left align
         }
         data.extend_from_slice(b"\n");
 
@@ -215,6 +228,27 @@ fn is_legal_receipt_marker(line: &str) -> bool {
         || lower.starts_with("*** end of legal receipt")
         || lower.starts_with("*** start of receipt")
         || lower.starts_with("*** end of receipt")
+}
+
+fn is_vat_registration_marker(line: &str) -> bool {
+    let normalized = line.trim().trim_matches('*').trim().to_ascii_lowercase();
+
+    normalized == "vat registered" || normalized == "non vat registered"
+}
+
+fn is_total_line(line: &str) -> bool {
+    line.trim().to_ascii_lowercase().starts_with("total:")
+}
+
+fn should_center_explicit_thermal_line(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+
+    is_legal_receipt_marker(line)
+        || is_vat_registration_marker(line)
+        || (lower.starts_with("date:") && lower.contains("time:"))
+        || lower.starts_with("scan here for receipt details")
+        || lower.starts_with("qr pending")
+        || lower.starts_with("thank you")
 }
 
 fn truncate_with_suffix(value: &str, max_chars: usize) -> String {
@@ -964,6 +998,7 @@ fn append_qr_code(data: &mut Vec<u8>, payload: &str, horizontal_offset: usize, l
     };
 
     data.extend_from_slice(b"\n");
+    data.extend_from_slice(b"\x1D\x4C\x00\x00"); // reset left margin before centered QR
     data.extend_from_slice(b"\x1B\x61\x01"); // center align
     data.extend_from_slice(&[0x1D, 0x28, 0x6B, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00]); // model 2
     let qr_module_size: u8 = if line_width <= COMPACT_RECEIPT_LINE_WIDTH {
@@ -1064,8 +1099,14 @@ mod tests {
             .find(|line| line.trim() == "*VAT REGISTERED*")
             .expect("missing VAT registration marker");
 
-        assert!(start_line.starts_with(' '), "start marker was not centered: {start_line}");
-        assert!(vat_line.starts_with(' '), "VAT marker was not centered: {vat_line}");
+        assert!(
+            start_line.starts_with(' '),
+            "start marker was not centered: {start_line}"
+        );
+        assert!(
+            vat_line.starts_with(' '),
+            "VAT marker was not centered: {vat_line}"
+        );
     }
 
     #[test]
@@ -1098,5 +1139,43 @@ mod tests {
         assert!(rendered.contains("1 X 19350.00                 19350.00 A"));
         assert!(rendered.contains("TOTAL:                       19350.00"));
         assert!(!rendered.contains("broken css"));
+    }
+
+    #[test]
+    fn explicit_thermal_receipt_bolds_vat_status_and_total() {
+        let thermal = "*** START OF LEGAL RECEIPT ***\nHANDYPOS\nTIN: 70267581\n*VAT REGISTERED*\nTOTAL:                       19350.00\n*** END OF LEGAL RECEIPT ***";
+        let encoded = urlencoding::encode(thermal);
+        let html = format!(
+            r#"<div id="receipt-printable-area" data-thermal-receipt-text="{encoded}"></div>"#
+        );
+        let bytes = html_to_escpos(&html, DEFAULT_RECEIPT_LINE_WIDTH, 0);
+        let rendered = String::from_utf8_lossy(&bytes);
+
+        let bold_on = "\x1B\x45\x01";
+        let vat_index = rendered.find("*VAT REGISTERED*").unwrap();
+        let total_index = rendered.find("TOTAL:").unwrap();
+        let vat_bold_index = rendered[..vat_index].rfind(bold_on).unwrap();
+        let total_bold_index = rendered[..total_index].rfind(bold_on).unwrap();
+
+        assert!(vat_bold_index < vat_index);
+        assert!(total_bold_index < total_index);
+    }
+
+    #[test]
+    fn explicit_thermal_receipt_uses_center_alignment_for_legal_start() {
+        let thermal =
+            "*** START OF LEGAL RECEIPT ***\nHANDYPOS\nTOTAL:                       19350.00";
+        let encoded = urlencoding::encode(thermal);
+        let html = format!(
+            r#"<div id="receipt-printable-area" data-thermal-receipt-text="{encoded}"></div>"#
+        );
+        let bytes = html_to_escpos(&html, DEFAULT_RECEIPT_LINE_WIDTH, 0);
+        let rendered = String::from_utf8_lossy(&bytes);
+
+        let center_on = "\x1B\x61\x01";
+        let marker_index = rendered.find("*** START OF LEGAL RECEIPT ***").unwrap();
+        let center_index = rendered[..marker_index].rfind(center_on).unwrap();
+
+        assert!(center_index < marker_index);
     }
 }

@@ -21,6 +21,22 @@ export interface SilentPrintOptions {
 }
 
 class SilentPrintService {
+  private lastError: string | null = null;
+
+  getLastError(): string | null {
+    return this.lastError;
+  }
+
+  private setLastError(error: unknown, fallback: string): string {
+    const message = error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : String(error || fallback);
+    this.lastError = message || fallback;
+    return this.lastError;
+  }
+
   /**
    * Print silently using system print command (if available)
    * This works best with Tauri or Electron apps
@@ -30,6 +46,7 @@ class SilentPrintService {
     options: SilentPrintOptions = {}
   ): Promise<boolean> {
     try {
+      this.lastError = null;
       const {
         printerName = 'default',
         printerId,
@@ -64,6 +81,10 @@ class SilentPrintService {
         }
 
         // No usable native printer ID: fallback to browser print path.
+        this.setLastError(
+          `Could not resolve printer "${printerName}" to a native printer ID.`,
+          'Could not resolve printer.'
+        );
         console.warn('[SilentPrint] Could not resolve a native printer ID, falling back to browser print.');
         return this.isWindowsEnvironment()
           ? await this.printViaIframe(htmlContent, copies, resolvedPaperSize)
@@ -78,6 +99,7 @@ class SilentPrintService {
       // Fallback: Use browser's print API with auto-submit
       return await this.printViaAutoSubmit(htmlContent, copies, resolvedPaperSize);
     } catch (error) {
+      this.setLastError(error, 'System print failed.');
       console.error('[SilentPrint] Error in system print:', error);
       return false;
     }
@@ -162,10 +184,15 @@ class SilentPrintService {
         }
 
         console.warn('[SilentPrint] Tauri print reported failure:', result);
+        this.setLastError(result, 'Tauri print failed.');
       }
 
+      if (!this.lastError) {
+        this.setLastError('Tauri print failed.', 'Tauri print failed.');
+      }
       return false;
     } catch (error) {
+      this.setLastError(error, 'Tauri print failed.');
       console.error('[SilentPrint] Tauri print error:', error);
       return false;
     }
@@ -267,26 +294,24 @@ class SilentPrintService {
         }
       }
 
-      // Windows backend only accepts system queues; fall back to default queue if we can.
-      if (this.isWindowsEnvironment()) {
-        const defaultPrinter = printers.find((printer: any) => printer?.is_default || printer?.isDefault);
-        if (defaultPrinter) {
-          const id = String(defaultPrinter?.id || '').trim();
-          if (this.isNativePrinterId(id)) {
-            return id;
-          }
+      const defaultPrinter = printers.find((printer: any) => printer?.is_default || printer?.isDefault);
+      if (defaultPrinter) {
+        const id = String(defaultPrinter?.id || '').trim();
+        if (this.isNativePrinterId(id)) {
+          return id;
         }
+      }
 
-        if (printers.length === 1) {
-          const onlyId = String(printers[0]?.id || '').trim();
-          if (this.isNativePrinterId(onlyId)) {
-            return onlyId;
-          }
-        }
+      const nativePrinterIds = printers
+        .map((printer: any) => String(printer?.id || '').trim())
+        .filter((id: string) => this.isNativePrinterId(id));
+      if (nativePrinterIds.length === 1) {
+        return nativePrinterIds[0];
       }
 
       return null;
     } catch (error) {
+      this.setLastError(error, 'Failed to resolve printer.');
       console.error('[SilentPrint] Failed to resolve printer ID from discovery:', error);
       return null;
     }

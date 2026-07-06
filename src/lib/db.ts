@@ -711,6 +711,8 @@ export interface MRAMapping {
     mra_tax_rate?: number;
     mraUnitMeasure: string;
     taxCalculationMethod: 'inclusive' | 'exclusive';
+    isProduct?: boolean;
+    is_product?: boolean;
     taxType?: string;
     tax_type?: string;
     taxRate?: number;

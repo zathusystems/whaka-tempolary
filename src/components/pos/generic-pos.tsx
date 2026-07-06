@@ -22,7 +22,6 @@ import {
 import type { CartItem, PaymentMethod } from '@/app/dashboard/pos/page';
 import type { InventoryItem, Order, TaxRate } from '@/lib/db';
 import { useCurrency } from '@/hooks/use-currency';
-import { useBackendReachability } from '@/hooks/use-backend-reachability';
 import { authFetch } from '@/lib/auth-fetch';
 import { Button } from '@/components/ui/button';
 import {
@@ -341,6 +340,7 @@ const findReceiptValidationUrl = (source: unknown): string => {
     'mraValidationurl',
     'mravalidationurl',
     'offlinevalidationurl',
+    'offlinevalidationURL',
     'qrcodepayload',
     'qrpayload',
   ]);
@@ -402,6 +402,8 @@ const extractReceiptSignature = (order: Partial<Order> | null | undefined): stri
     'digital_signature',
     'offlineSignature',
     'offline_signature',
+    'offlineSignatureHash',
+    'offline_signature_hash',
     'invoiceSignature',
     'invoice_signature',
     'signature',
@@ -420,6 +422,32 @@ const hasFiscalReceiptPrintData = (order: Partial<Order> | null | undefined): bo
   return (
     hasCompleteFiscalInvoiceNumber(fiscalNumber) &&
     Boolean(validationPayload || signature)
+  );
+};
+
+const getMraSubmissionState = (order: Partial<Order> | null | undefined): string => {
+  const metadata =
+    (order as any)?.eisValidationMetadata ||
+    (order as any)?.eis_validation_metadata ||
+    {};
+  const submission =
+    (order as any)?.mraSubmission ||
+    (order as any)?.mra_submission ||
+    metadata?.mraSubmission ||
+    metadata?.mra_submission ||
+    {};
+  return String(submission?.state || '').trim().toLowerCase();
+};
+
+const isOfflineQueuedReceipt = (order: Partial<Order> | null | undefined): boolean => {
+  const status = String((order as any)?.eisStatus ?? (order as any)?.eis_status ?? '').trim().toUpperCase();
+  const syncState = String((order as any)?.eisSyncState ?? (order as any)?.eis_sync_state ?? '').trim().toUpperCase();
+  const state = getMraSubmissionState(order);
+  return (
+    state === 'offline_queued' ||
+    syncState === 'OFFLINE_QUEUED' ||
+    status.includes('OFFLINE') ||
+    status.includes('QUEUED')
   );
 };
 
@@ -527,7 +555,7 @@ const resolveCompletedSaleSubmissionDisplay = (
     metadata?.mraSubmission ||
     metadata?.mra_submission ||
     {};
-  const submissionState = String(mraSubmission?.state || '').trim().toLowerCase();
+  const submissionState = getMraSubmissionState(order);
   const submissionMessage = String(mraSubmission?.message || '').trim();
   const hasFiscalData = hasFiscalReceiptPrintData(order);
 
@@ -550,6 +578,7 @@ const resolveCompletedSaleSubmissionDisplay = (
 
     if (
       submissionState === 'offline_queued' ||
+      String((order as any)?.eisSyncState ?? (order as any)?.eis_sync_state ?? '').trim().toUpperCase() === 'OFFLINE_QUEUED' ||
       mraSubmission?.queued_offline === true ||
       mraSubmission?.queuedOffline === true ||
       status.includes('OFFLINE') ||
@@ -1153,7 +1182,6 @@ const PaymentDialog = ({
     const [unmappedProducts, setUnmappedProducts] = useState<string[]>([]);
     const [isProcessingPayment, setIsProcessingPayment] = useState(false);
     const [mraPingStatus, setMraPingStatus] = useState<CachedMraPingStatus | null>(null);
-    const { isReachable: rawBrowserOnline } = useBackendReachability({ intervalMs: 10000 });
     const [isBrowserOnline, setIsBrowserOnline] = useState(
         () => (typeof navigator === 'undefined' ? true : navigator.onLine !== false)
     );
@@ -1173,24 +1201,21 @@ const PaymentDialog = ({
     const businessIdForMraStatus = useMemo(() => resolveOfflineBusinessId(), []);
 
     useEffect(() => {
-        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-            setIsBrowserOnline(false);
-            return;
-        }
+        if (typeof window === 'undefined') return;
 
-        if (rawBrowserOnline) {
-            setIsBrowserOnline(true);
-            return;
-        }
+        const updateBrowserOnline = () => {
+            setIsBrowserOnline(typeof navigator === 'undefined' ? true : navigator.onLine !== false);
+        };
 
-        const timeoutId = window.setTimeout(() => {
-            setIsBrowserOnline(false);
-        }, 12000);
+        updateBrowserOnline();
+        window.addEventListener('online', updateBrowserOnline);
+        window.addEventListener('offline', updateBrowserOnline);
 
         return () => {
-            window.clearTimeout(timeoutId);
+            window.removeEventListener('online', updateBrowserOnline);
+            window.removeEventListener('offline', updateBrowserOnline);
         };
-    }, [rawBrowserOnline]);
+    }, []);
 
     useEffect(() => {
         if (!shouldUseEisTaxMappings || !businessIdForMraStatus || !normalizedActiveBranchId) {
@@ -1228,13 +1253,13 @@ const PaymentDialog = ({
                 ? 'online'
                 : 'offline';
     const saleConnectivityLabel = isEisInvoiceSubmissionBlocked
-        ? 'Server Unavailable'
+        ? 'POS Server Unavailable'
         : shouldUseEisTaxMappings
             ? isMraOffline
-                ? 'Offline'
+                ? 'MRA Offline'
                 : isMraOnline
-                    ? 'Online'
-                    : 'Status Unknown'
+                    ? 'MRA Online'
+                    : 'MRA Status Unknown'
             : isBrowserOnline
                 ? 'Online'
                 : 'Offline';
@@ -1242,10 +1267,10 @@ const PaymentDialog = ({
         ? eisInvoiceSubmissionBlockedMessage
         : shouldUseEisTaxMappings
             ? isMraOffline
-                ? 'Signs offline and queues for upload.'
+                ? 'MRA EIS unavailable; signs offline and queues for upload.'
                 : isMraOnline
-                    ? 'Submits receipt.'
-                    : 'Status not checked.'
+                    ? 'MRA EIS reachable; submits receipt.'
+                    : 'MRA EIS status not checked.'
             : isBrowserOnline
                 ? 'Submits to POS server.'
                 : 'Will sync later.';
@@ -2244,10 +2269,13 @@ const PaymentDialog = ({
                     const latestOrder = await waitForFiscalReceiptData(activeOrder);
 
                     if (!hasFiscalReceiptPrintData(latestOrder)) {
+                        const offlineQueued = isOfflineQueuedReceipt(latestOrder);
                         toast({
-                            variant: 'destructive',
-                            title: 'Fiscal Receipt Pending',
-                            description: 'Try again shortly.',
+                            variant: offlineQueued ? 'default' : 'destructive',
+                            title: offlineQueued ? 'Offline Receipt Queued' : 'Fiscal Receipt Pending',
+                            description: offlineQueued
+                                ? 'Receipt is queued for backend replay.'
+                                : 'Try again shortly.',
                         });
                         return false;
                     }
@@ -2270,9 +2298,8 @@ const PaymentDialog = ({
             if (!defaultPrinter) {
                 console.error('No default printer configured');
                 toast({
-                    variant: 'destructive',
-                    title: 'No Printer Configured',
-                    description: 'Configure a printer from the POS printer button or in Settings → Printers.',
+                    title: 'Printing Skipped',
+                    description: 'No default printer is configured yet.',
                 });
                 return false;
             }
@@ -2421,10 +2448,13 @@ const PaymentDialog = ({
             const hasReceiptData = Boolean((fiscalNumber && qrPayload) || signature || ['SUBMITTED', 'ACCEPTED'].includes(status));
 
             if (eisEnabled && !hasFiscalReceiptPrintData(receiptOrder)) {
+                const offlineQueued = isOfflineQueuedReceipt(receiptOrder);
                 toast({
-                    variant: 'destructive',
-                    title: 'Receipt Not Ready',
-                    description: 'Try again shortly.',
+                    variant: offlineQueued ? 'default' : 'destructive',
+                    title: offlineQueued ? 'Offline Receipt Queued' : 'Receipt Not Ready',
+                    description: offlineQueued
+                        ? 'Receipt is queued for backend replay.'
+                        : 'Try again shortly.',
                 });
                 return;
             }
@@ -2624,6 +2654,7 @@ const PaymentDialog = ({
             total: (completedOrder as any).total ?? (completedOrder as any).gross_amount ?? 0,
             fiscalInvoiceNumber: (completedOrder as any).fiscalInvoiceNumber ?? (completedOrder as any).fiscal_invoice_number,
             eisStatus: (completedOrder as any).eisStatus ?? (completedOrder as any).eis_status,
+            eisSyncState: (completedOrder as any).eisSyncState ?? (completedOrder as any).eis_sync_state,
             eisUuid: (completedOrder as any).eisUuid ?? (completedOrder as any).eis_uuid,
             eisSubmittedAt: (completedOrder as any).eisSubmittedAt ?? (completedOrder as any).eis_submitted_at,
             qrCodePayload: (completedOrder as any).qrCodePayload ?? (completedOrder as any).qr_code_payload,
@@ -2695,8 +2726,8 @@ const PaymentDialog = ({
                         </p>
                     </div>
                     {hasDefaultPrinter === false && (
-                        <p className="mt-2 text-sm text-amber-700">
-                            No default printer configured. Configure one to print receipts.
+                        <p className="mt-2 text-sm text-muted-foreground">
+                            Printing skipped: no default printer is configured yet.
                         </p>
                     )}
                 </div>

@@ -1157,6 +1157,7 @@ class SyncService {
           isApproved: finalIsApproved,
           mraSynced: finalIsSynced,
           lastSyncedAt: finalIsSynced ? nowIso : pendingMapping.lastSyncedAt,
+          isProduct: backendMappingPayload?.is_product ?? backendMappingPayload?.isProduct ?? pendingMapping.isProduct ?? true,
           updatedAt: nowIso,
           _dirty: false,
           _operation: undefined,
@@ -3074,6 +3075,8 @@ class SyncService {
               _synced_at: new Date().toISOString()
             };
 
+            mappingToStore.isProduct = mapping.is_product ?? mapping.isProduct ?? mappingToStore.isProduct ?? true;
+
             mappingToStore.taxCalculationMethod = this.normalizeTaxCalculationMethod(
               mappingToStore.taxCalculationMethod ??
               (mappingToStore as any).tax_calculation_method ??
@@ -3395,6 +3398,7 @@ class SyncService {
           console.log(`[Sync] Found ${dirtyCount} dirty records, triggering retry sync`);
           await this.performFullSync(branchId);
         }
+        await this.notifyEisOnlineStatus(true, branchId);
       } catch (error) {
         console.error('[Sync] Error in retry interval:', error);
       }

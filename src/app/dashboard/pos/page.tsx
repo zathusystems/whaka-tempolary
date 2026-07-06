@@ -220,6 +220,11 @@ const buildMappingLookup = (mappings: any[]): Map<string, any> => {
   return lookup;
 };
 
+const isServiceInventoryItem = (item: Partial<InventoryItem> | null | undefined): boolean => {
+  const category = String((item as any)?.category || '').trim().toLowerCase();
+  return category.includes('service');
+};
+
 const resolveMappingBranchId = (mapping: any): string => {
   return normalizeBranchId(
     mapping?.branchId ??
@@ -655,6 +660,9 @@ const normalizeBackendOrderResponse = (data: any) => {
   const eisStatus = readBackendOrderField(data, ['eis_status', 'eisStatus', 'status']);
   const eisUuid = readBackendOrderField(data, ['eis_uuid', 'eisUuid', 'uuid']);
   const eisSubmittedAt = readBackendOrderField(data, ['eis_submitted_at', 'eisSubmittedAt', 'submittedAt']);
+  const eisSyncState = readBackendOrderField(data, ['eis_sync_state', 'eisSyncState']);
+  const fiscalReceiptState = readBackendOrderField(data, ['fiscal_receipt_state', 'fiscalReceiptState']);
+  const fiscalReceiptReady = readBackendOrderField(data, ['fiscal_receipt_ready', 'fiscalReceiptReady']);
   const qrCodePayload =
     readBackendOrderField(data, [
       'qr_code_payload',
@@ -663,6 +671,9 @@ const normalizeBackendOrderResponse = (data: any) => {
       'validationURL',
       'offline_validation_url',
       'offlineValidationUrl',
+      'offlineValidationURL',
+      'mraValidationUrl',
+      'mraValidationURL',
     ]) ||
     findReceiptValidationUrl(data);
   const digitalSignature = readBackendOrderField(data, [
@@ -670,6 +681,8 @@ const normalizeBackendOrderResponse = (data: any) => {
     'digitalSignature',
     'offline_signature',
     'offlineSignature',
+    'offline_signature_hash',
+    'offlineSignatureHash',
     'invoiceSignature',
     'signature',
   ]);
@@ -694,6 +707,9 @@ const normalizeBackendOrderResponse = (data: any) => {
   return {
     fiscalInvoiceNumber,
     eisStatus,
+    eisSyncState,
+    fiscalReceiptState,
+    fiscalReceiptReady,
     eisUuid,
     eisSubmittedAt,
     qrCodePayload,
@@ -723,6 +739,7 @@ export default function PosPage() {
     error: backendReachabilityError,
     checkNow: checkBackendConnectionNow,
   } = useBackendReachability({ intervalMs: 10000 });
+  const [isBackendUnavailableStable, setIsBackendUnavailableStable] = useState(false);
   const [taxpayerVatRegistered, setTaxpayerVatRegistered] = useState<boolean | null>(null);
   const { toast } = useToast();
   const router = useRouter();
@@ -733,6 +750,26 @@ export default function PosPage() {
     const branchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
     setActiveBranchId(branchId || 'main');
   }, []);
+
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setIsBackendUnavailableStable(true);
+      return;
+    }
+
+    if (isBackendReachable) {
+      setIsBackendUnavailableStable(false);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setIsBackendUnavailableStable(true);
+    }, 12000);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [isBackendReachable]);
 
   useEffect(() => {
     if (!business?.id) return;
@@ -889,6 +926,16 @@ export default function PosPage() {
     [activeBranchId]
   );
 
+  const localMraMappingByItemId = useLiveQuery(
+    async () => {
+      if (!activeBranchId) return new Map<string, any>();
+      const mappings = await db.mraMappings.toArray();
+      return buildMappingLookup(filterMappingsForBranch(mappings, activeBranchId));
+    },
+    [activeBranchId],
+    new Map<string, any>()
+  );
+
   useEffect(() => {
     if (!activeBranchId || (!eisEnabled && !blockSalesIfTaxMappingMissing)) {
       return;
@@ -990,9 +1037,17 @@ export default function PosPage() {
     return allInventory?.find((inventoryItem) => String(inventoryItem.id) === normalizedId);
   };
 
+  const isServiceSaleItem = (item: InventoryItem | CartItem): boolean => {
+    if (isServiceInventoryItem(item)) return true;
+    const itemId = String((item as CartItem).inventoryItemId || item.id || '').trim();
+    const mapping = itemId ? localMraMappingByItemId?.get(itemId) : null;
+    return mapping?.isProduct === false || mapping?.is_product === false;
+  };
+
   const getStockTargetsForSaleLine = (item: InventoryItem, quantity: number) => {
     const requestedQuantity = toPositiveNumber(quantity, 0);
     if (requestedQuantity <= 0) return [];
+    if (isServiceSaleItem(item)) return [];
 
     if (item.itemType === 'sellable' && item.isProduced && Array.isArray(item.recipe) && item.recipe.length > 0) {
       return item.recipe
@@ -1174,6 +1229,7 @@ export default function PosPage() {
                     mraTaxRate: Number(readyMapping.mra_tax_rate ?? readyMapping.mraTaxRate ?? 0),
                     mraUnitMeasure: readyMapping.mra_unit_measure || readyMapping.mraUnitMeasure || '',
                     taxCalculationMethod: calculationMethod,
+                    isProduct: readyMapping.is_product ?? readyMapping.isProduct ?? true,
                     isApproved: Boolean(readyMapping.is_approved ?? readyMapping.isApproved),
                     approvedAt: readyMapping.approved_at || readyMapping.approvedAt || undefined,
                     mraSynced: Boolean(readyMapping.mra_synced ?? readyMapping.mraSynced),
@@ -1375,16 +1431,6 @@ export default function PosPage() {
     const cartStockIssues = getCartStockIssues(cart);
     if (cartStockIssues.length > 0) {
       showStockIssueToast(cartStockIssues[0]);
-      return null;
-    }
-    const reachability = await checkBackendConnectionNow(true);
-    if (!reachability.isReachable) {
-      const issue = getBackendConnectionIssue(reachability);
-      toast({
-        variant: 'destructive',
-        title: issue.title,
-        description: issue.description,
-      });
       return null;
     }
     if (!activeBranchId) {
@@ -1619,6 +1665,9 @@ export default function PosPage() {
           const cartQuantity = toPositiveNumber(cartItem.quantity, 0);
           if (cartQuantity <= 0) {
             throw new Error(`Invalid quantity for ${cartItem.name}.`);
+          }
+          if (isServiceSaleItem(originalItem)) {
+            continue;
           }
 
           const itemsToDecrement = (
@@ -1942,8 +1991,22 @@ export default function PosPage() {
               console.log('[Order] Successfully synced order to backend:', finalOrderId, data);
               const normalizedResponse = normalizeBackendOrderResponse(data);
               const mraSubmission = normalizedResponse.mraSubmission;
-              const mraSubmissionState = String(mraSubmission?.state || '').trim();
+              const mraSubmissionState = String(mraSubmission?.state || '').trim().toLowerCase();
+              const eisSyncState = String(normalizedResponse.eisSyncState || '').trim().toUpperCase();
+              const fiscalReceiptState = String(normalizedResponse.fiscalReceiptState || '').trim().toUpperCase();
+              const fiscalReceiptReady = normalizedResponse.fiscalReceiptReady === true;
               const mraSubmissionMessage = String(mraSubmission?.message || '').trim();
+              console.info('[Order] Fiscal response state:', {
+                orderId: finalOrderId,
+                mraSubmissionState,
+                eisSyncState,
+                fiscalReceiptState,
+                fiscalReceiptReady,
+                queuedOffline: mraSubmission?.queued_offline ?? mraSubmission?.queuedOffline,
+                fiscalInvoiceNumber: normalizedResponse.fiscalInvoiceNumber,
+                hasQrCodePayload: Boolean(normalizedResponse.qrCodePayload),
+                hasDigitalSignature: Boolean(normalizedResponse.digitalSignature),
+              });
               const mraIncomplete = Boolean(
                 mraSubmissionState &&
                 !['accepted', 'offline_queued'].includes(mraSubmissionState)
@@ -1966,6 +2029,7 @@ export default function PosPage() {
               };
               setFiscalUpdate('fiscal_invoice_number', 'fiscalInvoiceNumber', normalizedResponse.fiscalInvoiceNumber);
               setFiscalUpdate('eis_status', 'eisStatus', normalizedResponse.eisStatus);
+              setFiscalUpdate('eis_sync_state', 'eisSyncState', normalizedResponse.eisSyncState);
               setFiscalUpdate('eis_uuid', 'eisUuid', normalizedResponse.eisUuid);
               setFiscalUpdate('eis_submitted_at', 'eisSubmittedAt', normalizedResponse.eisSubmittedAt);
               setFiscalUpdate('qr_code_payload', 'qrCodePayload', normalizedResponse.qrCodePayload);
@@ -2021,8 +2085,20 @@ export default function PosPage() {
                 eisValidationMetadata: normalizedResponse.eisValidationMetadata,
                 eis_validation_metadata: normalizedResponse.eisValidationMetadata,
               }) as Order;
+              const fiscalReadinessCandidate = {
+                ...orderWithFiscalData,
+                ...fiscalUpdate,
+                ...normalizedResponse,
+                mraSubmission,
+                mra_submission: mraSubmission,
+              } as Order;
 
-              if (eisEnabled && (mraIncomplete || !hasFiscalReceiptData(orderWithFiscalData))) {
+              const isOfflineQueued =
+                mraSubmissionState === 'offline_queued' ||
+                eisSyncState === 'OFFLINE_QUEUED' ||
+                fiscalReceiptState === 'OFFLINE_QUEUED' ||
+                fiscalReceiptReady;
+              if (eisEnabled && (mraIncomplete || (!isOfflineQueued && !hasFiscalReceiptData(fiscalReadinessCandidate)))) {
                 const failureMessage = mraSubmissionMessage || 'Legal receipt details are not ready.';
                 markSaleAsFailed(finalOrderId, failureMessage, { retryBlocked: mraSubmissionState === 'rejected' });
                 toast({
@@ -2033,7 +2109,7 @@ export default function PosPage() {
                 return null;
               }
 
-              return orderWithFiscalData;
+              return fiscalReadinessCandidate;
             } else {
               const errorData = await response.json().catch(() => ({}));
               const errorMessage = extractBackendErrorMessage(
@@ -2168,9 +2244,9 @@ export default function PosPage() {
       defaultTaxRate,
       eisEnabled,
       blockSalesIfTaxMappingMissing,
-      isEisInvoiceSubmissionBlocked: !isBackendReachable,
+      isEisInvoiceSubmissionBlocked: isBackendUnavailableStable,
       eisInvoiceSubmissionBlockedMessage: getBackendConnectionIssue({
-        isReachable: isBackendReachable,
+        isReachable: !isBackendUnavailableStable,
         error: backendReachabilityError,
       }).description,
     };

@@ -2107,16 +2107,6 @@ export function PosModal({ branchId, isOpen, onOpenChange }: PosModalProps) {
        toast({ variant: 'destructive', title: 'No active branch', description: 'Could not determine the active branch.' });
        return null;
     }
-    const reachability = await checkBackendConnectionNow(true);
-    if (!reachability.isReachable) {
-      const issue = getBackendConnectionIssue(reachability);
-      toast({
-        variant: 'destructive',
-        title: issue.title,
-        description: issue.description,
-      });
-      return null;
-    }
     const sessionForOrder = await resolveSessionForCheckout();
     if (!sessionForOrder) {
       toast({ variant: 'destructive', title: 'No active session', description: 'Please start a session to record sales.' });

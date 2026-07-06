@@ -323,6 +323,7 @@ const persistMappings = async (rawMappings: any[], fallbackBranchId: string): Pr
             rawMapping.calculation_method ??
             rawMapping.calculationMethod
         ),
+        isProduct: rawMapping.is_product ?? rawMapping.isProduct ?? true,
         isApproved: Boolean(rawMapping.is_approved ?? rawMapping.isApproved),
         approvedAt: rawMapping.approved_at || rawMapping.approvedAt || undefined,
         mraSynced: Boolean(rawMapping.mra_synced ?? rawMapping.mraSynced),

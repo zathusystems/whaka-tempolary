@@ -355,6 +355,8 @@ export async function syncInventoryFromBackend(branchId: string): Promise<{
             _synced_at: new Date().toISOString()
           };
 
+          (mappingToStore as any).isProduct = mapping.is_product ?? mapping.isProduct ?? convertedMapping.isProduct ?? true;
+
           mappingToStore.taxCalculationMethod = normalizeTaxCalculationMethod(
             mappingToStore.taxCalculationMethod ??
             (mappingToStore as any).tax_calculation_method ??

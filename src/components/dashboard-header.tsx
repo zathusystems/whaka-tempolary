@@ -158,7 +158,7 @@ export function DashboardHeader({
   const {
     pendingCount,
     failedCount,
-    isOnline,
+    isOnline: isBackendReachable,
     hasPending,
     hasFailed,
     dirtyRecords,
@@ -175,6 +175,7 @@ export function DashboardHeader({
   const { business } = useAuth();
   const [mraPingStatus, setMraPingStatus] = useState<MraPingStatus | null>(null);
   const [isCheckingMraPing, setIsCheckingMraPing] = useState(false);
+  const [isBackendOfflineStable, setIsBackendOfflineStable] = useState(false);
   const mraPingAttemptRef = useRef<Record<string, number>>({});
 
   const isBillingAddCreditFlow = pathname === '/dashboard/settings/billing' && searchParams.get('openAddCredit') === '1';
@@ -182,6 +183,26 @@ export function DashboardHeader({
     () => (subscriptionReminder ? subscriptionReminder.monthlyCharge * 0.2 : 0),
     [subscriptionReminder]
   );
+
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setIsBackendOfflineStable(true);
+      return;
+    }
+
+    if (isBackendReachable) {
+      setIsBackendOfflineStable(false);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setIsBackendOfflineStable(true);
+    }, 15000);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [isBackendReachable]);
 
   const formatAmount = (value: number): string => {
     const code = subscriptionReminder?.currencyCode || 'USD';
@@ -608,8 +629,8 @@ export function DashboardHeader({
           {/* Sync Status Indicator */}
           <div className="order-1 flex min-h-7 w-full shrink-0 items-center justify-end gap-1 overflow-visible border-b border-border/50 pb-1 sm:order-2 sm:min-h-0 sm:w-auto sm:border-0 sm:pb-0 sm:gap-2">
           {/* Online/Offline Status */}
-          <div className={`flex h-5 items-center gap-1 rounded-md px-1.5 sm:h-auto sm:px-2 sm:py-1 ${isOnline ? 'bg-green-500/10' : 'bg-destructive/10'}`}>
-            {isOnline ? (
+          <div className={`flex h-5 items-center gap-1 rounded-md px-1.5 sm:h-auto sm:px-2 sm:py-1 ${!isBackendOfflineStable ? 'bg-green-500/10' : 'bg-destructive/10'}`}>
+            {!isBackendOfflineStable ? (
               <>
                 <Cloud className="h-3.5 w-3.5 text-green-600 sm:h-4 sm:w-4" />
                 <span className="hidden text-xs font-medium text-green-600 sm:inline">Online</span>

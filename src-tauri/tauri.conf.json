@@ -1,0 +1,62 @@
+{
+  "productName": "HandyPOS",
+  "version": "1.0.0",
+  "identifier": "com.mwakageneraldealer.pos",
+  "build": {
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev:next",
+    "devUrl": "http://localhost:3000",
+    "frontendDist": "../out"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "url": "/",
+        "title": "HandyPOS - Point of Sale System",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "focus": true,
+        "visible": false,
+        "skipTaskbar": false
+      },
+      {
+        "label": "splash",
+        "url": "/splash/",
+        "title": "HandyPOS - Loading",
+        "width": 600,
+        "height": 400,
+        "center": true,
+        "resizable": false,
+        "fullscreen": false,
+        "focus": true,
+        "visible": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ]
+  }
+}

@@ -98,6 +98,7 @@ import {
   type ProductReportingCategory,
 } from '@/lib/session-product-report';
 import SaleDetailModal from '@/app/dashboard/sessions/modals/sale-detail-modal';
+import { PaginationControls, usePaginatedItems } from '@/app/dashboard/inventory/components/pagination-controls';
 
 type RefundFormValues = {
   items: (OrderItem & { maxQuantity: number; price: number })[];
@@ -512,6 +513,8 @@ export default function ReportsPage() {
             .toArray();
         return sortOrdersByMostRecent(orders);
     }, [activeBranchId, fromDate, toDate]);
+
+    const orderPagination = usePaginatedItems(allOrders ?? [], 25);
 
     // Normalize report orders so charts and KPIs use the same non-voided totals
     const activeOrders = useMemo(() => {
@@ -983,7 +986,7 @@ export default function ReportsPage() {
                         <TableBody>
                             {!allOrders ? (
                                 <TableRow><TableCell colSpan={6} className="text-center"><Loader2 className="animate-spin mx-auto" /></TableCell></TableRow>
-                            ) : allOrders.map(order => (
+                            ) : orderPagination.paginatedItems.map(order => (
                                 <TableRow key={order.id} className={`${order.status === 'Voided' ? 'opacity-60' : ''}`}>
                                     <TableCell className="font-mono">#{order.orderNumber}</TableCell>
                                     <TableCell>{format(new Date(order.createdAt), 'PPpp')}</TableCell>
@@ -1009,6 +1012,15 @@ export default function ReportsPage() {
                             ))}
                         </TableBody>
                     </Table>
+                    <PaginationControls
+                        currentPage={orderPagination.effectiveCurrentPage}
+                        totalItems={orderPagination.totalItems}
+                        totalPages={orderPagination.totalPages}
+                        pageStartIndex={orderPagination.pageStartIndex}
+                        pageEndIndex={orderPagination.pageEndIndex}
+                        onPageChange={orderPagination.setCurrentPage}
+                        itemLabel="orders"
+                    />
                 </CardContent>
             </Card>
         </TabsContent>

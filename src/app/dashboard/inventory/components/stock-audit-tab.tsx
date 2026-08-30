@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Plus, AlertCircle, CheckCircle2, Clock, Loader2, Edit, Trash2, Eye } from 'lucide-react';
+import { Plus, AlertCircle, CheckCircle2, Clock, Loader2, Eye, Search, X } from 'lucide-react';
 import { authFetch } from '@/lib/auth-fetch';
 import { toast } from '@/hooks/use-toast';
 
@@ -58,6 +58,15 @@ interface StockAuditTabProps {
   inventoryData?: any[];
 }
 
+interface AuditCount {
+  id: string;
+  name: string;
+  sku?: string;
+  barcode?: string;
+  systemStock: number;
+  countedStock: string;
+}
+
 export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabProps) {
   const [audits, setAudits] = useState<StockAuditRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -66,6 +75,28 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
   const [selectedAudit, setSelectedAudit] = useState<StockAuditRecord | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [auditNotes, setAuditNotes] = useState('');
+  const [productSearch, setProductSearch] = useState('');
+  const [auditCounts, setAuditCounts] = useState<AuditCount[]>([]);
+
+  const products = inventoryData.map((product: any) => ({
+    id: String(product.id),
+    name: String(product.name || product.productName || 'Unnamed product'),
+    sku: product.sku || product.product_code || product.productCode,
+    barcode: product.barcode,
+    systemStock: Number(product.stock_units ?? product.stockUnits ?? product.stock ?? 0),
+  }));
+  const normalizedSearch = productSearch.trim().toLowerCase();
+  const matchingProducts = products.filter((product) =>
+    !auditCounts.some((count) => count.id === product.id) &&
+    (!normalizedSearch || [product.name, product.sku, product.barcode]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(normalizedSearch)))
+  ).slice(0, 8);
+
+  const addProductToAudit = (product: Omit<AuditCount, 'countedStock'>) => {
+    setAuditCounts((current) => [...current, { ...product, countedStock: String(product.systemStock) }]);
+    setProductSearch('');
+  };
 
   // Load audits
   useEffect(() => {
@@ -128,7 +159,20 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
   }, [branchId]);
 
   const handleCreateAudit = async () => {
-    if (!branchId) return;
+    if (!branchId || auditCounts.length === 0) {
+      toast({ variant: 'destructive', title: 'Add products', description: 'Add at least one product and enter its counted stock.' });
+      return;
+    }
+
+    const items = auditCounts.map((item) => ({
+      inventory_item: item.id,
+      system_stock: item.systemStock,
+      counted_stock: Number(item.countedStock),
+    }));
+    if (items.some((item) => !Number.isFinite(item.counted_stock) || item.counted_stock < 0)) {
+      toast({ variant: 'destructive', title: 'Invalid count', description: 'Every counted stock value must be zero or greater.' });
+      return;
+    }
 
     try {
       setIsSubmitting(true);
@@ -139,29 +183,38 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
           body: JSON.stringify({
             branch_id: branchId,
             notes: auditNotes,
+            items,
           }),
         }
       );
 
       if (response?.id) {
+        const submitted = await authFetch.fetch<any>(`/inventory/stock-audits/${response.id}/submit/`, {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
         const newAudit: StockAuditRecord = {
-          id: response.id,
-          status: response.status,
-          totalDiscrepancyValue: 0,
-          mraVisible: response.mra_visible,
-          inventoryLocked: response.inventory_locked,
-          createdBy: response.created_by,
-          createdAt: response.created_at,
-          itemCount: 0,
+          id: submitted.id,
+          status: submitted.status,
+          totalDiscrepancyValue: parseFloat(submitted.total_discrepancy_value || '0'),
+          mraVisible: submitted.mra_visible,
+          inventoryLocked: submitted.inventory_locked,
+          createdBy: submitted.created_by,
+          createdAt: submitted.created_at,
+          approvedBy: submitted.approved_by,
+          approvedAt: submitted.approved_at,
+          itemCount: submitted.items?.length || auditCounts.length,
         };
 
         setAudits([newAudit, ...audits]);
         setIsCreateDialogOpen(false);
         setAuditNotes('');
+        setAuditCounts([]);
+        setProductSearch('');
 
         toast({
           title: 'Success',
-          description: 'Stock audit created successfully',
+          description: 'Audit submitted. Product stock and purchase-batch stock were updated.',
         });
       }
     } catch (error) {
@@ -481,9 +534,52 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
 
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
               <p className="text-sm text-blue-900">
-                ℹ️ This will create a new stock audit. You'll be able to record discrepancies and submit for approval.
+                The counted quantity becomes the system quantity when you submit. Changes are recorded in the audit trail.
               </p>
             </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Add product to audit</label>
+              <div className="relative">
+                <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                <Input
+                  className="pl-9"
+                  placeholder="Search product name, SKU, or barcode"
+                  value={productSearch}
+                  onChange={(event) => setProductSearch(event.target.value)}
+                />
+              </div>
+              {productSearch && (
+                <div className="max-h-44 overflow-y-auto rounded-md border bg-background">
+                  {matchingProducts.length ? matchingProducts.map((product) => (
+                    <button
+                      key={product.id}
+                      type="button"
+                      className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-muted"
+                      onClick={() => addProductToAudit(product)}
+                    >
+                      <span>{product.name}{product.sku ? ` · ${product.sku}` : ''}</span>
+                      <span className="text-muted-foreground">System: {product.systemStock}</span>
+                    </button>
+                  )) : <p className="px-3 py-2 text-sm text-muted-foreground">No matching products.</p>}
+                </div>
+              )}
+            </div>
+
+            {auditCounts.length > 0 && (
+              <div className="max-h-64 space-y-2 overflow-y-auto rounded-md border p-3">
+                <div className="grid grid-cols-[1fr_96px_28px] gap-2 text-xs font-medium text-muted-foreground">
+                  <span>Product / system stock</span><span>Counted</span><span />
+                </div>
+                {auditCounts.map((item) => (
+                  <div key={item.id} className="grid grid-cols-[1fr_96px_28px] items-center gap-2">
+                    <div className="min-w-0 text-sm"><p className="truncate">{item.name}</p><p className="text-xs text-muted-foreground">System: {item.systemStock}</p></div>
+                    <Input type="number" min="0" step="0.001" value={item.countedStock} onChange={(event) => setAuditCounts((current) => current.map((count) => count.id === item.id ? { ...count, countedStock: event.target.value } : count))} />
+                    <Button type="button" variant="ghost" size="icon" onClick={() => setAuditCounts((current) => current.filter((count) => count.id !== item.id))}><X className="h-4 w-4" /></Button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <DialogFooter>
@@ -503,7 +599,7 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
                   Creating...
                 </>
               ) : (
-                'Create Audit'
+                'Submit & Update Stock'
               )}
             </Button>
           </DialogFooter>

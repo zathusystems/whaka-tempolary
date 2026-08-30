@@ -2,7 +2,7 @@
 
 'use client';
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   ArrowLeft,
@@ -18,7 +18,7 @@ import {
   Send,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useForm, useFieldArray } from 'react-hook-form';
+import { useForm, useFieldArray, useWatch } from 'react-hook-form';
 
 import { db, type InventoryItem, type StockTake } from '@/lib/db';
 import { useCurrency } from '@/hooks/use-currency';
@@ -70,6 +70,11 @@ export default function StockAuditPage() {
   const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [submissionMessage, setSubmissionMessage] = useState('');
+  const [auditReason, setAuditReason] = useState('');
+  const [auditHistory, setAuditHistory] = useState<any[]>([]);
+  const [isHistoryDialogOpen, setIsHistoryDialogOpen] = useState(false);
 
   useEffect(() => {
     const branchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
@@ -95,19 +100,36 @@ export default function StockAuditPage() {
     control,
     name: 'items',
   });
+  const hydratedBranchIdRef = useRef<string | null>(null);
+  const watchedItems = useWatch({ control, name: 'items' }) || [];
+  const normalizedSearchTerm = searchTerm.trim().toLowerCase();
+  const visibleFields = useMemo(() => fields.filter((item) => {
+    if (!normalizedSearchTerm) return true;
+    return [item.name, item.sku, item.barcode, item.productCode, item.category]
+      .some((value) => String(value || '').toLowerCase().includes(normalizedSearchTerm));
+  }), [fields, normalizedSearchTerm]);
 
   useEffect(() => {
-    if (inventoryItems) {
-      const formattedItems = inventoryItems.map((item) => ({
-        ...item,
-        countedStock: item.stockUnits ?? '', // Pre-fill with system stock
-      }));
-      replace(formattedItems);
-    }
-  }, [inventoryItems, replace]);
+    // Dexie live queries can re-run while an input is being edited. Replacing
+    // the field array on each result remounts inputs and makes them lose focus.
+    if (!inventoryItems || !activeBranchId || hydratedBranchIdRef.current === activeBranchId) return;
+
+    replace(inventoryItems.map((item) => ({
+      ...item,
+      countedStock: item.stockUnits ?? '',
+    })));
+    hydratedBranchIdRef.current = activeBranchId;
+  }, [activeBranchId, inventoryItems, replace]);
+
+  useEffect(() => {
+    if (!activeBranchId) return;
+    authFetch.fetch<any>(`/inventory/stock-audits/?branch_id=${encodeURIComponent(activeBranchId)}`)
+      .then((response) => setAuditHistory(Array.isArray(response) ? response : response?.results || []))
+      .catch((error) => console.warn('[StockAudit] Could not load audit history:', error));
+  }, [activeBranchId]);
 
   const { totalValue, countedValue, totalDiscrepancy } = useMemo(() => {
-    const values = getValues('items');
+    const values = watchedItems;
     if (!values) {
       return { totalValue: 0, countedValue: 0, totalDiscrepancy: 0 };
     }
@@ -125,14 +147,32 @@ export default function StockAuditPage() {
       { totalValue: 0, countedValue: 0, totalDiscrepancy: 0 }
     );
     return result;
-  }, [getValues, fields]); // Re-run when fields update
+  }, [watchedItems]);
 
   const onConfirmSubmit = async (data: StockTakeFormValues) => {
     if (!user || !activeBranchId) {
         toast({ variant: 'destructive', title: 'Authentication Error', description: 'You must be logged in to submit an audit.' });
         return;
     }
+
+    const changedItems = data.items.filter((item) =>
+      Number(item.countedStock) !== Number(item.stockUnits)
+    );
+    if (changedItems.length === 0) {
+      toast({
+        title: 'No stock changes',
+        description: 'Enter a different counted quantity for at least one product before submitting.',
+      });
+      setIsConfirmModalOpen(false);
+      return;
+    }
+    if (!auditReason.trim()) {
+      toast({ variant: 'destructive', title: 'Reason required', description: 'Enter a reason before submitting the audit.' });
+      return;
+    }
+
     setIsSubmitting(true);
+    setSubmissionMessage(`Submitting ${changedItems.length} stock adjustment${changedItems.length === 1 ? '' : 's'}…`);
 
     const stockTakeRecord: StockTake = {
       id: `ST-${Date.now()}`,
@@ -140,7 +180,7 @@ export default function StockAuditPage() {
       createdAt: new Date().toISOString(),
       createdBy: user.displayName || user.email,
       status: 'Pending Approval',
-      items: data.items.map(item => ({
+      items: changedItems.map(item => ({
         itemId: item.id,
         itemName: item.name,
         systemStock: Number(item.stockUnits) || 0,
@@ -148,39 +188,44 @@ export default function StockAuditPage() {
         discrepancy: (Number(item.countedStock) || 0) - (Number(item.stockUnits) || 0),
       })),
       totalDiscrepancyValue: totalDiscrepancy,
+      notes: auditReason.trim(),
     };
 
     try {
-      // Mark stock take as dirty for sync
+      await authFetch.fetch('/inventory/stock-takes/', {
+        method: 'POST',
+        body: JSON.stringify(stockTakeRecord),
+      });
+
+      // Only mirror the count locally after the server has applied the atomic audit.
+      setSubmissionMessage('Updating this device with the confirmed stock count…');
+      await Promise.all(changedItems.map((item) =>
+        db.inventory.update(item.id, { stockUnits: Number(item.countedStock) || 0 })
+      ));
+
+      // Keep the local audit history for offline/audit-log screens.
       const stockTakeWithSync: StockTake = {
         ...stockTakeRecord,
-        _dirty: true,
-        _operation: 'create'
+        status: 'Approved',
+        _dirty: false,
+        _operation: 'update'
       };
       await db.stockTakes.add(stockTakeWithSync);
-      console.log('[Sync] Marked stock audit as dirty:', stockTakeRecord.id);
-
-      // Queue to backend with offline support
-      try {
-        await authFetch.fetch('/inventory/stock-takes/', {
-          method: 'POST',
-          body: JSON.stringify(stockTakeRecord),
-          offline: true,
-          meta: {
-            domain: 'inventory',
-            entityType: 'StockTake',
-            entityId: stockTakeRecord.id,
-          },
-        });
-        console.log('[StockAudit] Queued audit submission to backend:', stockTakeRecord.id);
-      } catch (syncError) {
-        console.warn('[StockAudit] Failed to queue audit sync, but local save succeeded:', syncError);
-      }
+      setAuditHistory((current) => [{
+        id: stockTakeRecord.id,
+        status: 'Approved',
+        created_at: stockTakeRecord.createdAt,
+        created_by: stockTakeRecord.createdBy,
+        notes: stockTakeRecord.notes,
+        total_discrepancy_value: totalDiscrepancy,
+        items: changedItems,
+      }, ...current]);
 
       toast({
-        title: 'Audit Submitted for Approval',
-        description: 'Your stock count has been saved and is awaiting admin approval.',
+        title: 'Stock audit applied',
+        description: 'Counted stock is now the system stock. Purchase batches were reconciled on the server.',
       });
+      setAuditReason('');
       router.push('/dashboard/inventory');
     } catch (error) {
       console.error('Failed to save stock take:', error);
@@ -191,6 +236,7 @@ export default function StockAuditPage() {
       });
     } finally {
       setIsSubmitting(false);
+      setSubmissionMessage('');
       setIsConfirmModalOpen(false);
     }
   };
@@ -233,17 +279,19 @@ export default function StockAuditPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+           <Button variant="outline" onClick={() => setIsHistoryDialogOpen(true)} disabled={isSubmitting}>
+             View audit history
+           </Button>
            <Button variant="outline" onClick={() => {}} disabled={isSubmitting}>
              <Printer className="mr-2" /> Print Count Sheet
             </Button>
-            {/* <Button onClick={() => setIsConfirmModalOpen(true)} disabled={isSubmitting}>
+            <Button onClick={() => setIsConfirmModalOpen(true)} disabled={isSubmitting || fields.length === 0}>
               {isSubmitting ? (
-                  <Loader2 className="mr-2 animate-spin" />
+                  <><Loader2 className="mr-2 animate-spin" />Applying audit…</>
               ) : (
-                  <Send className="mr-2" />
+                  <><Send className="mr-2" />Submit & Update Stock</>
               )}
-              Submit for Approval
-            </Button> */}
+            </Button>
         </div>
       </div>
 
@@ -282,7 +330,12 @@ export default function StockAuditPage() {
         <CardHeader>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input placeholder="Search items..." className="w-full pl-10 md:w-80" />
+            <Input
+              placeholder="Search by product, SKU, barcode, or category..."
+              className="w-full pl-10 md:w-80"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+            />
           </div>
         </CardHeader>
         <CardContent>
@@ -300,7 +353,8 @@ export default function StockAuditPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {fields.map((field, index) => {
+                  {visibleFields.map((field) => {
+                    const index = fields.findIndex((item) => item.id === field.id);
                     const systemStock = Number(field.stockUnits) || 0;
                     const countedStock = Number(form.watch(`items.${index}.countedStock`)) || 0;
                     const cost = Number(field.cost) || 0;
@@ -315,6 +369,8 @@ export default function StockAuditPage() {
                                 <Input
                                 {...form.register(`items.${index}.countedStock`)}
                                 type="number"
+                                min="0"
+                                step="0.001"
                                 className="h-8 w-24 text-right ml-auto"
                                 />
                             </TableCell>
@@ -327,21 +383,27 @@ export default function StockAuditPage() {
                         </TableRow>
                     );
                   })}
+                  {visibleFields.length === 0 && (
+                    <TableRow><TableCell colSpan={6} className="h-24 text-center text-muted-foreground">No products match your search.</TableCell></TableRow>
+                  )}
                 </TableBody>
               </Table>
             </div>
           </form>
         </CardContent>
       </Card>
-      
+
       <Dialog open={isConfirmModalOpen} onOpenChange={setIsConfirmModalOpen}>
         <DialogContent>
             <DialogHeader>
-                <DialogTitle>Submit Audit for Approval?</DialogTitle>
+                <DialogTitle>Apply Stock Audit?</DialogTitle>
                 <DialogDescription>
-                    This will save the audit and send it to an administrator for approval.
-                    Inventory levels will not be updated until the audit is approved.
+                    This will set product stock to the counted quantity and reconcile purchase-batch availability. This action is recorded and cannot be queued while offline.
                 </DialogDescription>
+                <div className="space-y-2">
+                  <label htmlFor="audit-reason" className="text-sm font-medium">Reason for audit (required)</label>
+                  <Input id="audit-reason" placeholder="Monthly count, variance investigation, damaged stock..." value={auditReason} onChange={(event) => setAuditReason(event.target.value)} />
+                </div>
             </DialogHeader>
             <Card className="bg-muted">
                 <CardHeader>
@@ -366,15 +428,32 @@ export default function StockAuditPage() {
             </Card>
             <DialogFooter>
                 <Button variant="ghost" onClick={() => setIsConfirmModalOpen(false)} disabled={isSubmitting}>Cancel</Button>
-                <Button onClick={handleSubmit(onConfirmSubmit)} disabled={isSubmitting}>
+                <Button onClick={handleSubmit(onConfirmSubmit)} disabled={isSubmitting || !auditReason.trim()}>
                      {isSubmitting ? (
                         <Loader2 className="mr-2 animate-spin" />
                      ) : (
                         <Send className="mr-2" />
                      )}
-                    Submit Audit
+                    {isSubmitting ? 'Applying audit…' : 'Submit Audit'}
                 </Button>
             </DialogFooter>
+            {isSubmitting && (
+              <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status" aria-live="polite">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {submissionMessage}
+              </p>
+            )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isHistoryDialogOpen} onOpenChange={setIsHistoryDialogOpen}>
+        <DialogContent className="max-w-5xl">
+          <DialogHeader><DialogTitle>Audit submission history</DialogTitle><DialogDescription>Previous submissions for this branch, including quantities before and after each change.</DialogDescription></DialogHeader>
+          {auditHistory.length === 0 ? <p className="py-8 text-center text-sm text-muted-foreground">No audit submissions yet.</p> : (
+            <div className="max-h-[65vh] overflow-auto"><Table><TableHeader><TableRow><TableHead>Date</TableHead><TableHead>Status</TableHead><TableHead>Reason</TableHead><TableHead>Quantity before → after</TableHead><TableHead>Submitted by</TableHead></TableRow></TableHeader><TableBody>
+              {auditHistory.map((audit) => <TableRow key={audit.id}><TableCell className="whitespace-nowrap">{audit.created_at ? new Date(audit.created_at).toLocaleString() : '-'}</TableCell><TableCell><Badge>{audit.status || 'Submitted'}</Badge></TableCell><TableCell className="min-w-[220px]">{audit.notes || 'No reason recorded'}</TableCell><TableCell className="min-w-[260px]"><div className="space-y-1">{(audit.items || []).map((item: any, index: number) => <div key={item.id || index} className="text-xs"><span className="font-medium">{item.inventory_item_name || item.itemName || 'Product'}</span>: {item.system_stock ?? item.systemStock} → {item.counted_stock ?? item.countedStock}</div>)}</div></TableCell><TableCell>{audit.created_by || audit.createdBy || '-'}</TableCell></TableRow>)}
+            </TableBody></Table></div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

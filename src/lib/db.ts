@@ -447,6 +447,7 @@ export interface StockTake {
     items: StockTakeItem[];
     status: 'Pending Approval' | 'Approved' | 'Rejected';
     totalDiscrepancyValue: number;
+    notes?: string;
     approvedBy?: string;
     approvedAt?: string; // ISO string
     // Sync fields

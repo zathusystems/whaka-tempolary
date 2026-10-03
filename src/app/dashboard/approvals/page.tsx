@@ -172,11 +172,17 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
       if (serverAccepted) {
         // The backend has already applied the stock adjustment. Do not report
         // this as a failed approval just because the local mirror could not be
-        // updated; remove the stale pending row from the current screen.
+        // be updated. Remove the stale pending row so it cannot be approved
+        // again from this device while the database schema is being upgraded.
+        try {
+          await db.stockTakes.delete(audit.id);
+        } catch (cleanupError) {
+          console.warn('[Approvals] Could not remove stale local audit:', cleanupError);
+        }
         onProcessed(audit.id);
         toast({
           title: 'Audit approved',
-          description: `The server updated stock, but this device could not refresh its local copy (${approvalErrorMessage(error)}).`,
+          description: `The server updated stock. This device removed the stale pending copy; refresh inventory to see the new quantity.`,
         });
       } else {
         toast({

@@ -830,6 +830,14 @@ export class HandyPosDatabase extends Dexie {
             stockAudits: 'id, branchId, status, createdAt, _dirty',
             businessSettings: 'id',
         });
+
+        // A branch can have many audits with the same status (for example,
+        // several approved audits over time). The previous `&` marker made
+        // [branchId+status] unique and caused approved audit saves to fail
+        // once a branch already had an approved audit.
+        this.version(37).stores({
+            stockTakes: 'id, branchId, createdAt, status, _dirty, [branchId+status]',
+        });
     }
 }
 

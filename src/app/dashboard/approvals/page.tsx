@@ -2,6 +2,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { format } from 'date-fns';
 import { Check, X, ShieldCheck, Loader2, Info, ChevronDown, ChevronUp, FileText, CreditCard } from 'lucide-react';
@@ -41,6 +42,7 @@ import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { authFetch } from '@/lib/auth-fetch';
+import { syncInventoryFromBackend } from '@/lib/services/inventory-sync';
 import {
   Dialog,
   DialogContent,
@@ -57,6 +59,37 @@ const LOCAL_STORAGE_KEYS = {
 const numericValue = (value: unknown): number => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const readableErrorValue = (value: unknown, path = ''): string => {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return `${path ? `${path}: ` : ''}${String(value)}`;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry, index) => readableErrorValue(entry, path || String(index)))
+      .filter(Boolean)
+      .join('; ');
+  }
+  if (typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, entry]) => readableErrorValue(entry, path ? `${path}.${key}` : key))
+      .filter(Boolean)
+      .join('; ');
+  }
+  return '';
+};
+
+const approvalErrorMessage = (error: unknown): string => {
+  const details = error as { message?: unknown; status?: unknown; data?: unknown };
+  const message = typeof details?.message === 'string' && details.message.trim()
+    ? details.message.trim()
+    : 'The approval request could not be completed.';
+  const structuredData = readableErrorValue(details?.data);
+  const readableMessage = message === '[object Object]' && structuredData ? structuredData : message;
+  const status = Number(details?.status);
+  return Number.isFinite(status) && status > 0 ? `HTTP ${status}: ${readableMessage}` : readableMessage;
 };
 
 const mapServerAuditToStockTake = (audit: any): StockTake => ({
@@ -90,11 +123,13 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
   const handleApprove = async () => {
     if (!user) return;
     setIsProcessing(true);
+    let serverAccepted = false;
 
     try {
         const serverAudit = await authFetch.fetch<any>(`/inventory/stock-audits/${encodeURIComponent(audit.id)}/submit/`, {
           method: 'POST',
         });
+        serverAccepted = true;
         const approvedAudit = mapServerAuditToStockTake(serverAudit);
 
         await db.transaction('rw', db.inventory, db.stockTakes, async () => {
@@ -121,6 +156,14 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
               _operation: 'update',
             });
         });
+
+        // Refresh the complete inventory cache from the server after approval.
+        // The approval response contains audit items, but the inventory screen
+        // needs the canonical InventoryItem records (including stock_units).
+        const inventorySync = await syncInventoryFromBackend(audit.branchId);
+        if (inventorySync.error) {
+          console.warn('[Approvals] Inventory refresh after approval failed:', inventorySync.error);
+        }
         onProcessed(audit.id);
 
       toast({
@@ -128,8 +171,35 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
         description: `Stock levels have been updated based on audit ${audit.id}.`,
       });
     } catch (error) {
-      console.error('Failed to approve audit:', error);
-      toast({ variant: 'destructive', title: 'Approval Failed' });
+      console.error('Failed to approve audit:', {
+        error,
+        status: (error as any)?.status,
+        data: (error as any)?.data,
+        serverAccepted,
+      });
+
+      if (serverAccepted) {
+        // The backend has already applied the stock adjustment. Do not report
+        // this as a failed approval just because the local mirror could not be
+        // be updated. Remove the stale pending row so it cannot be approved
+        // again from this device while the database schema is being upgraded.
+        try {
+          await db.stockTakes.delete(audit.id);
+        } catch (cleanupError) {
+          console.warn('[Approvals] Could not remove stale local audit:', cleanupError);
+        }
+        onProcessed(audit.id);
+        toast({
+          title: 'Audit approved',
+          description: `The server updated stock. This device removed the stale pending copy; refresh inventory to see the new quantity.`,
+        });
+      } else {
+        toast({
+          variant: 'destructive',
+          title: 'Approval Failed',
+          description: approvalErrorMessage(error),
+        });
+      }
     } finally {
       setIsProcessing(false);
       setIsConfirming(null);
@@ -172,7 +242,10 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
         <AccordionTrigger>
           <div className="flex w-full items-center justify-between pr-4">
             <div className="grid text-left">
-              <span className="font-semibold">Stock Audit - {format(new Date(audit.createdAt), 'PP')}</span>
+              <span className="flex items-center gap-2 font-semibold">
+                Stock Audit - {format(new Date(audit.createdAt), 'PP')}
+                <Badge variant="secondary">{audit.status}</Badge>
+              </span>
               <span className="text-sm text-muted-foreground">
                 Submitted by {audit.createdBy}
               </span>
@@ -383,7 +456,7 @@ const InvoiceApprovalItem = ({ invoice }: { invoice: Invoice }) => {
 };
 
 
-export default function ApprovalsPage() {
+function ApprovalsPageContent() {
   const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
   const [serverPendingAudits, setServerPendingAudits] = useState<StockTake[]>([]);
   const [isLoadingServerAudits, setIsLoadingServerAudits] = useState(false);
@@ -492,7 +565,7 @@ export default function ApprovalsPage() {
                     Pending Stock Audits
                 </CardTitle>
                 <CardDescription>
-                    These stock audits are waiting for your approval before inventory levels are updated.
+                    These stock audits are marked <span className="font-medium">Pending Approval</span> and are waiting for your approval before inventory levels are updated. Approved and rejected audits remain available in Stock Audit History.
                 </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -601,4 +674,25 @@ export default function ApprovalsPage() {
       </Tabs>
     </div>
   );
+}
+
+export default function ApprovalsPage() {
+  const router = useRouter();
+  const { user, loading } = useAuth();
+
+  useEffect(() => {
+    if (!loading && user?.role !== 'Admin') {
+      router.replace('/dashboard');
+    }
+  }, [loading, router, user?.role]);
+
+  if (loading || !user || user.role !== 'Admin') {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  return <ApprovalsPageContent />;
 }

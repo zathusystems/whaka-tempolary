@@ -541,7 +541,10 @@ class StockAuditItemSerializer(serializers.ModelSerializer):
             'id', 'inventory_item', 'inventory_item_name',
             'system_stock', 'counted_stock', 'discrepancy'
         ]
-        read_only_fields = ['id', 'discrepancy']
+        # The server captures the live system stock when the audit is created.
+        # Clients submit only the physical counted quantity and must not be
+        # required or allowed to provide a stale spreadsheet snapshot.
+        read_only_fields = ['id', 'system_stock', 'discrepancy']
 
 
 class StockAuditSerializer(serializers.ModelSerializer):

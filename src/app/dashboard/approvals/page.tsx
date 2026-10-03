@@ -42,6 +42,7 @@ import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { authFetch } from '@/lib/auth-fetch';
+import { syncInventoryFromBackend } from '@/lib/services/inventory-sync';
 import {
   Dialog,
   DialogContent,
@@ -155,6 +156,14 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
               _operation: 'update',
             });
         });
+
+        // Refresh the complete inventory cache from the server after approval.
+        // The approval response contains audit items, but the inventory screen
+        // needs the canonical InventoryItem records (including stock_units).
+        const inventorySync = await syncInventoryFromBackend(audit.branchId);
+        if (inventorySync.error) {
+          console.warn('[Approvals] Inventory refresh after approval failed:', inventorySync.error);
+        }
         onProcessed(audit.id);
 
       toast({

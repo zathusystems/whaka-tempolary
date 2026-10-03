@@ -5,7 +5,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { format } from 'date-fns';
-import { Check, X, ShieldCheck, Loader2, Info, ChevronDown, ChevronUp, FileText, CreditCard } from 'lucide-react';
+import { Check, X, ShieldCheck, Loader2, Info, ChevronDown, ChevronUp, FileText, CreditCard, Download } from 'lucide-react';
 
 import { db, type StockTake, type Expense, type Invoice } from '@/lib/db';
 import { useAuth } from '@/hooks/use-auth';
@@ -43,6 +43,7 @@ import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { authFetch } from '@/lib/auth-fetch';
 import { syncInventoryFromBackend } from '@/lib/services/inventory-sync';
+import { saveStockAuditPdf } from '@/lib/stock-audit-pdf';
 import {
   Dialog,
   DialogContent,
@@ -119,6 +120,21 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
   const { format: formatCurrency } = useCurrency();
   const [isProcessing, setIsProcessing] = useState(false);
   const [isConfirming, setIsConfirming] = useState<'approve' | 'reject' | null>(null);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+
+  const handleExportPdf = async () => {
+    setIsExportingPdf(true);
+    try {
+      const saved = await saveStockAuditPdf(audit, formatCurrency);
+      if (!saved) throw new Error('The device could not save the PDF.');
+      toast({ title: 'Audit PDF downloaded', description: `The report for audit ${audit.id} was saved.` });
+    } catch (error) {
+      console.error('[Approvals] Could not export stock audit PDF:', error);
+      toast({ variant: 'destructive', title: 'PDF export failed', description: error instanceof Error ? error.message : 'Could not generate the audit report.' });
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
 
   const handleApprove = async () => {
     if (!user) return;
@@ -288,7 +304,11 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
                 ))}
               </TableBody>
             </Table>
-            <div className="flex justify-end gap-2 p-4 border-t">
+            <div className="flex flex-wrap justify-end gap-2 border-t p-4">
+              <Button variant="outline" onClick={() => void handleExportPdf()} disabled={isExportingPdf || isProcessing}>
+                {isExportingPdf ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+                {isExportingPdf ? 'Exporting…' : 'Download PDF'}
+              </Button>
               <Button variant="outline" onClick={() => setIsConfirming('reject')}>Reject</Button>
               <Button onClick={() => setIsConfirming('approve')}>Approve</Button>
             </div>

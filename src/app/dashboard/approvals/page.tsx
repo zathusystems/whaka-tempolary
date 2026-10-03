@@ -1,7 +1,7 @@
 
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { format } from 'date-fns';
 import { Check, X, ShieldCheck, Loader2, Info, ChevronDown, ChevronUp, FileText, CreditCard } from 'lucide-react';
@@ -40,6 +40,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
+import { authFetch } from '@/lib/auth-fetch';
 import {
   Dialog,
   DialogContent,
@@ -53,7 +54,33 @@ const LOCAL_STORAGE_KEYS = {
     ACTIVE_BRANCH: 'handypos-active-branch',
 };
 
-const StockAuditApprovalItem = ({ audit }: { audit: StockTake }) => {
+const numericValue = (value: unknown): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const mapServerAuditToStockTake = (audit: any): StockTake => ({
+  id: String(audit.id),
+  branchId: String(audit.branch ?? audit.branch_id ?? ''),
+  createdAt: audit.created_at || new Date().toISOString(),
+  createdBy: audit.created_by || '-',
+  status: audit.status === 'Approved' ? 'Approved' : audit.status === 'Rejected' ? 'Rejected' : 'Pending Approval',
+  totalDiscrepancyValue: numericValue(audit.total_discrepancy_value),
+  notes: audit.notes || '',
+  approvedBy: audit.approved_by || undefined,
+  approvedAt: audit.approved_at || undefined,
+  items: Array.isArray(audit.items) ? audit.items.map((item: any) => ({
+    itemId: String(item.inventory_item ?? item.itemId ?? ''),
+    itemName: item.inventory_item_name || item.itemName || 'Product',
+    systemStock: numericValue(item.system_stock ?? item.systemStock),
+    countedStock: numericValue(item.counted_stock ?? item.countedStock),
+    discrepancy: numericValue(item.discrepancy),
+  })) : [],
+  _dirty: false,
+  _operation: 'update',
+});
+
+const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onProcessed: (auditId: string) => void }) => {
   const { user } = useAuth();
   const { toast } = useToast();
   const { format: formatCurrency } = useCurrency();
@@ -65,6 +92,11 @@ const StockAuditApprovalItem = ({ audit }: { audit: StockTake }) => {
     setIsProcessing(true);
 
     try {
+        const serverAudit = await authFetch.fetch<any>(`/inventory/stock-audits/${encodeURIComponent(audit.id)}/submit/`, {
+          method: 'POST',
+        });
+        const approvedAudit = mapServerAuditToStockTake(serverAudit);
+
         await db.transaction('rw', db.inventory, db.stockTakes, async () => {
             for (const item of audit.items) {
                 const countedStock = Number(item.countedStock);
@@ -73,15 +105,23 @@ const StockAuditApprovalItem = ({ audit }: { audit: StockTake }) => {
                     await db.inventory.update(item.itemId, {
                         stockUnits: countedStock,
                         value: countedStock * (inventoryItem.cost || 0),
+                        status: countedStock > (inventoryItem.reorderLevel || 0)
+                          ? 'In Stock'
+                          : countedStock > 0 ? 'Low Stock' : 'Out of Stock',
                     });
                 }
             }
-            await db.stockTakes.update(audit.id, {
-                status: 'Approved',
-                approvedBy: user.displayName || user.email,
-                approvedAt: new Date().toISOString(),
+            await db.stockTakes.put({
+              ...audit,
+              ...approvedAudit,
+              status: 'Approved',
+              approvedBy: approvedAudit.approvedBy || user.displayName || user.email,
+              approvedAt: approvedAudit.approvedAt || new Date().toISOString(),
+              _dirty: false,
+              _operation: 'update',
             });
         });
+        onProcessed(audit.id);
 
       toast({
         title: 'Audit Approved',
@@ -100,11 +140,19 @@ const StockAuditApprovalItem = ({ audit }: { audit: StockTake }) => {
     if (!user) return;
     setIsProcessing(true);
     try {
-      await db.stockTakes.update(audit.id, {
-        status: 'Rejected',
-        approvedBy: user.displayName || user.email,
-        approvedAt: new Date().toISOString(),
+      const serverAudit = await authFetch.fetch<any>(`/inventory/stock-audits/${encodeURIComponent(audit.id)}/reject/`, {
+        method: 'POST',
       });
+      await db.stockTakes.put({
+        ...audit,
+        ...mapServerAuditToStockTake(serverAudit),
+        status: 'Rejected',
+        approvedBy: serverAudit?.approved_by || user.displayName || user.email,
+        approvedAt: serverAudit?.approved_at || new Date().toISOString(),
+        _dirty: false,
+        _operation: 'update',
+      });
+      onProcessed(audit.id);
       toast({ title: 'Audit Rejected', variant: 'destructive' });
     } catch (error) {
       console.error('Failed to reject audit:', error);
@@ -337,13 +385,34 @@ const InvoiceApprovalItem = ({ invoice }: { invoice: Invoice }) => {
 
 export default function ApprovalsPage() {
   const [activeBranchId, setActiveBranchId] = useState<string | null>(null);
+  const [serverPendingAudits, setServerPendingAudits] = useState<StockTake[]>([]);
+  const [isLoadingServerAudits, setIsLoadingServerAudits] = useState(false);
   
   useEffect(() => {
     const branchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
     if (branchId) setActiveBranchId(branchId);
   }, []);
 
-  const pendingAudits = useLiveQuery(
+  useEffect(() => {
+    if (!activeBranchId) return;
+    let cancelled = false;
+    setIsLoadingServerAudits(true);
+    authFetch.fetch<any>(`/inventory/stock-audits/pending/?branch_id=${encodeURIComponent(activeBranchId)}`)
+      .then((response) => {
+        if (cancelled) return;
+        const audits = Array.isArray(response) ? response : response?.results || [];
+        setServerPendingAudits(audits.map(mapServerAuditToStockTake));
+      })
+      .catch((error) => {
+        if (!cancelled) console.warn('[Approvals] Could not load pending stock audits:', error);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingServerAudits(false);
+      });
+    return () => { cancelled = true; };
+  }, [activeBranchId]);
+
+  const localPendingAudits = useLiveQuery(
     () => {
       if (!activeBranchId) return [];
       return db.stockTakes
@@ -352,6 +421,16 @@ export default function ApprovalsPage() {
     },
     [activeBranchId]
   ) || [];
+
+  const pendingAudits = useMemo(() => {
+    const byId = new Map<string, StockTake>();
+    [...serverPendingAudits, ...localPendingAudits].forEach((audit) => byId.set(audit.id, audit));
+    return Array.from(byId.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }, [localPendingAudits, serverPendingAudits]);
+
+  const removeProcessedAudit = (auditId: string) => {
+    setServerPendingAudits((current) => current.filter((audit) => audit.id !== auditId));
+  };
 
   const pendingExpenses = useLiveQuery(
     () => {
@@ -417,10 +496,12 @@ export default function ApprovalsPage() {
                 </CardDescription>
                 </CardHeader>
                 <CardContent>
-                {pendingAudits.length > 0 ? (
+                {isLoadingServerAudits && pendingAudits.length === 0 ? (
+                    <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading pending audits…</div>
+                ) : pendingAudits.length > 0 ? (
                     <Accordion type="multiple" className="w-full">
                     {pendingAudits.map((audit) => (
-                        <StockAuditApprovalItem key={audit.id} audit={audit} />
+                        <StockAuditApprovalItem key={audit.id} audit={audit} onProcessed={removeProcessedAudit} />
                     ))}
                     </Accordion>
                 ) : (

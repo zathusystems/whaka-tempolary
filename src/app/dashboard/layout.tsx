@@ -355,6 +355,7 @@ const navItems = [
     { href: '/dashboard/eis-sales', icon: FileText, label: 'Sales', permission: 'view_sessions' as Permission },
     { href: '/dashboard/sales', icon: BarChart2, label: 'Reports', permission: 'view_reports' as Permission },
     { href: '/dashboard/expenses', icon: CreditCard, label: 'Expenses', permission: 'view_expenses' as Permission },
+    { href: '/dashboard/approvals', icon: ShieldCheck, label: 'Approvals', permission: 'view_approvals' as Permission },
     { href: '/dashboard/inventory', icon: Boxes, label: 'Inventory', permission: 'view_inventory' as Permission },
     { href: '/dashboard/suppliers', icon: Truck, label: 'Suppliers', permission: 'view_suppliers' as Permission },
     { href: '/dashboard/staff', icon: Users, label: 'Staff', permission: 'manage_staff' as Permission },

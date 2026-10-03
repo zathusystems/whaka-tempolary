@@ -1152,6 +1152,7 @@ dependencies = [
 name = "handy-pos"
 version = "1.0.0"
 dependencies = [
+ "base64 0.22.1",
  "jni",
  "log",
  "mac_address",

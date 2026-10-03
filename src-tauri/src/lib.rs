@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 #[cfg(not(target_os = "android"))]
@@ -258,6 +259,69 @@ fn save_inventory_template_csv(
         .unwrap_or_else(|| "No writable directory available for template export.".to_string()))
 }
 
+#[tauri::command]
+fn save_export_file(
+    app: tauri::AppHandle,
+    filename: String,
+    content_base64: String,
+) -> Result<String, String> {
+    let sanitized_filename = filename
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    let final_filename = if sanitized_filename.trim().is_empty() {
+        "handypos-export.bin".to_string()
+    } else {
+        sanitized_filename
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(content_base64.as_bytes())
+        .map_err(|error| format!("Could not decode export data: {}", error))?;
+
+    let mut target_directories: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(dir) = app.path().download_dir() {
+        target_directories.push(dir);
+    }
+    if let Ok(dir) = app.path().document_dir() {
+        target_directories.push(dir);
+    }
+    if let Ok(dir) = app.path().data_dir() {
+        target_directories.push(dir);
+    }
+    if let Ok(dir) = app.path().cache_dir() {
+        target_directories.push(dir);
+    }
+
+    let mut last_error: Option<String> = None;
+    for directory in target_directories {
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            last_error = Some(format!(
+                "Could not create directory {}: {}",
+                directory.display(),
+                error
+            ));
+            continue;
+        }
+
+        let output_path = directory.join(&final_filename);
+        match std::fs::write(&output_path, &bytes) {
+            Ok(_) => return Ok(output_path.display().to_string()),
+            Err(error) => {
+                last_error = Some(format!("Failed writing {}: {}", output_path.display(), error));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "No writable directory available for export.".to_string()))
+}
+
 #[cfg(not(target_os = "android"))]
 fn fit_window_to_monitor(window: &WebviewWindow) {
     let monitor = window
@@ -320,6 +384,7 @@ pub fn run() {
         get_device_identity,
         get_device_mac_address,
         save_inventory_template_csv,
+        save_export_file,
     ]);
 
     #[cfg(not(target_os = "android"))]

@@ -200,10 +200,19 @@ class Command(BaseCommand):
         )
         checks.append(
             self._check(
+                name='product_id_configured',
+                passed=bool((settings.MRA_EIS_PRODUCT_ID or '').strip()),
+                pass_message='MRA_EIS_PRODUCT_ID is configured.',
+                fail_message='MRA_EIS_PRODUCT_ID must be a non-empty POS product ID.',
+                failure_status='warn',
+            )
+        )
+        checks.append(
+            self._check(
                 name='access_key_present',
                 passed=bool((settings.MRA_EIS_ACCESS_KEY or '').strip()),
-                pass_message='MRA_EIS_ACCESS_KEY is configured.',
-                fail_message='MRA_EIS_ACCESS_KEY is missing (required before LIVE).',
+                pass_message='MRA_EIS_ACCESS_KEY is configured for production TAC activation x-access-key.',
+                fail_message='MRA_EIS_ACCESS_KEY is empty. Official production TAC activation requires x-access-key.',
                 failure_status='warn',
             )
         )
@@ -211,8 +220,8 @@ class Command(BaseCommand):
             self._check(
                 name='secret_key_present',
                 passed=bool((settings.MRA_EIS_SECRET_KEY or '').strip()),
-                pass_message='MRA_EIS_SECRET_KEY is configured.',
-                fail_message='MRA_EIS_SECRET_KEY is missing (required before LIVE).',
+                pass_message='Optional fallback MRA_EIS_SECRET_KEY is configured.',
+                fail_message='MRA_EIS_SECRET_KEY is empty. The official terminal signing secret should come from TAC activation.',
                 failure_status='warn',
             )
         )
@@ -665,8 +674,8 @@ class Command(BaseCommand):
                     'requested_config_types': (flow.get('configuration_sync') or {}).get('config_types', []),
                     'sync_status': (flow.get('configuration_sync') or {}).get('status'),
                 },
-                'save_inventory_items': {
-                    'endpoint': product_sync.get('endpoint') or settings.MRA_EIS_ENDPOINTS.get('save_inventory_items'),
+                'product_status': {
+                    'endpoint': product_sync.get('endpoint') or settings.MRA_EIS_ENDPOINTS.get('product_status'),
                     'output_payload': product_sync.get('response'),
                     'dry_run': product_sync.get('dry_run'),
                 },
@@ -998,7 +1007,8 @@ class Command(BaseCommand):
         qr_signature_present = bool(online.get('receipt_qr_signature_present'))
 
         security_https_ok = str(environment.get('mra_eis_base_url') or '').startswith('https://')
-        security_keys_present = bool(
+        terminal_secret_present = Terminal.objects.exclude(mra_api_key='').exists()
+        optional_gateway_keys_present = bool(
             (settings.MRA_EIS_ACCESS_KEY or '').strip() and (settings.MRA_EIS_SECRET_KEY or '').strip()
         )
         signature_present = bool(
@@ -1027,8 +1037,11 @@ class Command(BaseCommand):
             },
             {
                 'requirement': 'credentials_ready_for_live_authentication',
-                'status': 'pass' if security_keys_present else 'warn',
-                'details': 'Access/secret keys are required before LIVE; dry mode may intentionally omit them.',
+                'status': 'pass' if terminal_secret_present else 'warn',
+                'details': (
+                    'Terminal signing secret should be stored after TAC activation. '
+                    f'Optional gateway key pair present: {optional_gateway_keys_present}.'
+                ),
             },
             {
                 'requirement': 'sales_invoice_format_accuracy',
@@ -1144,7 +1157,7 @@ class Command(BaseCommand):
             f"Generated: `{generated_at}`\n\n"
             "## 1) Technical Documentation of EIS API Integration\n"
             "The backend integration is implemented in:\n"
-            "- `backend/mra_eis/services.py` (onboarding, config sync, inventory sync, invoice submission, offline sync)\n"
+            "- `backend/mra_eis/services/` (onboarding, config sync, inventory sync, invoice submission, offline sync)\n"
             "- `backend/mra_eis/views.py` and `backend/mra_eis/urls.py` (API exposure)\n"
             "- `backend/mra_eis/models.py` (compliance records, queue, audit and retry entities)\n\n"
             "Configured endpoint map:\n"
@@ -1171,10 +1184,11 @@ class Command(BaseCommand):
             f"- summary: pass `{summary.get('pass', 0)}`, warn `{summary.get('warn', 0)}`, fail `{summary.get('fail', 0)}`\n\n"
             "## 3) Security Measures Before Submission\n"
             "Implemented controls:\n"
-            "- Request signing (HMAC) via `x-signature` in `MRAEISClient._build_signature`.\n"
-            "- Access key support via `x-access-key` in `MRAEISClient._build_headers`.\n"
+            "- Request signing (HMAC) via `x-signature` in `MRAEISClient._hmac_sha512_base64`.\n"
+            "- Terminal activation stores MRA-returned `secretKey` for request signing.\n"
+            "- Production TAC activation `x-access-key` support in `MRAEISClient._build_headers`.\n"
             "- Token-based terminal auth (`Authorization: Bearer`).\n"
-            "- Live-mode safeguards in `backend/core/settings.py` (disallow LIVE with dry-run, missing keys, or disabled submission).\n"
+            "- Live-mode safeguards in `backend/core/settings.py` (disallow LIVE with dry-run, placeholder Product ID, or disabled submission).\n"
             "- Write-once style audit trail entities (`InvoiceAuditLog`, `TerminalAuditLog`, `OfflineAuditLog`).\n"
             "- Sensitive values are redacted in generated evidence artifacts.\n\n"
             "## 4) Offline Mode and Deferred Sync Handling\n"

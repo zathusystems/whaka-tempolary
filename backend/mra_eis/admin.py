@@ -4,7 +4,7 @@ MRA EIS Admin Configuration
 from django.contrib import admin
 from django.utils.html import format_html
 from .models import (
-    Terminal, TerminalActivationCode, MRAConfiguration, MRAProductMapping,
+    Terminal, TerminalActivationCode, MRAConfiguration,
     MRAInvoice, OfflineInvoiceQueue, OfflineAuditLog, Receipt,
     InvoiceAuditLog, TerminalAuditLog, MRAAPIError, SyncRetryQueue,
     ConfigurationSyncLog
@@ -15,7 +15,8 @@ from .models import (
 class TerminalAdmin(admin.ModelAdmin):
     list_display = [
         'terminal_id', 'business', 'branch', 'status_badge',
-        'is_online_badge', 'online_invoice_counter', 'offline_invoice_counter',
+        'is_online_badge', 'mra_taxpayer_id', 'terminal_position',
+        'online_invoice_counter', 'offline_invoice_counter',
         'activated_at', 'last_sync_at'
     ]
     list_filter = ['status', 'is_online', 'os_type', 'created_at']
@@ -35,7 +36,10 @@ class TerminalAdmin(admin.ModelAdmin):
             'fields': ('pos_name', 'pos_version', 'os_type')
         }),
         ('MRA Credentials', {
-            'fields': ('mra_terminal_id', 'mra_api_key', 'mra_token', 'token_expires_at'),
+            'fields': (
+                'mra_terminal_id', 'mra_taxpayer_id', 'terminal_position',
+                'mra_api_key', 'mra_token', 'token_expires_at'
+            ),
             'classes': ('collapse',)
         }),
         ('Status', {
@@ -115,35 +119,6 @@ class MRAConfigurationAdmin(admin.ModelAdmin):
         }),
         ('Audit', {
             'fields': ('fetched_from_mra_at', 'created_at'),
-            'classes': ('collapse',)
-        }),
-    )
-
-
-@admin.register(MRAProductMapping)
-class MRAProductMappingAdmin(admin.ModelAdmin):
-    list_display = [
-        'product_name', 'mra_product_code', 'business', 'tax_category',
-        'approved_price', 'tax_rate', 'is_approved', 'is_active'
-    ]
-    list_filter = ['tax_category', 'is_approved', 'is_active', 'created_at']
-    search_fields = ['product_name', 'mra_product_code', 'business__name']
-    readonly_fields = ['id', 'created_at', 'updated_at']
-    fieldsets = (
-        ('Internal Product', {
-            'fields': ('id', 'business', 'inventory_item_id', 'product_name')
-        }),
-        ('MRA Mapping', {
-            'fields': ('mra_product_code', 'mra_product_name', 'tax_category')
-        }),
-        ('Pricing & Tax', {
-            'fields': ('approved_price', 'tax_rate')
-        }),
-        ('Status', {
-            'fields': ('is_approved', 'is_active', 'approved_at')
-        }),
-        ('Audit', {
-            'fields': ('created_at', 'updated_at'),
             'classes': ('collapse',)
         }),
     )

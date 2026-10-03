@@ -153,6 +153,7 @@ export default function StockAuditPage() {
   const [isReportDialogOpen, setIsReportDialogOpen] = useState(false);
   const [hasImportedStockSheet, setHasImportedStockSheet] = useState(false);
   const [isExportingReport, setIsExportingReport] = useState(false);
+  const [exportingHistoryAuditId, setExportingHistoryAuditId] = useState<string | null>(null);
   const stockSheetInputRef = useRef<HTMLInputElement>(null);
   const stockReportRef = useRef<HTMLDivElement>(null);
 
@@ -419,6 +420,140 @@ export default function StockAuditPage() {
       toast({ variant: 'destructive', title: 'PDF export failed', description: 'Could not generate the stock take report PDF.' });
     } finally {
       setIsExportingReport(false);
+    }
+  };
+
+  const exportHistoryAuditPdf = async (audit: any) => {
+    const auditId = String(audit?.id || 'audit');
+    const items = historyItems(audit);
+    if (items.length === 0) {
+      toast({ variant: 'destructive', title: 'No audit details', description: 'This audit has no item details to export.' });
+      return;
+    }
+
+    setExportingHistoryAuditId(auditId);
+    try {
+      const { default: JsPDF } = await import('jspdf');
+      const { saveBlobFile } = await import('@/lib/file-download');
+      const status = historyStatusLabel(audit);
+      const createdAt = audit.created_at || audit.createdAt;
+      const submittedBy = audit.created_by || audit.createdBy || 'Unknown';
+      const approvedBy = audit.approved_by || audit.approvedBy || '-';
+      const approvedAt = audit.approved_at || audit.approvedAt;
+      const totalVariance = Number(audit.total_discrepancy_value ?? audit.totalDiscrepancyValue);
+      const safeAuditId = auditId.replace(/[^a-z0-9_-]+/gi, '-');
+      const filename = `stock-audit-${safeAuditId}.pdf`;
+      const pdf = new JsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 12;
+      const contentWidth = pageWidth - margin * 2;
+      let y = margin;
+
+      const writeLabelValue = (label: string, value: string, x: number, width: number) => {
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(9);
+        pdf.setTextColor(107, 114, 128);
+        pdf.text(label, x, y);
+        pdf.setFont('helvetica', 'normal');
+        pdf.setTextColor(17, 24, 39);
+        const lines = pdf.splitTextToSize(value || '-', width);
+        pdf.text(lines, x + 22, y);
+      };
+
+      pdf.setDrawColor(37, 99, 235);
+      pdf.setLineWidth(1.2);
+      pdf.line(margin, y + 4, pageWidth - margin, y + 4);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setFontSize(20);
+      pdf.setTextColor(17, 24, 39);
+      pdf.text('Stock Audit Report', margin, y + 14);
+      pdf.setFont('helvetica', 'normal');
+      pdf.setFontSize(10);
+      pdf.setTextColor(75, 85, 99);
+      pdf.text(`Audit ${auditId}`, margin, y + 21);
+      y += 34;
+
+      writeLabelValue('Status', status, margin, 45);
+      writeLabelValue('Submitted', createdAt ? new Date(createdAt).toLocaleString() : '-', margin + contentWidth / 2, 55);
+      y += 7;
+      writeLabelValue('By', submittedBy, margin, 45);
+      writeLabelValue('Approved', approvedBy, margin + contentWidth / 2, 55);
+      y += 7;
+      writeLabelValue('Approved at', approvedAt ? new Date(approvedAt).toLocaleString() : '-', margin, 45);
+      writeLabelValue('Reason', String(audit.notes || 'No reason recorded'), margin + contentWidth / 2, 55);
+      y += 14;
+
+      pdf.setFillColor(239, 246, 255);
+      pdf.roundedRect(margin, y - 4, contentWidth, 15, 2, 2, 'F');
+      pdf.setFontSize(9);
+      pdf.setTextColor(75, 85, 99);
+      pdf.text('Products', margin + 5, y + 3);
+      pdf.text('Total variance value', margin + contentWidth / 2, y + 3);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setTextColor(17, 24, 39);
+      pdf.text(String(items.length), margin + 5, y + 9);
+      pdf.text(Number.isFinite(totalVariance) ? formatCurrency(totalVariance) : '-', margin + contentWidth / 2, y + 9);
+      y += 25;
+
+      const columns = [
+        { title: 'Product', x: margin, width: contentWidth * 0.5, align: 'left' as const },
+        { title: 'System stock', x: margin + contentWidth * 0.5, width: contentWidth * 0.17, align: 'right' as const },
+        { title: 'Counted stock', x: margin + contentWidth * 0.67, width: contentWidth * 0.17, align: 'right' as const },
+        { title: 'Variance', x: margin + contentWidth * 0.84, width: contentWidth * 0.16, align: 'right' as const },
+      ];
+      const drawTableHeader = () => {
+        pdf.setFillColor(37, 99, 235);
+        pdf.rect(margin, y - 5, contentWidth, 9, 'F');
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(9);
+        pdf.setTextColor(255, 255, 255);
+        columns.forEach((column) => {
+          const textX = column.align === 'right' ? column.x + column.width - 2 : column.x + 2;
+          pdf.text(column.title, textX, y + 1, { align: column.align });
+        });
+        y += 9;
+      };
+      drawTableHeader();
+
+      items.forEach((item: any) => {
+        const systemStock = Number(item.system_stock ?? item.systemStock);
+        const countedStock = Number(item.counted_stock ?? item.countedStock);
+        const discrepancy = Number(item.discrepancy ?? (countedStock - systemStock));
+        const nameLines = pdf.splitTextToSize(String(item.inventory_item_name || item.itemName || 'Product'), columns[0].width - 4);
+        const rowHeight = Math.max(8, nameLines.length * 4.5 + 3);
+        if (y + rowHeight > pageHeight - margin - 10) {
+          pdf.addPage();
+          y = margin;
+          drawTableHeader();
+        }
+        pdf.setDrawColor(226, 232, 240);
+        pdf.setLineWidth(0.2);
+        pdf.line(margin, y + rowHeight, pageWidth - margin, y + rowHeight);
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(8.5);
+        pdf.setTextColor(17, 24, 39);
+        pdf.text(nameLines, columns[0].x + 2, y + 4);
+        pdf.text(historyQuantity(systemStock), columns[1].x + columns[1].width - 2, y + 4, { align: 'right' });
+        pdf.text(historyQuantity(countedStock), columns[2].x + columns[2].width - 2, y + 4, { align: 'right' });
+        pdf.setTextColor(discrepancy < 0 ? 185 : discrepancy > 0 ? 21 : 17, discrepancy < 0 ? 28 : discrepancy > 0 ? 128 : 24, discrepancy < 0 ? 28 : discrepancy > 0 ? 61 : 39);
+        pdf.setFont('helvetica', 'bold');
+        pdf.text(`${discrepancy > 0 ? '+' : ''}${historyQuantity(discrepancy)}`, columns[3].x + columns[3].width - 2, y + 4, { align: 'right' });
+        y += rowHeight;
+      });
+
+      pdf.setFont('helvetica', 'normal');
+      pdf.setFontSize(7.5);
+      pdf.setTextColor(107, 114, 128);
+      pdf.text(`Generated ${new Date().toLocaleString()}`, margin, pageHeight - margin);
+      const pdfBlob = pdf.output('blob');
+      if (!await saveBlobFile(pdfBlob, filename)) throw new Error('The device could not save the PDF.');
+      toast({ title: 'Audit PDF downloaded', description: `The report for audit ${auditId} was saved.` });
+    } catch (error) {
+      console.error('[StockAudit] Could not export history audit PDF:', error);
+      toast({ variant: 'destructive', title: 'PDF export failed', description: 'Could not generate this audit report PDF.' });
+    } finally {
+      setExportingHistoryAuditId(null);
     }
   };
 
@@ -817,10 +952,22 @@ export default function StockAuditPage() {
                         </button>
                         {isExpanded && (
                           <CardContent className="border-t bg-muted/20 p-4">
-                            <div className="mb-3 flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
-                              <span><strong className="text-foreground">Audit ID:</strong> {auditId}</span>
-                              {audit.approved_by && <span><strong className="text-foreground">Approved by:</strong> {audit.approved_by}</span>}
-                              {audit.approved_at && <span><strong className="text-foreground">Approved:</strong> {new Date(audit.approved_at).toLocaleString()}</span>}
+                            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                              <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
+                                <span><strong className="text-foreground">Audit ID:</strong> {auditId}</span>
+                                {audit.approved_by && <span><strong className="text-foreground">Approved by:</strong> {audit.approved_by}</span>}
+                                {audit.approved_at && <span><strong className="text-foreground">Approved:</strong> {new Date(audit.approved_at).toLocaleString()}</span>}
+                              </div>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void exportHistoryAuditPdf(audit)}
+                                disabled={exportingHistoryAuditId === auditId}
+                              >
+                                {exportingHistoryAuditId === auditId ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+                                {exportingHistoryAuditId === auditId ? 'Exporting…' : 'Download PDF'}
+                              </Button>
                             </div>
                             <div className="overflow-x-auto rounded-md border bg-background">
                               <Table>

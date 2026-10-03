@@ -1,0 +1,1570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ business.name }} - Menu</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary-color: {{ menu_config.primary_color }};
+            --accent-color: {{ menu_config.accent_color }};
+            --bg-color: #ffffff;
+            --text-color: #1a1a1a;
+            --text-light: #666666;
+            --border-color: #e0e0e0;
+            --shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.15);
+        }
+
+        {% if menu_config.theme == 'dark' %}
+        :root {
+            --bg-color: #1a1a1a;
+            --text-color: #ffffff;
+            --text-light: #b0b0b0;
+            --border-color: #333333;
+        }
+        {% endif %}
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            transition: background-color 0.3s ease;
+        }
+
+        .header {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--accent-color) 100%);
+            color: white;
+            padding: 3rem 1rem;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .header::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 120"><path d="M0,50 Q300,0 600,50 T1200,50 L1200,120 L0,120 Z" fill="rgba(255,255,255,0.1)"/></svg>');
+            background-size: cover;
+            opacity: 0.5;
+        }
+
+        .header-content {
+            position: relative;
+            z-index: 1;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .logo {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 1rem;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2rem;
+            backdrop-filter: blur(10px);
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        .header .tagline {
+            font-size: 1.2rem;
+            opacity: 0.95;
+            margin-bottom: 0.5rem;
+            font-style: italic;
+        }
+
+        .header .description {
+            font-size: 0.95rem;
+            opacity: 0.9;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .banner {
+            width: 100%;
+            height: 300px;
+            object-fit: cover;
+            display: block;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem 1rem;
+        }
+
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            margin-bottom: 3rem;
+        }
+
+        .search-box {
+            position: relative;
+        }
+
+        .search-box input {
+            width: 100%;
+            padding: 0.75rem 1rem 0.75rem 2.5rem;
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 1rem;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            transition: all 0.3s ease;
+        }
+
+        .search-box input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(var(--primary-color), 0.1);
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 0.75rem;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-light);
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+
+        .filter-btn {
+            padding: 0.5rem 1rem;
+            border: 2px solid var(--border-color);
+            background-color: transparent;
+            color: var(--text-color);
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .filter-btn:hover {
+            border-color: var(--primary-color);
+            color: var(--primary-color);
+        }
+
+        .filter-btn.active {
+            background-color: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+        }
+
+        .category-section {
+            margin-bottom: 4rem;
+        }
+
+        .category-title {
+            font-size: 1.8rem;
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            padding-bottom: 1rem;
+            border-bottom: 3px solid var(--primary-color);
+            display: inline-block;
+        }
+
+        .menu-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        @media (max-width: 768px) {
+            .menu-grid {
+                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                gap: 1.5rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .menu-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .menu-item {
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+
+        .menu-item:hover {
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-lg);
+            border-color: var(--primary-color);
+        }
+
+        .menu-item-image {
+            width: 100%;
+            height: 200px;
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--accent-color) 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 3rem;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .menu-item-image img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .menu-item-content {
+            padding: 1.5rem;
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .menu-item-name {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: var(--text-color);
+        }
+
+        .menu-item-category {
+            font-size: 0.85rem;
+            color: var(--text-light);
+            margin-bottom: 1rem;
+        }
+
+        .menu-item-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: auto;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .menu-item-price {
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: var(--primary-color);
+        }
+
+        .add-btn {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--accent-color) 100%);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+        }
+
+        .add-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .add-btn:active {
+            transform: scale(0.98);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 4rem 2rem;
+        }
+
+        .empty-state-icon {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+            opacity: 0.5;
+        }
+
+        .empty-state h2 {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+            color: var(--text-color);
+        }
+
+        .empty-state p {
+            color: var(--text-light);
+        }
+
+        .footer {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--accent-color) 100%);
+            color: white;
+            padding: 3rem 1rem 1.5rem;
+            margin-top: 4rem;
+        }
+
+        .footer-content {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .footer-contacts {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 2rem;
+            margin-bottom: 2rem;
+            padding-bottom: 2rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .footer-contact-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 1rem;
+        }
+
+        .footer-contact-icon {
+            width: 40px;
+            height: 40px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            backdrop-filter: blur(10px);
+        }
+
+        .footer-contact-icon svg {
+            width: 20px;
+            height: 20px;
+            stroke: white;
+            fill: none;
+            stroke-width: 2;
+        }
+
+        .footer-contact-info {
+            flex: 1;
+        }
+
+        .footer-contact-label {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            opacity: 0.8;
+            margin-bottom: 0.25rem;
+            font-weight: 600;
+        }
+
+        .footer-contact-value {
+            font-size: 0.95rem;
+            font-weight: 500;
+            word-break: break-word;
+        }
+
+        .footer-contact-value a {
+            color: white;
+            text-decoration: none;
+            transition: opacity 0.3s ease;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.5);
+        }
+
+        .footer-contact-value a:hover {
+            opacity: 0.8;
+        }
+
+        .footer-bottom {
+            text-align: center;
+            padding-top: 1rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .footer-text {
+            font-size: 0.9rem;
+            opacity: 0.9;
+            margin-bottom: 0.5rem;
+        }
+
+        .footer-copyright-branding {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.5rem;
+            width: 100%;
+        }
+
+        .footer-copyright {
+            font-size: 0.8rem;
+            opacity: 0.7;
+            margin: 0;
+        }
+
+        .footer-branding {
+            font-size: 0.75rem;
+            opacity: 0.6;
+            font-weight: 500;
+            margin: 0;
+        }
+
+        .footer-branding strong {
+            font-weight: 700;
+            opacity: 0.8;
+        }
+
+        @media (min-width: 769px) {
+            .footer-bottom {
+                flex-direction: column;
+                justify-content: center;
+                gap: 0;
+            }
+
+            .footer-copyright-branding {
+                flex-direction: column;
+                gap: 0.5rem;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .footer {
+                padding: 2rem 1rem 1rem;
+            }
+
+            .footer-contacts {
+                grid-template-columns: 1fr;
+                gap: 1.5rem;
+                margin-bottom: 1.5rem;
+                padding-bottom: 1.5rem;
+            }
+
+            .footer-contact-item {
+                gap: 0.75rem;
+            }
+
+            .footer-contact-icon {
+                width: 36px;
+                height: 36px;
+            }
+        }
+
+        .business-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin: 2rem 0;
+            padding: 2rem;
+            background: rgba(var(--primary-color), 0.05);
+            border-radius: 12px;
+        }
+
+        .info-item {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .info-icon {
+            font-size: 1.5rem;
+            color: var(--primary-color);
+        }
+
+        .info-content {
+            flex: 1;
+        }
+
+        .info-label {
+            font-size: 0.85rem;
+            color: var(--text-light);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .info-value {
+            font-weight: 600;
+            color: var(--text-color);
+            word-break: break-word;
+        }
+
+        .info-value a {
+            color: var(--primary-color);
+            text-decoration: none;
+            transition: opacity 0.3s ease;
+        }
+
+        .info-value a:hover {
+            opacity: 0.8;
+        }
+
+        .cart-sidebar {
+            position: fixed;
+            right: -400px;
+            top: 0;
+            width: 400px;
+            height: 100vh;
+            background: var(--bg-color);
+            border-left: 1px solid var(--border-color);
+            box-shadow: -2px 0 8px rgba(0, 0, 0, 0.1);
+            transition: right 0.3s ease;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .cart-sidebar.open {
+            right: 0;
+        }
+
+        .cart-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .cart-header h2 {
+            font-size: 1.3rem;
+            font-weight: 700;
+        }
+
+        .cart-close {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: var(--text-color);
+        }
+
+        .cart-items {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+        }
+
+        .cart-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            margin-bottom: 0.75rem;
+        }
+
+        .cart-item-info {
+            flex: 1;
+        }
+
+        .cart-item-name {
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .cart-item-price {
+            font-size: 0.9rem;
+            color: var(--text-light);
+        }
+
+        .cart-item-controls {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .qty-btn {
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            width: 24px;
+            height: 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.8rem;
+        }
+
+        .qty-display {
+            min-width: 30px;
+            text-align: center;
+            font-weight: 600;
+        }
+
+        .remove-btn {
+            background: #ff4444;
+            color: white;
+            border: none;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+
+        .cart-footer {
+            padding: 1.5rem;
+            border-top: 1px solid var(--border-color);
+            background: rgba(var(--primary-color), 0.05);
+        }
+
+        .cart-total {
+            display: flex;
+            justify-content: space-between;
+            font-size: 1.2rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+        }
+
+        .place-order-btn {
+            width: 100%;
+            padding: 1rem;
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--accent-color) 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .place-order-btn:hover:not(:disabled) {
+            transform: scale(1.02);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .place-order-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .cart-badge {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--accent-color) 100%);
+            color: white;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 1.2rem;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            transition: all 0.3s ease;
+            z-index: 999;
+        }
+
+        .cart-badge:hover {
+            transform: scale(1.1);
+        }
+
+        .cart-badge.hidden {
+            display: none;
+        }
+
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s ease, visibility 0.3s ease;
+            z-index: 998;
+        }
+
+        .modal-overlay.open {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .modal {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: var(--bg-color);
+            border-radius: 12px;
+            box-shadow: var(--shadow-lg);
+            z-index: 999;
+            max-width: 500px;
+            width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+            opacity: 0;
+            visibility: hidden;
+            transform: translate(-50%, -50%) scale(0.9);
+            transition: opacity 0.3s ease, visibility 0.3s ease, transform 0.3s ease;
+        }
+
+        .modal.open {
+            opacity: 1;
+            visibility: visible;
+            transform: translate(-50%, -50%) scale(1);
+        }
+
+        .modal-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h2 {
+            font-size: 1.3rem;
+            font-weight: 700;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: var(--text-color);
+        }
+
+        .modal-body {
+            padding: 1.5rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .form-group label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: var(--text-color);
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 0.75rem;
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 1rem;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            transition: all 0.3s ease;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(var(--primary-color), 0.1);
+        }
+
+        .order-summary {
+            background: rgba(var(--primary-color), 0.05);
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+        }
+
+        .order-summary-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        .order-summary-total {
+            display: flex;
+            justify-content: space-between;
+            font-weight: 700;
+            font-size: 1.1rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .modal-footer {
+            padding: 1.5rem;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 1rem;
+        }
+
+        .modal-footer button {
+            flex: 1;
+            padding: 0.75rem;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn-cancel {
+            background: var(--border-color);
+            color: var(--text-color);
+        }
+
+        .btn-cancel:hover {
+            background: var(--text-light);
+        }
+
+        .btn-submit {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--accent-color) 100%);
+            color: white;
+        }
+
+        .btn-submit:hover {
+            transform: scale(1.02);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 1.8rem;
+            }
+
+            .header .tagline {
+                font-size: 1rem;
+            }
+
+            .category-title {
+                font-size: 1.4rem;
+            }
+
+            .container {
+                padding: 1.5rem 1rem;
+            }
+
+            .cart-sidebar {
+                width: 100%;
+                right: -100%;
+            }
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .thank-you-section {
+            text-align: center;
+            margin-top: 5rem;
+            margin-bottom: 2rem;
+            padding: 3rem 2rem;
+            background: linear-gradient(135deg, rgba(var(--primary-color), 0.08) 0%, rgba(var(--accent-color), 0.08) 100%);
+            border-radius: 16px;
+            border: 2px solid rgba(var(--primary-color), 0.15);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .thank-you-section::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 120"><path d="M0,50 Q300,0 600,50 T1200,50 L1200,120 L0,120 Z" fill="rgba(255,255,255,0.03)"/></svg>');
+            background-size: cover;
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        .thank-you-content {
+            position: relative;
+            z-index: 1;
+        }
+
+        .thank-you-icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            display: inline-block;
+            animation: bounce 2s ease-in-out infinite;
+        }
+
+        .thank-you-text {
+            font-size: 1.4rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--accent-color) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin: 0;
+            letter-spacing: 0.5px;
+        }
+
+        .thank-you-subtitle {
+            font-size: 0.95rem;
+            color: var(--text-light);
+            margin-top: 0.75rem;
+            font-weight: 400;
+        }
+
+        @keyframes bounce {
+            0%, 100% {
+                transform: translateY(0);
+            }
+            50% {
+                transform: translateY(-8px);
+            }
+        }
+
+        .loading {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-content">
+            {% if menu_config.business_logo %}
+            <div class="logo">
+                <img src="{{ menu_config.business_logo }}" alt="{{ business.name }}" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">
+            </div>
+            {% else %}
+            <div class="logo">
+                <svg viewBox="0 0 24 24" fill="white" style="width: 50px; height: 50px;">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm3.5-9c.83 0 1.5-.67 1.5-1.5S16.33 8 15.5 8 14 8.67 14 9.5s.67 1.5 1.5 1.5zm-7 0c.83 0 1.5-.67 1.5-1.5S9.33 8 8.5 8 7 8.67 7 9.5 7.67 11 8.5 11zm3.5 6.5c2.33 0 4.31-1.46 5.11-3.5H6.89c.8 2.04 2.78 3.5 5.11 3.5z"/>
+                </svg>
+            </div>
+            {% endif %}
+            <h1>{{ menu_config.display_name }}</h1>
+            <p class="tagline">{{ menu_config.tagline }}</p>
+            <p class="description">{{ menu_config.description }}</p>
+        </div>
+    </header>
+
+    {% if menu_config.business_banner %}
+    <img src="{{ menu_config.business_banner }}" alt="Banner" class="banner">
+    {% endif %}
+
+    <div class="container" data-branch-id="{{ branch.id }}">
+        {% if menu_config.enable_search or menu_config.enable_filters %}
+        <div class="controls">
+            {% if menu_config.enable_search %}
+            <div class="search-box">
+                <span class="search-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" style="width: 20px; height: 20px; stroke-width: 2;">
+                        <circle cx="11" cy="11" r="8"/>
+                        <path d="m21 21-4.35-4.35"/>
+                    </svg>
+                </span>
+                <input type="text" id="searchInput" placeholder="Search menu items...">
+            </div>
+            {% endif %}
+
+            {% if menu_config.enable_filters %}
+            <div class="filters">
+                <button class="filter-btn active" data-category="all">All Items</button>
+                {% for category in categories %}
+                <button class="filter-btn" data-category="{{ category }}">{{ category }}</button>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {% if categories %}
+            {% if menu_config.show_categories %}
+                {% for category, items in categories.items %}
+                <section class="category-section">
+                    <h2 class="category-title">{{ category }}</h2>
+                    <div class="menu-grid">
+                        {% for item in items %}
+                        <div class="menu-item" data-category="{{ category }}" data-name="{{ item.name|lower }}" onclick="openItemPreview('{{ item.id }}', '{{ item.name }}', {{ item.price }}, '{{ item.image|default:'' }}', '{{ item.description|default:'' }}', '{{ category }}')">
+                            <div class="menu-item-image">
+                                {% if item.image %}
+                                <img src="{{ item.image }}" alt="{{ item.name }}">
+                                {% else %}
+                                🍽️
+                                {% endif %}
+                            </div>
+                            <div class="menu-item-content">
+                                <h3 class="menu-item-name">{{ item.name }}</h3>
+                                <p class="menu-item-category">{{ category }}</p>
+                                <div class="menu-item-footer">
+                                    {% if menu_config.show_prices %}
+                                    <span class="menu-item-price">{{ menu_config.currency }} {{ item.price|floatformat:2 }}</span>
+                                    {% endif %}
+                                    {% if menu_config.accept_orders %}
+                                    <button class="add-btn" onclick="event.stopPropagation(); addToCart('{{ item.id }}', '{{ item.name }}', {{ item.price }})">+ Add</button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </section>
+                {% endfor %}
+            {% else %}
+                <div class="menu-grid">
+                    {% for category, items in categories.items %}
+                        {% for item in items %}
+                        <div class="menu-item" data-category="{{ category }}" data-name="{{ item.name|lower }}" onclick="openItemPreview('{{ item.id }}', '{{ item.name }}', {{ item.price }}, '{{ item.image|default:'' }}', '{{ item.description|default:'' }}', '{{ category }}')">
+                            <div class="menu-item-image">
+                                {% if item.image %}
+                                <img src="{{ item.image }}" alt="{{ item.name }}">
+                                {% else %}
+                                🍽️
+                                {% endif %}
+                            </div>
+                            <div class="menu-item-content">
+                                <h3 class="menu-item-name">{{ item.name }}</h3>
+                                <p class="menu-item-category">{{ category }}</p>
+                                <div class="menu-item-footer">
+                                    {% if menu_config.show_prices %}
+                                    <span class="menu-item-price">{{ menu_config.currency }} {{ item.price|floatformat:2 }}</span>
+                                    {% endif %}
+                                    {% if menu_config.accept_orders %}
+                                    <button class="add-btn" onclick="event.stopPropagation(); addToCart('{{ item.id }}', '{{ item.name }}', {{ item.price }})">+ Add</button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% else %}
+            <div class="empty-state">
+                <div class="empty-state-icon">🍽️</div>
+                <h2>Menu is Empty</h2>
+                <p>The restaurant owner is updating the menu. Please check back soon!</p>
+            </div>
+        {% endif %}
+
+        <div class="thank-you-section">
+            <div class="thank-you-content">
+                <div class="thank-you-icon">🙏</div>
+                <p class="thank-you-text">Thank you for your visit</p>
+                <p class="thank-you-subtitle">We hope you enjoyed your experience. Come back soon!</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="cart-sidebar" id="cartSidebar">
+        <div class="cart-header">
+            <h2>Your Order</h2>
+            <button class="cart-close" onclick="toggleCart()">✕</button>
+        </div>
+        <div class="cart-items" id="cartItems">
+            <p style="text-align: center; color: var(--text-light); padding: 2rem 0;">Your cart is empty</p>
+        </div>
+        <div class="cart-footer">
+            <div class="cart-total">
+                <span>Total:</span>
+                <span id="cartTotal">{{ menu_config.currency }} 0.00</span>
+            </div>
+            <button class="place-order-btn" id="placeOrderBtn" onclick="placeOrder()" disabled>Place Order</button>
+        </div>
+    </div>
+
+    <div class="cart-badge" id="cartBadge" onclick="toggleCart()">
+        <span id="cartCount">0</span>
+    </div>
+
+    <div class="modal-overlay" id="orderModalOverlay" onclick="closeOrderModal()"></div>
+
+    <div class="modal-overlay" id="itemPreviewOverlay" onclick="closeItemPreview()"></div>
+
+    <div class="modal" id="itemPreviewModal" style="max-width: 600px;">
+        <div class="modal-header">
+            <h2 id="previewItemName">Item Name</h2>
+            <button class="modal-close" onclick="closeItemPreview()">✕</button>
+        </div>
+        <div class="modal-body">
+            <div id="previewItemImage" style="width: 100%; height: 300px; background: linear-gradient(135deg, var(--primary-color) 0%, var(--accent-color) 100%); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 4rem; margin-bottom: 1.5rem; overflow: hidden;">
+                🍽️
+            </div>
+            <div style="margin-bottom: 1.5rem;">
+                <p style="color: var(--text-light); font-size: 0.9rem; margin-bottom: 0.5rem;" id="previewItemCategory">Category</p>
+                <p style="color: var(--text-color); font-size: 1rem; line-height: 1.6;" id="previewItemDescription">Item description will appear here</p>
+            </div>
+            <div style="background: rgba(var(--primary-color), 0.05); padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 0.9rem; color: var(--text-light);">Price:</span>
+                    <span style="font-size: 1.5rem; font-weight: 700; color: var(--primary-color);" id="previewItemPrice">$0.00</span>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-cancel" onclick="closeItemPreview()">Close</button>
+            <button class="btn-submit" id="previewAddBtn" onclick="addFromPreview()">+ Add to Cart</button>
+        </div>
+    </div>
+
+    <div class="modal" id="orderModal">
+        <div class="modal-header">
+            <h2>Complete Your Order</h2>
+            <button class="modal-close" onclick="closeOrderModal()">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="order-summary" id="orderSummaryModal"></div>
+
+            <div class="form-group">
+                <label for="customerName">Your Name *</label>
+                <input type="text" id="customerName" placeholder="Enter your name" required>
+            </div>
+
+            <div class="form-group">
+                <label for="customerPhone">Phone Number *</label>
+                <input type="tel" id="customerPhone" placeholder="Enter your phone number" required>
+            </div>
+
+            <div class="form-group">
+                <label for="tableNumber">Table Number *</label>
+                <input type="number" id="tableNumber" placeholder="Enter table number" min="1" required>
+            </div>
+
+            <div class="form-group">
+                <label for="specialRequests">Special Requests (Optional)</label>
+                <textarea id="specialRequests" placeholder="Any special requests or dietary requirements?" style="width: 100%; padding: 0.75rem; border: 2px solid var(--border-color); border-radius: 8px; font-size: 1rem; background-color: var(--bg-color); color: var(--text-color); font-family: inherit; resize: vertical; min-height: 80px;"></textarea>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-cancel" onclick="closeOrderModal()">Cancel</button>
+            <button class="btn-submit" onclick="submitOrder()">Confirm Order</button>
+        </div>
+    </div>
+
+    <footer class="footer">
+        <div class="footer-content">
+            {% if menu_config.show_contact_info %}
+            <div class="footer-contacts">
+                {% if business.phone %}
+                <div class="footer-contact-item">
+                    <div class="footer-contact-icon">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+                        </svg>
+                    </div>
+                    <div class="footer-contact-info">
+                        <div class="footer-contact-label">Phone</div>
+                        <div class="footer-contact-value"><a href="tel:{{ business.phone }}">{{ business.phone }}</a></div>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% if business.email %}
+                <div class="footer-contact-item">
+                    <div class="footer-contact-icon">
+                        <svg viewBox="0 0 24 24">
+                            <rect x="2" y="4" width="20" height="16" rx="2"/>
+                            <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>
+                        </svg>
+                    </div>
+                    <div class="footer-contact-info">
+                        <div class="footer-contact-label">Email</div>
+                        <div class="footer-contact-value"><a href="mailto:{{ business.email }}">{{ business.email }}</a></div>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% if business.address %}
+                <div class="footer-contact-item">
+                    <div class="footer-contact-icon">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+                            <circle cx="12" cy="10" r="3"/>
+                        </svg>
+                    </div>
+                    <div class="footer-contact-info">
+                        <div class="footer-contact-label">Address</div>
+                        <div class="footer-contact-value">{{ business.address }}</div>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% if business.website %}
+                <div class="footer-contact-item">
+                    <div class="footer-contact-icon">
+                        <svg viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="10"/>
+                            <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                        </svg>
+                    </div>
+                    <div class="footer-contact-info">
+                        <div class="footer-contact-label">Website</div>
+                        <div class="footer-contact-value"><a href="{{ business.website }}" target="_blank" rel="noopener noreferrer">Visit Website</a></div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+
+            <div class="footer-bottom">
+                <div class="footer-copyright-branding">
+                    <p class="footer-copyright">&copy; {% now "Y" %} {{ business.name }}. All rights reserved.</p>
+                    <p class="footer-branding">Powered by <strong>Handy-POS</strong></p>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        const CURRENCY = '{{ menu_config.currency }}';
+        const ACCEPT_ORDERS = {{ menu_config.accept_orders|lower }};
+        
+        let cart = [];
+
+        const searchInput = document.getElementById('searchInput');
+        const filterBtns = document.querySelectorAll('.filter-btn');
+        const menuItems = document.querySelectorAll('.menu-item');
+
+        function filterItems() {
+            const searchTerm = searchInput ? searchInput.value.toLowerCase() : '';
+            const activeCategory = document.querySelector('.filter-btn.active')?.dataset.category || 'all';
+
+            menuItems.forEach(item => {
+                const itemName = item.dataset.name;
+                const itemCategory = item.dataset.category;
+                const matchesSearch = itemName.includes(searchTerm);
+                const matchesCategory = activeCategory === 'all' || itemCategory === activeCategory;
+
+                item.style.display = matchesSearch && matchesCategory ? '' : 'none';
+            });
+        }
+
+        if (searchInput) {
+            searchInput.addEventListener('input', filterItems);
+        }
+
+        filterBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                filterBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                filterItems();
+            });
+        });
+
+        function addToCart(itemId, itemName, itemPrice) {
+            if (!ACCEPT_ORDERS) {
+                alert('Orders are not currently being accepted');
+                return;
+            }
+
+            const existingItem = cart.find(item => item.id === itemId);
+            if (existingItem) {
+                existingItem.quantity += 1;
+            } else {
+                cart.push({
+                    id: itemId,
+                    name: itemName,
+                    price: itemPrice,
+                    quantity: 1
+                });
+            }
+
+            updateCart();
+        }
+
+        function updateCart() {
+            const cartItemsContainer = document.getElementById('cartItems');
+            const cartCount = document.getElementById('cartCount');
+            const cartTotal = document.getElementById('cartTotal');
+            const placeOrderBtn = document.getElementById('placeOrderBtn');
+
+            if (cart.length === 0) {
+                cartItemsContainer.innerHTML = '<p style="text-align: center; color: var(--text-light); padding: 2rem 0;">Your cart is empty</p>';
+                cartCount.textContent = '0';
+                cartTotal.textContent = `${CURRENCY} 0.00`;
+                placeOrderBtn.disabled = true;
+                document.getElementById('cartBadge').classList.add('hidden');
+                return;
+            }
+
+            cartItemsContainer.innerHTML = cart.map(item => `
+                <div class="cart-item">
+                    <div class="cart-item-info">
+                        <div class="cart-item-name">${item.name}</div>
+                        <div class="cart-item-price">${CURRENCY} ${(item.price * item.quantity).toFixed(2)}</div>
+                    </div>
+                    <div class="cart-item-controls">
+                        <button class="qty-btn" onclick="decreaseQuantity('${item.id}')">−</button>
+                        <div class="qty-display">${item.quantity}</div>
+                        <button class="qty-btn" onclick="increaseQuantity('${item.id}')">+</button>
+                        <button class="remove-btn" onclick="removeFromCart('${item.id}')">Remove</button>
+                    </div>
+                </div>
+            `).join('');
+
+            const totalItems = cart.reduce((sum, item) => sum + item.quantity, 0);
+            cartCount.textContent = totalItems;
+
+            const total = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+            cartTotal.textContent = `${CURRENCY} ${total.toFixed(2)}`;
+
+            placeOrderBtn.disabled = false;
+            document.getElementById('cartBadge').classList.remove('hidden');
+        }
+
+        function increaseQuantity(itemId) {
+            const item = cart.find(i => i.id === itemId);
+            if (item) {
+                item.quantity += 1;
+                updateCart();
+            }
+        }
+
+        function decreaseQuantity(itemId) {
+            const item = cart.find(i => i.id === itemId);
+            if (item && item.quantity > 1) {
+                item.quantity -= 1;
+                updateCart();
+            }
+        }
+
+        function removeFromCart(itemId) {
+            cart = cart.filter(item => item.id !== itemId);
+            updateCart();
+        }
+
+        function toggleCart() {
+            document.getElementById('cartSidebar').classList.toggle('open');
+        }
+
+        function openCart() {
+            document.getElementById('cartSidebar').classList.add('open');
+        }
+
+        function placeOrder() {
+            if (cart.length === 0) {
+                alert('Your cart is empty');
+                return;
+            }
+
+            openOrderModal();
+        }
+
+        function openOrderModal() {
+            const total = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+            const orderSummaryHtml = cart.map(item => `
+                <div class="order-summary-item">
+                    <span>${item.name} x${item.quantity}</span>
+                    <span>${CURRENCY} ${(item.price * item.quantity).toFixed(2)}</span>
+                </div>
+            `).join('');
+
+            document.getElementById('orderSummaryModal').innerHTML = `
+                ${orderSummaryHtml}
+                <div class="order-summary-total">
+                    <span>Total:</span>
+                    <span>${CURRENCY} ${total.toFixed(2)}</span>
+                </div>
+            `;
+
+            document.getElementById('orderModal').classList.add('open');
+            document.getElementById('orderModalOverlay').classList.add('open');
+            document.getElementById('customerName').value = '';
+            document.getElementById('customerPhone').value = '';
+            document.getElementById('tableNumber').value = '';
+            document.getElementById('specialRequests').value = '';
+        }
+
+        function closeOrderModal() {
+            document.getElementById('orderModal').classList.remove('open');
+            document.getElementById('orderModalOverlay').classList.remove('open');
+        }
+
+        function submitOrder() {
+            const name = document.getElementById('customerName').value.trim();
+            const phone = document.getElementById('customerPhone').value.trim();
+            const tableNumber = document.getElementById('tableNumber').value.trim();
+            const specialRequests = document.getElementById('specialRequests').value.trim();
+
+            if (!name) {
+                alert('Please enter your name');
+                return;
+            }
+
+            if (!phone) {
+                alert('Please enter your phone number');
+                return;
+            }
+
+            if (!tableNumber) {
+                alert('Please enter your table number');
+                return;
+            }
+
+            // Extract branch ID from URL or use a default
+            const branchId = getBranchIdFromUrl();
+            if (!branchId) {
+                alert('Unable to determine branch. Please refresh the page.');
+                return;
+            }
+
+            // Prepare order data
+            const orderData = {
+                branch_id: branchId,
+                customer_name: name,
+                customer_phone: phone,
+                table_number: tableNumber,
+                special_instructions: specialRequests,
+                items: cart.map(item => ({
+                    inventory_item_id: item.id,
+                    name: item.name,
+                    quantity: item.quantity,
+                    price: item.price
+                }))
+            };
+
+            // Send order to backend
+            fetch('/api/orders/self-service/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(orderData)
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(data => {
+                        throw new Error(data.error || 'Failed to create order');
+                    });
+                }
+                return response.json();
+            })
+            .then(data => {
+                const total = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+                const orderItems = cart.map(item => `${item.name} x${item.quantity}`).join(', ');
+
+                const orderMessage = `
+✓ Order Confirmed!
+
+Order #${data.order_number}
+Customer: ${name}
+Phone: ${phone}
+Table: ${tableNumber}
+
+Items: ${orderItems}
+Total: ${CURRENCY} ${total.toFixed(2)}
+
+${specialRequests ? `Special Requests: ${specialRequests}` : ''}
+
+Thank you for your order! Your food will be prepared shortly.
+                `;
+
+                alert(orderMessage);
+
+                // Clear cart and close modal
+                cart = [];
+                updateCart();
+                closeOrderModal();
+                toggleCart();
+            })
+            .catch(error => {
+                console.error('Order submission error:', error);
+                alert('Error creating order: ' + error.message);
+            });
+        }
+
+        function getBranchIdFromUrl() {
+            // First, try to get from data attribute (most reliable)
+            const menuContainer = document.querySelector('[data-branch-id]');
+            if (menuContainer) {
+                const branchId = menuContainer.getAttribute('data-branch-id');
+                if (branchId) {
+                    return branchId;
+                }
+            }
+
+            // If data attribute doesn't work, try query params
+            const urlParams = new URLSearchParams(window.location.search);
+            const branchId = urlParams.get('branch_id');
+            if (branchId) {
+                return branchId;
+            }
+
+            // Fallback: return null if not found
+            console.warn('Unable to determine branch ID from URL or data attribute');
+            return null;
+        }
+
+        // Item Preview Functions
+        let currentPreviewItem = null;
+
+        function openItemPreview(itemId, itemName, itemPrice, itemImage, itemDescription, category) {
+            currentPreviewItem = { id: itemId, name: itemName, price: itemPrice };
+
+            document.getElementById('previewItemName').textContent = itemName;
+            document.getElementById('previewItemCategory').textContent = category;
+            document.getElementById('previewItemDescription').textContent = itemDescription || 'No description available';
+            document.getElementById('previewItemPrice').textContent = `${CURRENCY} ${itemPrice.toFixed(2)}`;
+
+            const imageContainer = document.getElementById('previewItemImage');
+            if (itemImage) {
+                imageContainer.innerHTML = `<img src="${itemImage}" alt="${itemName}" style="width: 100%; height: 100%; object-fit: cover;">`;
+            } else {
+                imageContainer.innerHTML = '🍽️';
+            }
+
+            document.getElementById('itemPreviewModal').classList.add('open');
+            document.getElementById('itemPreviewOverlay').classList.add('open');
+        }
+
+        function closeItemPreview() {
+            document.getElementById('itemPreviewModal').classList.remove('open');
+            document.getElementById('itemPreviewOverlay').classList.remove('open');
+            currentPreviewItem = null;
+        }
+
+        function addFromPreview() {
+            if (currentPreviewItem) {
+                addToCart(currentPreviewItem.id, currentPreviewItem.name, currentPreviewItem.price);
+                closeItemPreview();
+                openCart();
+            }
+        }
+
+        updateCart();
+    </script>
+</body>
+</html>

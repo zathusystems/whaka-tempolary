@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 tauri = { version = "2.10.2", features = [] }
+base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }

@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
+import * as XLSX from 'xlsx';
 import {
   ArrowLeft,
   Check,
@@ -13,9 +14,10 @@ import {
   Loader2,
   Save,
   Search,
-  Printer,
   FileUp,
   Send,
+  Download,
+  Upload,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useForm, useFieldArray, useWatch } from 'react-hook-form';
@@ -53,13 +55,52 @@ import {
 } from '@/components/ui/dialog';
 import { useAuth } from '@/hooks/use-auth';
 import { authFetch } from '@/lib/auth-fetch';
+import { saveBlobFile } from '@/lib/file-download';
 
 const LOCAL_STORAGE_KEYS = {
     ACTIVE_BRANCH: 'handypos-active-branch'
 };
 
 type StockTakeFormValues = {
-  items: (InventoryItem & { countedStock: number | string })[];
+  items: (InventoryItem & { countedStock: number | string; countedStockProvided?: boolean })[];
+};
+
+type StockCountSheetRow = {
+  'Item ID'?: unknown;
+  'Product Name'?: unknown;
+  SKU?: unknown;
+  Barcode?: unknown;
+  'System Stock'?: unknown;
+  Unit?: unknown;
+  'Counted Stock'?: unknown;
+};
+
+const STOCK_COUNT_SHEET_COLUMNS = [
+  'Item ID',
+  'Product Name',
+  'System Stock',
+  'Unit',
+  'Counted Stock',
+];
+
+const stockCountNumber = (value: unknown): number | null => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : Number.NaN;
+  const normalized = String(value ?? '').trim().replace(/,/g, '');
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+};
+
+const historyStatusLabel = (audit: any): string => {
+  const status = String(audit?.status || 'Submitted');
+  return status === 'Pending' ? 'Pending Approval' : status;
+};
+
+const historyItems = (audit: any): any[] => Array.isArray(audit?.items) ? audit.items : [];
+
+const historyQuantity = (value: unknown): string => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed.toLocaleString(undefined, { maximumFractionDigits: 3 }) : '-';
 };
 
 export default function StockAuditPage() {
@@ -74,7 +115,15 @@ export default function StockAuditPage() {
   const [submissionMessage, setSubmissionMessage] = useState('');
   const [auditReason, setAuditReason] = useState('');
   const [auditHistory, setAuditHistory] = useState<any[]>([]);
+  const [auditHistorySearch, setAuditHistorySearch] = useState('');
+  const [expandedAuditId, setExpandedAuditId] = useState<string | null>(null);
+  const [isLoadingAuditHistory, setIsLoadingAuditHistory] = useState(false);
   const [isHistoryDialogOpen, setIsHistoryDialogOpen] = useState(false);
+  const [isReportDialogOpen, setIsReportDialogOpen] = useState(false);
+  const [hasImportedStockSheet, setHasImportedStockSheet] = useState(false);
+  const [isExportingReport, setIsExportingReport] = useState(false);
+  const stockSheetInputRef = useRef<HTMLInputElement>(null);
+  const stockReportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const branchId = localStorage.getItem(LOCAL_STORAGE_KEYS.ACTIVE_BRANCH);
@@ -117,15 +166,18 @@ export default function StockAuditPage() {
     replace(inventoryItems.map((item) => ({
       ...item,
       countedStock: item.stockUnits ?? '',
+      countedStockProvided: true,
     })));
     hydratedBranchIdRef.current = activeBranchId;
   }, [activeBranchId, inventoryItems, replace]);
 
   useEffect(() => {
     if (!activeBranchId) return;
+    setIsLoadingAuditHistory(true);
     authFetch.fetch<any>(`/inventory/stock-audits/?branch_id=${encodeURIComponent(activeBranchId)}`)
       .then((response) => setAuditHistory(Array.isArray(response) ? response : response?.results || []))
-      .catch((error) => console.warn('[StockAudit] Could not load audit history:', error));
+      .catch((error) => console.warn('[StockAudit] Could not load audit history:', error))
+      .finally(() => setIsLoadingAuditHistory(false));
   }, [activeBranchId]);
 
   const { totalValue, countedValue, totalDiscrepancy } = useMemo(() => {
@@ -136,18 +188,195 @@ export default function StockAuditPage() {
     const result = values.reduce(
       (acc, item) => {
         const systemStock = Number(item.stockUnits) || 0;
-        const countedStock = Number(item.countedStock) || 0;
+        const counted = item.countedStockProvided !== false;
+        const countedStock = counted ? (Number(item.countedStock) || 0) : 0;
         const cost = Number(item.cost) || 0;
 
         acc.totalValue += systemStock * cost;
-        acc.countedValue += countedStock * cost;
-        acc.totalDiscrepancy += (countedStock - systemStock) * cost;
+        if (counted) {
+          acc.countedValue += countedStock * cost;
+          acc.totalDiscrepancy += (countedStock - systemStock) * cost;
+        }
         return acc;
       },
       { totalValue: 0, countedValue: 0, totalDiscrepancy: 0 }
     );
     return result;
   }, [watchedItems]);
+
+  const filteredAuditHistory = useMemo(() => {
+    const query = auditHistorySearch.trim().toLowerCase();
+    if (!query) return auditHistory;
+    return auditHistory.filter((audit) => {
+      const itemNames = historyItems(audit).map((item) => item.inventory_item_name || item.itemName || '').join(' ');
+      return [
+        audit.id,
+        audit.notes,
+        audit.created_by,
+        audit.createdBy,
+        audit.branch_name,
+        historyStatusLabel(audit),
+        itemNames,
+      ].some((value) => String(value || '').toLowerCase().includes(query));
+    });
+  }, [auditHistory, auditHistorySearch]);
+
+  const auditHistorySummary = useMemo(() => auditHistory.reduce((summary, audit) => {
+    const status = historyStatusLabel(audit);
+    summary.total += 1;
+    if (status === 'Approved') summary.approved += 1;
+    else if (status === 'Rejected') summary.rejected += 1;
+    else summary.pending += 1;
+    return summary;
+  }, { total: 0, approved: 0, pending: 0, rejected: 0 }), [auditHistory]);
+
+  const downloadStockCountSheet = () => {
+    const items = getValues('items') || [];
+    if (items.length === 0) {
+      toast({ variant: 'destructive', title: 'No stock to export', description: 'Wait for inventory to load before downloading the count sheet.' });
+      return;
+    }
+
+    const rows = items.map((item) => ({
+      'Item ID': item.id,
+      'Product Name': item.name,
+      'System Stock': Number(item.stockUnits) || 0,
+      Unit: item.unitType || '',
+      // Keep this blank so the physical count is clearly distinguished from system stock.
+      'Counted Stock': '',
+    }));
+    const worksheet = XLSX.utils.json_to_sheet(rows, { header: STOCK_COUNT_SHEET_COLUMNS });
+    worksheet['!cols'] = [
+      { wch: 38 }, { wch: 32 }, { wch: 15 }, { wch: 12 }, { wch: 16 },
+    ];
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Stock Count');
+    const workbookData = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+    const date = new Date().toISOString().slice(0, 10);
+    void saveBlobFile(
+      new Blob([workbookData], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+      `stock-count-${date}.xlsx`
+    ).then((downloadStarted) => {
+      if (!downloadStarted) {
+        toast({ variant: 'destructive', title: 'Download blocked', description: 'Your device could not save the Excel download.' });
+        return;
+      }
+      toast({ title: 'Stock count sheet downloaded', description: 'Enter physical quantities in the Counted Stock column, save the file, then upload it here.' });
+    });
+  };
+
+  const importStockCountSheet = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    try {
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      if (!sheet) throw new Error('The workbook does not contain a worksheet.');
+      const rows = XLSX.utils.sheet_to_json<StockCountSheetRow>(sheet, { defval: '', raw: false });
+      const hasCountedStockColumn = rows.length > 0 && Object.prototype.hasOwnProperty.call(rows[0], 'Counted Stock');
+      if (!hasCountedStockColumn) throw new Error('Use the downloaded stock count sheet. It must include a Counted Stock column.');
+
+      const items = getValues('items') || [];
+      const itemById = new Map(items.map((item) => [String(item.id), item]));
+      const updates = new Map<string, number>();
+      const invalidRows: number[] = [];
+      const unknownRows: number[] = [];
+
+      rows.forEach((row, index) => {
+        const rowNumber = index + 2;
+        const countedStock = stockCountNumber(row['Counted Stock']);
+        if (countedStock === null) return; // Blank rows have not been counted and are left untouched.
+        if (!Number.isFinite(countedStock) || countedStock < 0) {
+          invalidRows.push(rowNumber);
+          return;
+        }
+        const itemId = String(row['Item ID'] ?? '').trim();
+        if (!itemId || !itemById.has(itemId)) {
+          unknownRows.push(rowNumber);
+          return;
+        }
+        updates.set(itemId, countedStock);
+      });
+
+      if (invalidRows.length || unknownRows.length) {
+        const problems = [
+          invalidRows.length ? `negative or invalid counts on row${invalidRows.length === 1 ? '' : 's'} ${invalidRows.join(', ')}` : '',
+          unknownRows.length ? `unknown products on row${unknownRows.length === 1 ? '' : 's'} ${unknownRows.join(', ')}` : '',
+        ].filter(Boolean).join('; ');
+        throw new Error(`Could not import the sheet: ${problems}.`);
+      }
+      if (updates.size === 0) throw new Error('No counted quantities were found. Fill in the Counted Stock column before uploading.');
+
+      replace(items.map((item) => {
+        const itemId = String(item.id);
+        const hasCount = updates.has(itemId);
+        return {
+          ...item,
+          countedStock: hasCount ? updates.get(itemId)! : '',
+          countedStockProvided: hasCount,
+        };
+      }));
+      setHasImportedStockSheet(true);
+      setIsReportDialogOpen(true);
+      const changedCount = Array.from(updates.entries()).filter(([id, counted]) => Number(itemById.get(id)?.stockUnits) !== counted).length;
+      toast({
+        title: 'Stock count imported',
+        description: `${updates.size} counted stock value${updates.size === 1 ? '' : 's'} loaded; ${items.length - updates.size} product${items.length - updates.size === 1 ? '' : 's'} not counted and excluded; ${changedCount} will update stock when you submit the audit.`,
+      });
+    } catch (error) {
+      toast({ variant: 'destructive', title: 'Could not import stock count sheet', description: error instanceof Error ? error.message : 'The selected file could not be read.' });
+    }
+  };
+
+  const reportRows = useMemo(() => (watchedItems || []).map((item) => {
+    const systemStock = Number(item.stockUnits) || 0;
+    const countedStockProvided = item.countedStockProvided !== false;
+    const countedStock = countedStockProvided ? (Number(item.countedStock) || 0) : 0;
+    const discrepancy = countedStockProvided ? countedStock - systemStock : 0;
+    const cost = Number(item.cost) || 0;
+    return {
+      ...item,
+      systemStock,
+      countedStock,
+      countedStockProvided,
+      discrepancy,
+      discrepancyValue: discrepancy * cost,
+      cost,
+    };
+  }), [watchedItems]);
+
+  const exportStockTakeReportPdf = async () => {
+    if (!stockReportRef.current || reportRows.length === 0) return;
+    setIsExportingReport(true);
+    try {
+      const html2pdfModule = await import('html2pdf.js');
+      const { saveBlobFile } = await import('@/lib/file-download');
+      const html2pdf = ((html2pdfModule as any).default ?? html2pdfModule) as any;
+      const branchLabel = activeBranchId || 'branch';
+      const filename = `stock-take-report-${branchLabel}-${new Date().toISOString().slice(0, 10)}.pdf`;
+      const pdfBlob = await html2pdf()
+        .set({
+          margin: 0.35,
+          filename,
+          image: { type: 'jpeg', quality: 0.95 },
+          html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+          jsPDF: { unit: 'in', format: 'a4', orientation: 'landscape' },
+          pagebreak: { mode: ['css', 'legacy'] },
+        })
+        .from(stockReportRef.current)
+        .outputPdf('blob');
+      const downloadStarted = await saveBlobFile(pdfBlob, filename);
+      if (!downloadStarted) throw new Error('The device could not save the PDF.');
+      toast({ title: 'Stock take report exported', description: 'The full report was downloaded as a PDF.' });
+    } catch (error) {
+      console.error('[StockAudit] Could not export report PDF:', error);
+      toast({ variant: 'destructive', title: 'PDF export failed', description: 'Could not generate the stock take report PDF.' });
+    } finally {
+      setIsExportingReport(false);
+    }
+  };
 
   const onConfirmSubmit = async (data: StockTakeFormValues) => {
     if (!user || !activeBranchId) {
@@ -156,7 +385,7 @@ export default function StockAuditPage() {
     }
 
     const changedItems = data.items.filter((item) =>
-      Number(item.countedStock) !== Number(item.stockUnits)
+      item.countedStockProvided !== false && Number(item.countedStock) !== Number(item.stockUnits)
     );
     if (changedItems.length === 0) {
       toast({
@@ -172,7 +401,7 @@ export default function StockAuditPage() {
     }
 
     setIsSubmitting(true);
-    setSubmissionMessage(`Submitting ${changedItems.length} stock adjustment${changedItems.length === 1 ? '' : 's'}…`);
+    setSubmissionMessage(`Submitting ${changedItems.length} stock adjustment${changedItems.length === 1 ? '' : 's'} for approval…`);
 
     const stockTakeRecord: StockTake = {
       id: `ST-${Date.now()}`,
@@ -192,38 +421,34 @@ export default function StockAuditPage() {
     };
 
     try {
-      await authFetch.fetch('/inventory/stock-takes/', {
+      const serverAudit = await authFetch.fetch<any>('/inventory/stock-audits/', {
         method: 'POST',
-        body: JSON.stringify(stockTakeRecord),
+        body: JSON.stringify({
+          branch_id: activeBranchId,
+          items: changedItems.map((item) => ({
+            inventory_item: item.id,
+            counted_stock: Number(item.countedStock) || 0,
+          })),
+          notes: auditReason.trim(),
+        }),
       });
 
-      // Only mirror the count locally after the server has applied the atomic audit.
-      setSubmissionMessage('Updating this device with the confirmed stock count…');
-      await Promise.all(changedItems.map((item) =>
-        db.inventory.update(item.id, { stockUnits: Number(item.countedStock) || 0 })
-      ));
-
-      // Keep the local audit history for offline/audit-log screens.
+      // Keep a pending mirror so the Approvals screen can show this audit immediately.
       const stockTakeWithSync: StockTake = {
         ...stockTakeRecord,
-        status: 'Approved',
+        id: String(serverAudit?.id || stockTakeRecord.id),
+        createdAt: serverAudit?.created_at || stockTakeRecord.createdAt,
+        createdBy: serverAudit?.created_by || stockTakeRecord.createdBy,
+        status: 'Pending Approval',
         _dirty: false,
         _operation: 'update'
       };
-      await db.stockTakes.add(stockTakeWithSync);
-      setAuditHistory((current) => [{
-        id: stockTakeRecord.id,
-        status: 'Approved',
-        created_at: stockTakeRecord.createdAt,
-        created_by: stockTakeRecord.createdBy,
-        notes: stockTakeRecord.notes,
-        total_discrepancy_value: totalDiscrepancy,
-        items: changedItems,
-      }, ...current]);
+      await db.stockTakes.put(stockTakeWithSync);
+      setAuditHistory((current) => [serverAudit, ...current]);
 
       toast({
-        title: 'Stock audit applied',
-        description: 'Counted stock is now the system stock. Purchase batches were reconciled on the server.',
+        title: 'Stock audit submitted for approval',
+        description: 'A manager must approve this audit before counted stock replaces system stock.',
       });
       setAuditReason('');
       router.push('/dashboard/inventory');
@@ -242,6 +467,9 @@ export default function StockAuditPage() {
   };
 
   const renderDiscrepancy = (item: any) => {
+    if (item.countedStockProvided === false) {
+      return <Badge variant="outline">Not Counted</Badge>;
+    }
     const systemStock = Number(item.stockUnits) || 0;
     const countedStock = Number(item.countedStock) || 0;
     const discrepancy = countedStock - systemStock;
@@ -280,16 +508,24 @@ export default function StockAuditPage() {
         </div>
         <div className="flex items-center gap-2">
            <Button variant="outline" onClick={() => setIsHistoryDialogOpen(true)} disabled={isSubmitting}>
-             View audit history
+             <FileText className="mr-2" /> Previous audits
+             {auditHistory.length > 0 && <Badge variant="secondary" className="ml-2">{auditHistory.length}</Badge>}
            </Button>
-           <Button variant="outline" onClick={() => {}} disabled={isSubmitting}>
-             <Printer className="mr-2" /> Print Count Sheet
-            </Button>
+           <input ref={stockSheetInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={importStockCountSheet} />
+           <Button variant="outline" onClick={downloadStockCountSheet} disabled={isSubmitting || fields.length === 0}>
+             <Download className="mr-2" /> Download Excel Sheet
+           </Button>
+           <Button variant="outline" onClick={() => stockSheetInputRef.current?.click()} disabled={isSubmitting || fields.length === 0}>
+             <Upload className="mr-2" /> Upload Counted Sheet
+           </Button>
+           <Button variant="outline" onClick={() => setIsReportDialogOpen(true)} disabled={isSubmitting || !hasImportedStockSheet || reportRows.length === 0}>
+             <FileText className="mr-2" /> View Full Report
+           </Button>
             <Button onClick={() => setIsConfirmModalOpen(true)} disabled={isSubmitting || fields.length === 0}>
               {isSubmitting ? (
-                  <><Loader2 className="mr-2 animate-spin" />Applying audit…</>
+                  <><Loader2 className="mr-2 animate-spin" />Submitting…</>
               ) : (
-                  <><Send className="mr-2" />Submit & Update Stock</>
+                  <><Send className="mr-2" />Submit for Approval</>
               )}
             </Button>
         </div>
@@ -356,10 +592,13 @@ export default function StockAuditPage() {
                   {visibleFields.map((field) => {
                     const index = fields.findIndex((item) => item.id === field.id);
                     const systemStock = Number(field.stockUnits) || 0;
-                    const countedStock = Number(form.watch(`items.${index}.countedStock`)) || 0;
+                    const watchedItem = form.watch(`items.${index}`);
+                    const countedStockProvided = watchedItem?.countedStockProvided !== false;
+                    const countedStock = countedStockProvided ? (Number(watchedItem?.countedStock) || 0) : 0;
                     const cost = Number(field.cost) || 0;
-                    const discrepancy = countedStock - systemStock;
-                    const discrepancyValue = discrepancy * cost;
+                    const discrepancy = countedStockProvided ? countedStock - systemStock : 0;
+                    const discrepancyValue = countedStockProvided ? discrepancy * cost : 0;
+                    const countedStockRegistration = form.register(`items.${index}.countedStock`);
                     
                     return (
                         <TableRow key={field.id} className={cn(discrepancy !== 0 && 'bg-muted/50')}>
@@ -367,7 +606,11 @@ export default function StockAuditPage() {
                             <TableCell className="text-right font-mono">{systemStock} {field.unitType}</TableCell>
                             <TableCell className="text-right">
                                 <Input
-                                {...form.register(`items.${index}.countedStock`)}
+                                {...countedStockRegistration}
+                                onChange={(event) => {
+                                  countedStockRegistration.onChange(event);
+                                  form.setValue(`items.${index}.countedStockProvided`, event.target.value.trim() !== '', { shouldDirty: true });
+                                }}
                                 type="number"
                                 min="0"
                                 step="0.001"
@@ -396,9 +639,9 @@ export default function StockAuditPage() {
       <Dialog open={isConfirmModalOpen} onOpenChange={setIsConfirmModalOpen}>
         <DialogContent>
             <DialogHeader>
-                <DialogTitle>Apply Stock Audit?</DialogTitle>
+                <DialogTitle>Submit Stock Audit for Approval?</DialogTitle>
                 <DialogDescription>
-                    This will set product stock to the counted quantity and reconcile purchase-batch availability. This action is recorded and cannot be queued while offline.
+                    This sends the counted quantities to the Approvals queue. Stock will not change until an authorized manager approves the audit.
                 </DialogDescription>
                 <div className="space-y-2">
                   <label htmlFor="audit-reason" className="text-sm font-medium">Reason for audit (required)</label>
@@ -412,11 +655,11 @@ export default function StockAuditPage() {
                 <CardContent className="space-y-2 text-sm">
                      <div className="flex justify-between">
                         <span>Items with shortages:</span>
-                        <span className="font-medium">{getValues('items')?.filter(i => (Number(i.countedStock) || 0) < (i.stockUnits || 0)).length || 0}</span>
+                        <span className="font-medium">{getValues('items')?.filter(i => i.countedStockProvided !== false && (Number(i.countedStock) || 0) < (i.stockUnits || 0)).length || 0}</span>
                     </div>
                      <div className="flex justify-between">
                         <span>Items with surplus:</span>
-                        <span className="font-medium">{getValues('items')?.filter(i => (Number(i.countedStock) || 0) > (i.stockUnits || 0)).length || 0}</span>
+                        <span className="font-medium">{getValues('items')?.filter(i => i.countedStockProvided !== false && (Number(i.countedStock) || 0) > (i.stockUnits || 0)).length || 0}</span>
                     </div>
                     <div className="flex justify-between font-semibold pt-2 border-t">
                         <span>Total Discrepancy Value:</span>
@@ -434,7 +677,7 @@ export default function StockAuditPage() {
                      ) : (
                         <Send className="mr-2" />
                      )}
-                    {isSubmitting ? 'Applying audit…' : 'Submit Audit'}
+                    {isSubmitting ? 'Submitting…' : 'Submit for Approval'}
                 </Button>
             </DialogFooter>
             {isSubmitting && (
@@ -447,13 +690,160 @@ export default function StockAuditPage() {
       </Dialog>
 
       <Dialog open={isHistoryDialogOpen} onOpenChange={setIsHistoryDialogOpen}>
-        <DialogContent className="max-w-5xl">
-          <DialogHeader><DialogTitle>Audit submission history</DialogTitle><DialogDescription>Previous submissions for this branch, including quantities before and after each change.</DialogDescription></DialogHeader>
-          {auditHistory.length === 0 ? <p className="py-8 text-center text-sm text-muted-foreground">No audit submissions yet.</p> : (
-            <div className="max-h-[65vh] overflow-auto"><Table><TableHeader><TableRow><TableHead>Date</TableHead><TableHead>Status</TableHead><TableHead>Reason</TableHead><TableHead>Quantity before → after</TableHead><TableHead>Submitted by</TableHead></TableRow></TableHeader><TableBody>
-              {auditHistory.map((audit) => <TableRow key={audit.id}><TableCell className="whitespace-nowrap">{audit.created_at ? new Date(audit.created_at).toLocaleString() : '-'}</TableCell><TableCell><Badge>{audit.status || 'Submitted'}</Badge></TableCell><TableCell className="min-w-[220px]">{audit.notes || 'No reason recorded'}</TableCell><TableCell className="min-w-[260px]"><div className="space-y-1">{(audit.items || []).map((item: any, index: number) => <div key={item.id || index} className="text-xs"><span className="font-medium">{item.inventory_item_name || item.itemName || 'Product'}</span>: {item.system_stock ?? item.systemStock} → {item.counted_stock ?? item.countedStock}</div>)}</div></TableCell><TableCell>{audit.created_by || audit.createdBy || '-'}</TableCell></TableRow>)}
-            </TableBody></Table></div>
+        <DialogContent className="max-w-6xl">
+          <DialogHeader>
+            <DialogTitle className="text-xl">Stock audit history</DialogTitle>
+            <DialogDescription>Review every stock take submitted for this branch. Select an audit to see the item-level changes.</DialogDescription>
+          </DialogHeader>
+          {isLoadingAuditHistory ? (
+            <p className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Loading audit history…</p>
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <Card><CardContent className="p-4"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Total audits</p><p className="mt-1 text-2xl font-bold">{auditHistorySummary.total}</p></CardContent></Card>
+                <Card><CardContent className="p-4"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Approved</p><p className="mt-1 text-2xl font-bold text-green-600">{auditHistorySummary.approved}</p></CardContent></Card>
+                <Card><CardContent className="p-4"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Pending</p><p className="mt-1 text-2xl font-bold text-amber-600">{auditHistorySummary.pending}</p></CardContent></Card>
+                <Card><CardContent className="p-4"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Rejected</p><p className="mt-1 text-2xl font-bold text-destructive">{auditHistorySummary.rejected}</p></CardContent></Card>
+              </div>
+
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={auditHistorySearch}
+                  onChange={(event) => setAuditHistorySearch(event.target.value)}
+                  placeholder="Search by reason, submitter, status, or product..."
+                  className="pl-9"
+                />
+              </div>
+
+              {auditHistory.length === 0 ? (
+                <p className="rounded-lg border border-dashed py-12 text-center text-sm text-muted-foreground">No previous audits for this branch.</p>
+              ) : filteredAuditHistory.length === 0 ? (
+                <p className="rounded-lg border border-dashed py-12 text-center text-sm text-muted-foreground">No audits match your search.</p>
+              ) : (
+                <div className="max-h-[58vh] space-y-3 overflow-y-auto pr-1">
+                  {filteredAuditHistory.map((audit) => {
+                    const auditId = String(audit.id);
+                    const isExpanded = expandedAuditId === auditId;
+                    const status = historyStatusLabel(audit);
+                    const items = historyItems(audit);
+                    const totalVariance = Number(audit.total_discrepancy_value ?? audit.totalDiscrepancyValue);
+                    const statusVariant = status === 'Rejected' ? 'destructive' : status === 'Approved' ? 'default' : 'secondary';
+
+                    return (
+                      <Card key={auditId} className={cn('overflow-hidden transition-shadow', isExpanded && 'shadow-md')}>
+                        <button
+                          type="button"
+                          className="flex w-full items-center justify-between gap-4 p-4 text-left hover:bg-muted/40"
+                          onClick={() => setExpandedAuditId(isExpanded ? null : auditId)}
+                          aria-expanded={isExpanded}
+                        >
+                          <div className="min-w-0 space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-semibold">{audit.created_at || audit.createdAt ? new Date(audit.created_at || audit.createdAt).toLocaleString() : 'Date unavailable'}</span>
+                              <Badge variant={statusVariant}>{status}</Badge>
+                            </div>
+                            <p className="truncate text-sm text-muted-foreground">{audit.notes || 'No reason recorded'}</p>
+                            <p className="text-xs text-muted-foreground">Submitted by {audit.created_by || audit.createdBy || 'Unknown'} · {items.length} item{items.length === 1 ? '' : 's'}</p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-3">
+                            <div className="hidden text-right sm:block"><p className="text-xs text-muted-foreground">Total variance</p><p className={cn('font-semibold', totalVariance > 0 ? 'text-green-600' : totalVariance < 0 ? 'text-destructive' : '')}>{Number.isFinite(totalVariance) ? formatCurrency(totalVariance) : '-'}</p></div>
+                            {isExpanded ? <ChevronUp className="h-5 w-5 text-muted-foreground" /> : <ChevronDown className="h-5 w-5 text-muted-foreground" />}
+                          </div>
+                        </button>
+                        {isExpanded && (
+                          <CardContent className="border-t bg-muted/20 p-4">
+                            <div className="mb-3 flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
+                              <span><strong className="text-foreground">Audit ID:</strong> {auditId}</span>
+                              {audit.approved_by && <span><strong className="text-foreground">Approved by:</strong> {audit.approved_by}</span>}
+                              {audit.approved_at && <span><strong className="text-foreground">Approved:</strong> {new Date(audit.approved_at).toLocaleString()}</span>}
+                            </div>
+                            <div className="overflow-x-auto rounded-md border bg-background">
+                              <Table>
+                                <TableHeader><TableRow><TableHead>Product</TableHead><TableHead className="text-right">System stock</TableHead><TableHead className="text-right">Counted stock</TableHead><TableHead className="text-right">Variance</TableHead></TableRow></TableHeader>
+                                <TableBody>
+                                  {items.length === 0 ? <TableRow><TableCell colSpan={4} className="py-6 text-center text-sm text-muted-foreground">No item details recorded.</TableCell></TableRow> : items.map((item: any, index: number) => {
+                                    const systemStock = Number(item.system_stock ?? item.systemStock);
+                                    const countedStock = Number(item.counted_stock ?? item.countedStock);
+                                    const discrepancy = Number(item.discrepancy ?? (countedStock - systemStock));
+                                    return <TableRow key={item.id || index}><TableCell className="font-medium">{item.inventory_item_name || item.itemName || 'Product'}</TableCell><TableCell className="text-right">{historyQuantity(systemStock)}</TableCell><TableCell className="text-right">{historyQuantity(countedStock)}</TableCell><TableCell className={cn('text-right font-semibold', discrepancy > 0 ? 'text-green-600' : discrepancy < 0 ? 'text-destructive' : '')}>{discrepancy > 0 ? '+' : ''}{historyQuantity(discrepancy)}</TableCell></TableRow>;
+                                  })}
+                                </TableBody>
+                              </Table>
+                            </div>
+                          </CardContent>
+                        )}
+                      </Card>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isReportDialogOpen} onOpenChange={setIsReportDialogOpen}>
+        <DialogContent className="max-w-7xl">
+          <DialogHeader>
+            <DialogTitle>Full stock take report</DialogTitle>
+            <DialogDescription>
+              Review the uploaded physical count against system stock. Nothing is updated until you submit the audit.
+            </DialogDescription>
+          </DialogHeader>
+          <div ref={stockReportRef} className="space-y-4 bg-white p-2 text-black">
+            <div className="flex items-start justify-between gap-4 border-b pb-3">
+              <div>
+                <h2 className="text-xl font-bold">Stock Take Report</h2>
+                <p className="text-sm text-gray-600">Branch: {activeBranchId || '-'} · Prepared: {new Date().toLocaleString()}</p>
+              </div>
+              <div className="grid grid-cols-3 gap-5 text-right text-sm">
+                <div><div className="text-gray-600">System value</div><div className="font-semibold">{formatCurrency(totalValue)}</div></div>
+                <div><div className="text-gray-600">Counted value</div><div className="font-semibold">{formatCurrency(countedValue)}</div></div>
+                <div><div className="text-gray-600">Variance</div><div className="font-semibold">{formatCurrency(totalDiscrepancy)}</div></div>
+              </div>
+            </div>
+            <div className="overflow-visible">
+              <Table className="text-xs">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="text-black">Product</TableHead>
+                    <TableHead className="text-black">SKU / Barcode</TableHead>
+                    <TableHead className="text-right text-black">System</TableHead>
+                    <TableHead className="text-right text-black">Counted</TableHead>
+                    <TableHead className="text-right text-black">Variance</TableHead>
+                    <TableHead className="text-right text-black">Unit cost</TableHead>
+                    <TableHead className="text-right text-black">Variance value</TableHead>
+                    <TableHead className="text-black">Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {reportRows.map((item) => (
+                    <TableRow key={item.id}>
+                      <TableCell className="font-medium text-black">{item.name}</TableCell>
+                      <TableCell className="text-gray-700">{item.sku || item.productCode || '-'}{item.barcode ? ` / ${item.barcode}` : ''}</TableCell>
+                      <TableCell className="text-right text-black">{item.systemStock} {item.unitType || ''}</TableCell>
+                      <TableCell className="text-right text-black">{item.countedStockProvided ? `${item.countedStock} ${item.unitType || ''}` : 'Not counted'}</TableCell>
+                      <TableCell className={cn('text-right font-semibold', item.countedStockProvided && (item.discrepancy > 0 ? 'text-green-700' : item.discrepancy < 0 ? 'text-red-700' : 'text-black'))}>{item.countedStockProvided ? `${item.discrepancy > 0 ? '+' : ''}${item.discrepancy}` : '—'}</TableCell>
+                      <TableCell className="text-right text-black">{formatCurrency(item.cost)}</TableCell>
+                      <TableCell className={cn('text-right font-semibold', item.countedStockProvided && (item.discrepancyValue > 0 ? 'text-green-700' : item.discrepancyValue < 0 ? 'text-red-700' : 'text-black'))}>{item.countedStockProvided ? `${item.discrepancyValue > 0 ? '+' : ''}${formatCurrency(item.discrepancyValue)}` : '—'}</TableCell>
+                      <TableCell className="text-black">{!item.countedStockProvided ? 'Not counted' : item.discrepancy === 0 ? 'No change' : item.discrepancy > 0 ? 'Surplus' : 'Shortage'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setIsReportDialogOpen(false)}>Close</Button>
+            <Button onClick={exportStockTakeReportPdf} disabled={isExportingReport || reportRows.length === 0}>
+              {isExportingReport ? <Loader2 className="mr-2 animate-spin" /> : <Download className="mr-2" />}
+              {isExportingReport ? 'Exporting…' : 'Export PDF'}
+            </Button>
+            <Button onClick={() => { setIsReportDialogOpen(false); setIsConfirmModalOpen(true); }} disabled={isExportingReport || isSubmitting}>
+              <Send className="mr-2" /> Continue to Submit
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

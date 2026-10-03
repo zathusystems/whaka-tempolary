@@ -103,6 +103,37 @@ const historyQuantity = (value: unknown): string => {
   return Number.isFinite(parsed) ? parsed.toLocaleString(undefined, { maximumFractionDigits: 3 }) : '-';
 };
 
+const readableErrorValue = (value: unknown, path = ''): string => {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return `${path ? `${path}: ` : ''}${String(value)}`;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry, index) => readableErrorValue(entry, path || String(index)))
+      .filter(Boolean)
+      .join('; ');
+  }
+  if (typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, entry]) => readableErrorValue(entry, path ? `${path}.${key}` : key))
+      .filter(Boolean)
+      .join('; ');
+  }
+  return '';
+};
+
+const submissionErrorMessage = (error: unknown): string => {
+  const details = error as { message?: unknown; status?: unknown; data?: unknown };
+  const message = typeof details?.message === 'string' && details.message.trim()
+    ? details.message.trim()
+    : 'The request could not be completed.';
+  const structuredData = readableErrorValue(details?.data);
+  const readableMessage = message === '[object Object]' && structuredData ? structuredData : message;
+  const status = Number(details?.status);
+  return Number.isFinite(status) && status > 0 ? `HTTP ${status}: ${readableMessage}` : readableMessage;
+};
+
 export default function StockAuditPage() {
   const router = useRouter();
   const { toast } = useToast();
@@ -347,6 +378,19 @@ export default function StockAuditPage() {
     };
   }), [watchedItems]);
 
+  const reportSummary = useMemo(() => reportRows.reduce((summary, item) => {
+    if (!item.countedStockProvided) {
+      summary.notCounted += 1;
+    } else if (item.discrepancy < 0) {
+      summary.shortages += 1;
+    } else if (item.discrepancy > 0) {
+      summary.surplus += 1;
+    } else {
+      summary.noChange += 1;
+    }
+    return summary;
+  }, { notCounted: 0, shortages: 0, surplus: 0, noChange: 0 }), [reportRows]);
+
   const exportStockTakeReportPdf = async () => {
     if (!stockReportRef.current || reportRows.length === 0) return;
     setIsExportingReport(true);
@@ -420,8 +464,11 @@ export default function StockAuditPage() {
       notes: auditReason.trim(),
     };
 
+    let serverAudit: any;
+    let serverAccepted = false;
+
     try {
-      const serverAudit = await authFetch.fetch<any>('/inventory/stock-audits/', {
+      serverAudit = await authFetch.fetch<any>('/inventory/stock-audits/', {
         method: 'POST',
         body: JSON.stringify({
           branch_id: activeBranchId,
@@ -432,6 +479,7 @@ export default function StockAuditPage() {
           notes: auditReason.trim(),
         }),
       });
+      serverAccepted = true;
 
       // Keep a pending mirror so the Approvals screen can show this audit immediately.
       const stockTakeWithSync: StockTake = {
@@ -453,11 +501,27 @@ export default function StockAuditPage() {
       setAuditReason('');
       router.push('/dashboard/inventory');
     } catch (error) {
-      console.error('Failed to save stock take:', error);
+      console.error('[StockAudit] Failed to submit audit:', {
+        error,
+        status: (error as any)?.status,
+        data: (error as any)?.data,
+        serverAccepted,
+      });
+
+      if (serverAccepted) {
+        toast({
+          title: 'Audit submitted for approval',
+          description: `The backend accepted the audit, but this device could not save its local copy (${submissionErrorMessage(error)}). Open Approvals to review it.`,
+        });
+        setAuditReason('');
+        router.push('/dashboard/inventory');
+        return;
+      }
+
       toast({
         variant: 'destructive',
         title: 'Error Submitting Audit',
-        description: 'There was a problem saving the stock audit.',
+        description: submissionErrorMessage(error),
       });
     } finally {
       setIsSubmitting(false);
@@ -784,65 +848,119 @@ export default function StockAuditPage() {
       </Dialog>
 
       <Dialog open={isReportDialogOpen} onOpenChange={setIsReportDialogOpen}>
-        <DialogContent className="max-w-7xl">
-          <DialogHeader>
-            <DialogTitle>Full stock take report</DialogTitle>
-            <DialogDescription>
-              Review the uploaded physical count against system stock. Nothing is updated until you submit the audit.
-            </DialogDescription>
-          </DialogHeader>
-          <div ref={stockReportRef} className="space-y-4 bg-white p-2 text-black">
-            <div className="flex items-start justify-between gap-4 border-b pb-3">
-              <div>
-                <h2 className="text-xl font-bold">Stock Take Report</h2>
-                <p className="text-sm text-gray-600">Branch: {activeBranchId || '-'} · Prepared: {new Date().toLocaleString()}</p>
+        <DialogContent className="max-w-[96vw] gap-0 overflow-hidden p-0 sm:max-w-7xl">
+          <DialogHeader className="relative overflow-hidden border-b bg-gradient-to-br from-primary/10 via-background to-background px-6 py-6 text-left">
+            <div className="absolute inset-x-0 top-0 h-1 bg-primary" />
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                    <FileText className="h-4 w-4" /> Stock audit review
+                  </span>
+                  <Badge variant="secondary">Pending submission</Badge>
+                </div>
+                <DialogTitle className="text-2xl">Full stock take report</DialogTitle>
+                <DialogDescription className="max-w-2xl text-sm leading-6">
+                  Review every uploaded count against the latest system stock. Your inventory remains unchanged until an authorized manager approves the audit.
+                </DialogDescription>
               </div>
-              <div className="grid grid-cols-3 gap-5 text-right text-sm">
-                <div><div className="text-gray-600">System value</div><div className="font-semibold">{formatCurrency(totalValue)}</div></div>
-                <div><div className="text-gray-600">Counted value</div><div className="font-semibold">{formatCurrency(countedValue)}</div></div>
-                <div><div className="text-gray-600">Variance</div><div className="font-semibold">{formatCurrency(totalDiscrepancy)}</div></div>
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 sm:max-w-xs">
+                <p className="font-semibold">Review before submitting</p>
+                <p className="mt-0.5 leading-5">Not counted products are excluded. A zero is treated as a real counted quantity.</p>
               </div>
             </div>
-            <div className="overflow-visible">
-              <Table className="text-xs">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="text-black">Product</TableHead>
-                    <TableHead className="text-black">SKU / Barcode</TableHead>
-                    <TableHead className="text-right text-black">System</TableHead>
-                    <TableHead className="text-right text-black">Counted</TableHead>
-                    <TableHead className="text-right text-black">Variance</TableHead>
-                    <TableHead className="text-right text-black">Unit cost</TableHead>
-                    <TableHead className="text-right text-black">Variance value</TableHead>
-                    <TableHead className="text-black">Status</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {reportRows.map((item) => (
-                    <TableRow key={item.id}>
-                      <TableCell className="font-medium text-black">{item.name}</TableCell>
-                      <TableCell className="text-gray-700">{item.sku || item.productCode || '-'}{item.barcode ? ` / ${item.barcode}` : ''}</TableCell>
-                      <TableCell className="text-right text-black">{item.systemStock} {item.unitType || ''}</TableCell>
-                      <TableCell className="text-right text-black">{item.countedStockProvided ? `${item.countedStock} ${item.unitType || ''}` : 'Not counted'}</TableCell>
-                      <TableCell className={cn('text-right font-semibold', item.countedStockProvided && (item.discrepancy > 0 ? 'text-green-700' : item.discrepancy < 0 ? 'text-red-700' : 'text-black'))}>{item.countedStockProvided ? `${item.discrepancy > 0 ? '+' : ''}${item.discrepancy}` : '—'}</TableCell>
-                      <TableCell className="text-right text-black">{formatCurrency(item.cost)}</TableCell>
-                      <TableCell className={cn('text-right font-semibold', item.countedStockProvided && (item.discrepancyValue > 0 ? 'text-green-700' : item.discrepancyValue < 0 ? 'text-red-700' : 'text-black'))}>{item.countedStockProvided ? `${item.discrepancyValue > 0 ? '+' : ''}${formatCurrency(item.discrepancyValue)}` : '—'}</TableCell>
-                      <TableCell className="text-black">{!item.countedStockProvided ? 'Not counted' : item.discrepancy === 0 ? 'No change' : item.discrepancy > 0 ? 'Surplus' : 'Shortage'}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+          </DialogHeader>
+
+          <div className="overflow-x-auto border-b bg-card px-6 py-3">
+            <div className="mx-auto flex min-w-[520px] max-w-3xl items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 font-semibold text-primary">
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-primary text-sm text-primary-foreground shadow-sm">1</span>
+                <span>Review report</span>
+              </div>
+              <div className="h-px flex-1 bg-primary/25" />
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <span className="flex h-7 w-7 items-center justify-center rounded-full border border-border bg-background font-semibold">2</span>
+                <span>Submit for approval</span>
+              </div>
+              <div className="h-px flex-1 bg-border" />
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <span className="flex h-7 w-7 items-center justify-center rounded-full border border-border bg-background font-semibold">3</span>
+                <span>Stock updated</span>
+              </div>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setIsReportDialogOpen(false)}>Close</Button>
-            <Button onClick={exportStockTakeReportPdf} disabled={isExportingReport || reportRows.length === 0}>
-              {isExportingReport ? <Loader2 className="mr-2 animate-spin" /> : <Download className="mr-2" />}
-              {isExportingReport ? 'Exporting…' : 'Export PDF'}
-            </Button>
-            <Button onClick={() => { setIsReportDialogOpen(false); setIsConfirmModalOpen(true); }} disabled={isExportingReport || isSubmitting}>
-              <Send className="mr-2" /> Continue to Submit
-            </Button>
+
+          <div className="max-h-[72vh] overflow-y-auto bg-background px-6 py-5">
+            <div ref={stockReportRef} className="space-y-5 bg-white text-black">
+              <div className="flex flex-col gap-4 border-b pb-4 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">Stock take report</p>
+                  <h2 className="mt-1 text-xl font-bold">Physical count reconciliation</h2>
+                  <p className="mt-1 text-sm text-gray-600">Branch: {activeBranchId || '-'} · Prepared: {new Date().toLocaleString()}</p>
+                </div>
+                <div className="grid grid-cols-3 gap-4 rounded-lg border bg-gray-50 px-4 py-3 text-right text-sm">
+                  <div><div className="text-xs text-gray-500">System value</div><div className="mt-1 font-semibold">{formatCurrency(totalValue)}</div></div>
+                  <div><div className="text-xs text-gray-500">Counted value</div><div className="mt-1 font-semibold">{formatCurrency(countedValue)}</div></div>
+                  <div><div className="text-xs text-gray-500">Variance</div><div className={cn('mt-1 font-semibold', totalDiscrepancy > 0 ? 'text-green-700' : totalDiscrepancy < 0 ? 'text-red-700' : 'text-gray-900')}>{totalDiscrepancy > 0 ? '+' : ''}{formatCurrency(totalDiscrepancy)}</div></div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-blue-200 bg-blue-50 p-3"><p className="text-xs font-medium uppercase tracking-wide text-blue-700">Reviewed</p><p className="mt-1 text-2xl font-bold text-blue-950">{reportRows.length - reportSummary.notCounted}</p><p className="text-xs text-blue-700">products counted</p></div>
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3"><p className="text-xs font-medium uppercase tracking-wide text-red-700">Shortages</p><p className="mt-1 text-2xl font-bold text-red-950">{reportSummary.shortages}</p><p className="text-xs text-red-700">below system stock</p></div>
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3"><p className="text-xs font-medium uppercase tracking-wide text-green-700">Surplus</p><p className="mt-1 text-2xl font-bold text-green-950">{reportSummary.surplus}</p><p className="text-xs text-green-700">above system stock</p></div>
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-medium uppercase tracking-wide text-amber-700">Not counted</p><p className="mt-1 text-2xl font-bold text-amber-950">{reportSummary.notCounted}</p><p className="text-xs text-amber-700">excluded from audit</p></div>
+              </div>
+
+              <div className="overflow-x-auto rounded-xl border">
+                <Table className="min-w-[980px] text-xs">
+                  <TableHeader className="bg-gray-50">
+                    <TableRow>
+                      <TableHead className="text-gray-700">Product</TableHead>
+                      <TableHead className="text-gray-700">SKU / Barcode</TableHead>
+                      <TableHead className="text-right text-gray-700">System</TableHead>
+                      <TableHead className="text-right text-gray-700">Counted</TableHead>
+                      <TableHead className="text-right text-gray-700">Variance</TableHead>
+                      <TableHead className="text-right text-gray-700">Unit cost</TableHead>
+                      <TableHead className="text-right text-gray-700">Variance value</TableHead>
+                      <TableHead className="text-gray-700">Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {reportRows.map((item) => {
+                      const status = !item.countedStockProvided ? 'Not counted' : item.discrepancy === 0 ? 'No change' : item.discrepancy > 0 ? 'Surplus' : 'Shortage';
+                      const statusVariant = status === 'Shortage' ? 'destructive' : status === 'Surplus' ? 'default' : status === 'Not counted' ? 'outline' : 'secondary';
+                      return (
+                        <TableRow key={item.id} className="odd:bg-gray-50/60">
+                          <TableCell className="font-medium text-black">{item.name}</TableCell>
+                          <TableCell className="text-gray-700">{item.sku || item.productCode || '-'}{item.barcode ? ` / ${item.barcode}` : ''}</TableCell>
+                          <TableCell className="text-right text-black">{item.systemStock} {item.unitType || ''}</TableCell>
+                          <TableCell className="text-right text-black">{item.countedStockProvided ? `${item.countedStock} ${item.unitType || ''}` : 'Not counted'}</TableCell>
+                          <TableCell className={cn('text-right font-semibold', item.countedStockProvided && (item.discrepancy > 0 ? 'text-green-700' : item.discrepancy < 0 ? 'text-red-700' : 'text-black'))}>{item.countedStockProvided ? `${item.discrepancy > 0 ? '+' : ''}${item.discrepancy}` : '—'}</TableCell>
+                          <TableCell className="text-right text-black">{formatCurrency(item.cost)}</TableCell>
+                          <TableCell className={cn('text-right font-semibold', item.countedStockProvided && (item.discrepancyValue > 0 ? 'text-green-700' : item.discrepancyValue < 0 ? 'text-red-700' : 'text-black'))}>{item.countedStockProvided ? `${item.discrepancyValue > 0 ? '+' : ''}${formatCurrency(item.discrepancyValue)}` : '—'}</TableCell>
+                          <TableCell><Badge variant={statusVariant}>{status}</Badge></TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter className="border-t bg-muted/20 px-6 py-4 sm:justify-between">
+            <p className="hidden text-xs text-muted-foreground sm:block">No stock changes have been applied yet.</p>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setIsReportDialogOpen(false)}>Close</Button>
+              <Button variant="outline" onClick={exportStockTakeReportPdf} disabled={isExportingReport || reportRows.length === 0}>
+                {isExportingReport ? <Loader2 className="mr-2 animate-spin" /> : <Download className="mr-2" />}
+                {isExportingReport ? 'Exporting…' : 'Export PDF'}
+              </Button>
+              <Button onClick={() => { setIsReportDialogOpen(false); setIsConfirmModalOpen(true); }} disabled={isExportingReport || isSubmitting}>
+                <Send className="mr-2" /> Submit for Approval
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>

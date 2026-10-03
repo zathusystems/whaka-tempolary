@@ -1790,8 +1790,13 @@ class StockAuditViewSet(viewsets.ModelViewSet):
         business_id = self.request.query_params.get('business_id')
         branch_id = self.request.query_params.get('branch_id')
         
+        # Approvals are available to staff assigned to the business as well as
+        # the owner.  Restricting this to ``business__owner`` made a pending
+        # audit visible in the desktop cache but returned 404 when an assigned
+        # manager tried to approve it.
+        accessible_business_ids = _get_accessible_business_ids(user)
         queryset = StockAudit.objects.filter(
-            branch__business__owner=user
+            branch__business_id__in=accessible_business_ids
         ).select_related('branch')
         
         if business_id:

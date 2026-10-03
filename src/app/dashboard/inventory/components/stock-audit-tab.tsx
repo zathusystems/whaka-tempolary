@@ -67,6 +67,28 @@ interface AuditCount {
   countedStock: string;
 }
 
+const stockAuditErrorMessage = (error: unknown): string => {
+  const details = error as { message?: unknown; status?: unknown; data?: unknown };
+  const message = typeof details?.message === 'string' && details.message.trim()
+    ? details.message.trim()
+    : 'The stock audit request could not be completed.';
+  const data = details?.data;
+  const structured = data && typeof data === 'object'
+    ? Object.entries(data as Record<string, unknown>)
+        .map(([key, value]) => {
+          const values = Array.isArray(value) ? value : [value];
+          return values
+            .map((entry) => `${key}: ${typeof entry === 'object' ? JSON.stringify(entry) : String(entry)}`)
+            .join('; ');
+        })
+        .filter(Boolean)
+        .join('; ')
+    : '';
+  const readableMessage = message === '[object Object]' && structured ? structured : message;
+  const status = Number(details?.status);
+  return Number.isFinite(status) && status > 0 ? `HTTP ${status}: ${readableMessage}` : readableMessage;
+};
+
 export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabProps) {
   const [audits, setAudits] = useState<StockAuditRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -222,7 +244,7 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: 'Failed to create stock audit',
+        description: stockAuditErrorMessage(error),
       });
     } finally {
       setIsSubmitting(false);
@@ -259,11 +281,15 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
         description: 'Stock audit approved',
       });
     } catch (error) {
-      console.error('Failed to approve audit:', error);
+      console.error('Failed to approve audit:', {
+        error,
+        status: (error as any)?.status,
+        data: (error as any)?.data,
+      });
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: 'Failed to approve stock audit',
+        description: stockAuditErrorMessage(error),
       });
     } finally {
       setIsSubmitting(false);

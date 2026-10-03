@@ -355,7 +355,7 @@ const navItems = [
     { href: '/dashboard/eis-sales', icon: FileText, label: 'Sales', permission: 'view_sessions' as Permission },
     { href: '/dashboard/sales', icon: BarChart2, label: 'Reports', permission: 'view_reports' as Permission },
     { href: '/dashboard/expenses', icon: CreditCard, label: 'Expenses', permission: 'view_expenses' as Permission },
-    { href: '/dashboard/approvals', icon: ShieldCheck, label: 'Approvals', permission: 'view_approvals' as Permission },
+    { href: '/dashboard/approvals', icon: ShieldCheck, label: 'Approvals', permission: 'view_approvals' as Permission, adminOnly: true },
     { href: '/dashboard/inventory', icon: Boxes, label: 'Inventory', permission: 'view_inventory' as Permission },
     { href: '/dashboard/suppliers', icon: Truck, label: 'Suppliers', permission: 'view_suppliers' as Permission },
     { href: '/dashboard/staff', icon: Users, label: 'Staff', permission: 'manage_staff' as Permission },
@@ -1583,7 +1583,9 @@ function AppSidebar({ user, onPosClick }: { user: User, onPosClick?: () => void 
   const { hasPermission } = useRBAC();
   const { setOpenMobile } = useSidebar();
 
-  const filteredItems = navItems.filter(item => hasPermission(item.permission));
+  const filteredItems = navItems.filter(item =>
+    (!('adminOnly' in item) || !item.adminOnly || user.role === 'Admin') && hasPermission(item.permission)
+  );
   const filteredSettingsItems = user.role === 'Admin'
     ? settingsNav.filter(item => hasPermission(item.permission))
     : [];
@@ -2081,8 +2083,14 @@ export default function DashboardLayout({
 
   useEffect(() => {
     if (user) {
+        const isApprovalsPath = pathname === '/dashboard/approvals' || pathname.startsWith('/dashboard/approvals/');
+        if (isApprovalsPath && user.role !== 'Admin') {
+            router.replace('/dashboard');
+            return;
+        }
+
         const accessibleRoutes = [...navItems, ...settingsNav]
-            .filter(item => checkPermission(user.role, item.permission))
+            .filter(item => (!('adminOnly' in item) || !item.adminOnly || user.role === 'Admin') && checkPermission(user.role, item.permission))
             .map(item => item.href);
 
         if (isEisActivationPath) {

@@ -227,7 +227,10 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
         <AccordionTrigger>
           <div className="flex w-full items-center justify-between pr-4">
             <div className="grid text-left">
-              <span className="font-semibold">Stock Audit - {format(new Date(audit.createdAt), 'PP')}</span>
+              <span className="flex items-center gap-2 font-semibold">
+                Stock Audit - {format(new Date(audit.createdAt), 'PP')}
+                <Badge variant="secondary">{audit.status}</Badge>
+              </span>
               <span className="text-sm text-muted-foreground">
                 Submitted by {audit.createdBy}
               </span>
@@ -547,7 +550,7 @@ function ApprovalsPageContent() {
                     Pending Stock Audits
                 </CardTitle>
                 <CardDescription>
-                    These stock audits are waiting for your approval before inventory levels are updated.
+                    These stock audits are marked <span className="font-medium">Pending Approval</span> and are waiting for your approval before inventory levels are updated. Approved and rejected audits remain available in Stock Audit History.
                 </CardDescription>
                 </CardHeader>
                 <CardContent>

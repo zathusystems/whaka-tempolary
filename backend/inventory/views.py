@@ -1925,6 +1925,12 @@ class StockAuditViewSet(viewsets.ModelViewSet):
         """Apply a counted stock audit atomically to inventory and purchase batches."""
         with transaction.atomic():
             audit = self.get_queryset().select_for_update().get(pk=pk)
+            # Approval requests can be retried by the desktop sync queue or
+            # arrive twice when two admins click at nearly the same time. The
+            # first request already applied the adjustment, so returning the
+            # approved audit is safe and prevents a misleading 400 response.
+            if audit.status == 'Approved':
+                return Response(StockAuditSerializer(audit).data, status=status.HTTP_200_OK)
             if audit.status != 'Pending':
                 raise ValidationError('Only a pending audit can be submitted.')
 

@@ -133,7 +133,8 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
         const approvedAudit = mapServerAuditToStockTake(serverAudit);
 
         await db.transaction('rw', db.inventory, db.stockTakes, async () => {
-            for (const item of audit.items) {
+            const approvedItems = approvedAudit.items.length > 0 ? approvedAudit.items : audit.items;
+            for (const item of approvedItems) {
                 const countedStock = Number(item.countedStock);
                 const inventoryItem = await db.inventory.get(item.itemId);
                 if (inventoryItem) {
@@ -143,6 +144,10 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
                         status: countedStock > (inventoryItem.reorderLevel || 0)
                           ? 'In Stock'
                           : countedStock > 0 ? 'Low Stock' : 'Out of Stock',
+                        // This is now the server's canonical stock value. Do
+                        // not let the regular sync skip it as a dirty local
+                        // change and restore the old quantity.
+                        _dirty: false,
                     });
                 }
             }

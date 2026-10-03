@@ -103,13 +103,6 @@ const historyQuantity = (value: unknown): string => {
   return Number.isFinite(parsed) ? parsed.toLocaleString(undefined, { maximumFractionDigits: 3 }) : '-';
 };
 
-const escapePdfHtml = (value: unknown): string => String(value ?? '')
-  .replace(/&/g, '&amp;')
-  .replace(/</g, '&lt;')
-  .replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;')
-  .replace(/'/g, '&#039;');
-
 const readableErrorValue = (value: unknown, path = ''): string => {
   if (value === null || value === undefined) return '';
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
@@ -439,88 +432,127 @@ export default function StockAuditPage() {
     }
 
     setExportingHistoryAuditId(auditId);
-    const reportElement = document.createElement('div');
-    reportElement.style.position = 'fixed';
-    // html2canvas cannot reliably paint elements positioned far outside the
-    // viewport. Keep the report in the viewport while it is being rendered,
-    // behind the app, then remove it immediately after PDF generation.
-    reportElement.style.left = '0';
-    reportElement.style.top = '0';
-    reportElement.style.width = '1100px';
-    reportElement.style.maxWidth = 'none';
-    reportElement.style.zIndex = '2147483647';
-    reportElement.style.pointerEvents = 'none';
-    reportElement.style.background = '#ffffff';
-    reportElement.style.color = '#111827';
-    reportElement.style.padding = '32px';
-
-    const status = historyStatusLabel(audit);
-    const createdAt = audit.created_at || audit.createdAt;
-    const submittedBy = audit.created_by || audit.createdBy || 'Unknown';
-    const approvedBy = audit.approved_by || audit.approvedBy || '-';
-    const approvedAt = audit.approved_at || audit.approvedAt;
-    const totalVariance = Number(audit.total_discrepancy_value ?? audit.totalDiscrepancyValue);
-    const rows = items.map((item: any) => {
-      const systemStock = Number(item.system_stock ?? item.systemStock);
-      const countedStock = Number(item.counted_stock ?? item.countedStock);
-      const discrepancy = Number(item.discrepancy ?? (countedStock - systemStock));
-      return `<tr>
-        <td>${escapePdfHtml(item.inventory_item_name || item.itemName || 'Product')}</td>
-        <td style="text-align:right">${escapePdfHtml(historyQuantity(systemStock))}</td>
-        <td style="text-align:right">${escapePdfHtml(historyQuantity(countedStock))}</td>
-        <td style="text-align:right;font-weight:600;color:${discrepancy < 0 ? '#b91c1c' : discrepancy > 0 ? '#15803d' : '#111827'}">${discrepancy > 0 ? '+' : ''}${escapePdfHtml(historyQuantity(discrepancy))}</td>
-      </tr>`;
-    }).join('');
-
-    reportElement.innerHTML = `
-      <div style="font-family:Arial,sans-serif">
-        <div style="border-bottom:3px solid #2563eb;padding-bottom:16px;margin-bottom:20px">
-          <div style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#6b7280">HandyPOS · Inventory</div>
-          <h1 style="font-size:28px;margin:8px 0 4px">Stock Audit Report</h1>
-          <div style="font-size:14px;color:#4b5563">Audit ${escapePdfHtml(auditId)}</div>
-        </div>
-        <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:13px">
-          <tr><td style="padding:6px 0;color:#6b7280;width:18%">Status</td><td style="padding:6px 0;font-weight:600">${escapePdfHtml(status)}</td><td style="padding:6px 0;color:#6b7280;width:18%">Submitted</td><td style="padding:6px 0">${escapePdfHtml(createdAt ? new Date(createdAt).toLocaleString() : '-')}</td></tr>
-          <tr><td style="padding:6px 0;color:#6b7280">Submitted by</td><td style="padding:6px 0">${escapePdfHtml(submittedBy)}</td><td style="padding:6px 0;color:#6b7280">Approved by</td><td style="padding:6px 0">${escapePdfHtml(approvedBy)}</td></tr>
-          <tr><td style="padding:6px 0;color:#6b7280">Approved at</td><td style="padding:6px 0">${escapePdfHtml(approvedAt ? new Date(approvedAt).toLocaleString() : '-')}</td><td style="padding:6px 0;color:#6b7280">Reason</td><td style="padding:6px 0">${escapePdfHtml(audit.notes || 'No reason recorded')}</td></tr>
-        </table>
-        <div style="display:flex;gap:12px;margin-bottom:20px">
-          <div style="border:1px solid #e5e7eb;border-radius:6px;padding:12px 16px;flex:1"><div style="font-size:11px;color:#6b7280">Products</div><strong>${items.length}</strong></div>
-          <div style="border:1px solid #e5e7eb;border-radius:6px;padding:12px 16px;flex:1"><div style="font-size:11px;color:#6b7280">Total variance value</div><strong>${escapePdfHtml(Number.isFinite(totalVariance) ? formatCurrency(totalVariance) : '-')}</strong></div>
-        </div>
-        <table style="width:100%;border-collapse:collapse;font-size:12px">
-          <thead><tr style="background:#eff6ff"><th style="padding:10px;text-align:left;border:1px solid #dbeafe">Product</th><th style="padding:10px;text-align:right;border:1px solid #dbeafe">System stock</th><th style="padding:10px;text-align:right;border:1px solid #dbeafe">Counted stock</th><th style="padding:10px;text-align:right;border:1px solid #dbeafe">Variance</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-        <div style="margin-top:24px;font-size:10px;color:#6b7280">Generated ${escapePdfHtml(new Date().toLocaleString())}</div>
-      </div>`;
-    document.body.appendChild(reportElement);
-
     try {
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      const html2pdfModule = await import('html2pdf.js');
-      const html2pdf = ((html2pdfModule as any).default ?? html2pdfModule) as any;
+      const { default: JsPDF } = await import('jspdf');
       const { saveBlobFile } = await import('@/lib/file-download');
+      const status = historyStatusLabel(audit);
+      const createdAt = audit.created_at || audit.createdAt;
+      const submittedBy = audit.created_by || audit.createdBy || 'Unknown';
+      const approvedBy = audit.approved_by || audit.approvedBy || '-';
+      const approvedAt = audit.approved_at || audit.approvedAt;
+      const totalVariance = Number(audit.total_discrepancy_value ?? audit.totalDiscrepancyValue);
       const safeAuditId = auditId.replace(/[^a-z0-9_-]+/gi, '-');
       const filename = `stock-audit-${safeAuditId}.pdf`;
-      const pdfBlob = await html2pdf()
-        .set({
-          margin: 0.35,
-          filename,
-          image: { type: 'jpeg', quality: 0.95 },
-          html2canvas: { scale: 2, backgroundColor: '#ffffff' },
-          jsPDF: { unit: 'in', format: 'a4', orientation: 'landscape' },
-          pagebreak: { mode: ['css', 'legacy'] },
-        })
-        .from(reportElement)
-        .outputPdf('blob');
+      const pdf = new JsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 12;
+      const contentWidth = pageWidth - margin * 2;
+      let y = margin;
+
+      const writeLabelValue = (label: string, value: string, x: number, width: number) => {
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(9);
+        pdf.setTextColor(107, 114, 128);
+        pdf.text(label, x, y);
+        pdf.setFont('helvetica', 'normal');
+        pdf.setTextColor(17, 24, 39);
+        const lines = pdf.splitTextToSize(value || '-', width);
+        pdf.text(lines, x + 22, y);
+      };
+
+      pdf.setDrawColor(37, 99, 235);
+      pdf.setLineWidth(1.2);
+      pdf.line(margin, y + 4, pageWidth - margin, y + 4);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setFontSize(20);
+      pdf.setTextColor(17, 24, 39);
+      pdf.text('Stock Audit Report', margin, y + 14);
+      pdf.setFont('helvetica', 'normal');
+      pdf.setFontSize(10);
+      pdf.setTextColor(75, 85, 99);
+      pdf.text(`Audit ${auditId}`, margin, y + 21);
+      y += 34;
+
+      writeLabelValue('Status', status, margin, 45);
+      writeLabelValue('Submitted', createdAt ? new Date(createdAt).toLocaleString() : '-', margin + contentWidth / 2, 55);
+      y += 7;
+      writeLabelValue('By', submittedBy, margin, 45);
+      writeLabelValue('Approved', approvedBy, margin + contentWidth / 2, 55);
+      y += 7;
+      writeLabelValue('Approved at', approvedAt ? new Date(approvedAt).toLocaleString() : '-', margin, 45);
+      writeLabelValue('Reason', String(audit.notes || 'No reason recorded'), margin + contentWidth / 2, 55);
+      y += 14;
+
+      pdf.setFillColor(239, 246, 255);
+      pdf.roundedRect(margin, y - 4, contentWidth, 15, 2, 2, 'F');
+      pdf.setFontSize(9);
+      pdf.setTextColor(75, 85, 99);
+      pdf.text('Products', margin + 5, y + 3);
+      pdf.text('Total variance value', margin + contentWidth / 2, y + 3);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setTextColor(17, 24, 39);
+      pdf.text(String(items.length), margin + 5, y + 9);
+      pdf.text(Number.isFinite(totalVariance) ? formatCurrency(totalVariance) : '-', margin + contentWidth / 2, y + 9);
+      y += 25;
+
+      const columns = [
+        { title: 'Product', x: margin, width: contentWidth * 0.5, align: 'left' as const },
+        { title: 'System stock', x: margin + contentWidth * 0.5, width: contentWidth * 0.17, align: 'right' as const },
+        { title: 'Counted stock', x: margin + contentWidth * 0.67, width: contentWidth * 0.17, align: 'right' as const },
+        { title: 'Variance', x: margin + contentWidth * 0.84, width: contentWidth * 0.16, align: 'right' as const },
+      ];
+      const drawTableHeader = () => {
+        pdf.setFillColor(37, 99, 235);
+        pdf.rect(margin, y - 5, contentWidth, 9, 'F');
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(9);
+        pdf.setTextColor(255, 255, 255);
+        columns.forEach((column) => {
+          const textX = column.align === 'right' ? column.x + column.width - 2 : column.x + 2;
+          pdf.text(column.title, textX, y + 1, { align: column.align });
+        });
+        y += 9;
+      };
+      drawTableHeader();
+
+      items.forEach((item: any) => {
+        const systemStock = Number(item.system_stock ?? item.systemStock);
+        const countedStock = Number(item.counted_stock ?? item.countedStock);
+        const discrepancy = Number(item.discrepancy ?? (countedStock - systemStock));
+        const nameLines = pdf.splitTextToSize(String(item.inventory_item_name || item.itemName || 'Product'), columns[0].width - 4);
+        const rowHeight = Math.max(8, nameLines.length * 4.5 + 3);
+        if (y + rowHeight > pageHeight - margin - 10) {
+          pdf.addPage();
+          y = margin;
+          drawTableHeader();
+        }
+        pdf.setDrawColor(226, 232, 240);
+        pdf.setLineWidth(0.2);
+        pdf.line(margin, y + rowHeight, pageWidth - margin, y + rowHeight);
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(8.5);
+        pdf.setTextColor(17, 24, 39);
+        pdf.text(nameLines, columns[0].x + 2, y + 4);
+        pdf.text(historyQuantity(systemStock), columns[1].x + columns[1].width - 2, y + 4, { align: 'right' });
+        pdf.text(historyQuantity(countedStock), columns[2].x + columns[2].width - 2, y + 4, { align: 'right' });
+        pdf.setTextColor(discrepancy < 0 ? 185 : discrepancy > 0 ? 21 : 17, discrepancy < 0 ? 28 : discrepancy > 0 ? 128 : 24, discrepancy < 0 ? 28 : discrepancy > 0 ? 61 : 39);
+        pdf.setFont('helvetica', 'bold');
+        pdf.text(`${discrepancy > 0 ? '+' : ''}${historyQuantity(discrepancy)}`, columns[3].x + columns[3].width - 2, y + 4, { align: 'right' });
+        y += rowHeight;
+      });
+
+      pdf.setFont('helvetica', 'normal');
+      pdf.setFontSize(7.5);
+      pdf.setTextColor(107, 114, 128);
+      pdf.text(`Generated ${new Date().toLocaleString()}`, margin, pageHeight - margin);
+      const pdfBlob = pdf.output('blob');
       if (!await saveBlobFile(pdfBlob, filename)) throw new Error('The device could not save the PDF.');
       toast({ title: 'Audit PDF downloaded', description: `The report for audit ${auditId} was saved.` });
     } catch (error) {
       console.error('[StockAudit] Could not export history audit PDF:', error);
       toast({ variant: 'destructive', title: 'PDF export failed', description: 'Could not generate this audit report PDF.' });
     } finally {
-      reportElement.remove();
       setExportingHistoryAuditId(null);
     }
   };

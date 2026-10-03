@@ -103,6 +103,13 @@ const historyQuantity = (value: unknown): string => {
   return Number.isFinite(parsed) ? parsed.toLocaleString(undefined, { maximumFractionDigits: 3 }) : '-';
 };
 
+const escapePdfHtml = (value: unknown): string => String(value ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#039;');
+
 const readableErrorValue = (value: unknown, path = ''): string => {
   if (value === null || value === undefined) return '';
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
@@ -153,6 +160,7 @@ export default function StockAuditPage() {
   const [isReportDialogOpen, setIsReportDialogOpen] = useState(false);
   const [hasImportedStockSheet, setHasImportedStockSheet] = useState(false);
   const [isExportingReport, setIsExportingReport] = useState(false);
+  const [exportingHistoryAuditId, setExportingHistoryAuditId] = useState<string | null>(null);
   const stockSheetInputRef = useRef<HTMLInputElement>(null);
   const stockReportRef = useRef<HTMLDivElement>(null);
 
@@ -419,6 +427,101 @@ export default function StockAuditPage() {
       toast({ variant: 'destructive', title: 'PDF export failed', description: 'Could not generate the stock take report PDF.' });
     } finally {
       setIsExportingReport(false);
+    }
+  };
+
+  const exportHistoryAuditPdf = async (audit: any) => {
+    const auditId = String(audit?.id || 'audit');
+    const items = historyItems(audit);
+    if (items.length === 0) {
+      toast({ variant: 'destructive', title: 'No audit details', description: 'This audit has no item details to export.' });
+      return;
+    }
+
+    setExportingHistoryAuditId(auditId);
+    const reportElement = document.createElement('div');
+    reportElement.style.position = 'fixed';
+    // html2canvas cannot reliably paint elements positioned far outside the
+    // viewport. Keep the report in the viewport while it is being rendered,
+    // behind the app, then remove it immediately after PDF generation.
+    reportElement.style.left = '0';
+    reportElement.style.top = '0';
+    reportElement.style.width = '1100px';
+    reportElement.style.maxWidth = 'none';
+    reportElement.style.zIndex = '2147483647';
+    reportElement.style.pointerEvents = 'none';
+    reportElement.style.background = '#ffffff';
+    reportElement.style.color = '#111827';
+    reportElement.style.padding = '32px';
+
+    const status = historyStatusLabel(audit);
+    const createdAt = audit.created_at || audit.createdAt;
+    const submittedBy = audit.created_by || audit.createdBy || 'Unknown';
+    const approvedBy = audit.approved_by || audit.approvedBy || '-';
+    const approvedAt = audit.approved_at || audit.approvedAt;
+    const totalVariance = Number(audit.total_discrepancy_value ?? audit.totalDiscrepancyValue);
+    const rows = items.map((item: any) => {
+      const systemStock = Number(item.system_stock ?? item.systemStock);
+      const countedStock = Number(item.counted_stock ?? item.countedStock);
+      const discrepancy = Number(item.discrepancy ?? (countedStock - systemStock));
+      return `<tr>
+        <td>${escapePdfHtml(item.inventory_item_name || item.itemName || 'Product')}</td>
+        <td style="text-align:right">${escapePdfHtml(historyQuantity(systemStock))}</td>
+        <td style="text-align:right">${escapePdfHtml(historyQuantity(countedStock))}</td>
+        <td style="text-align:right;font-weight:600;color:${discrepancy < 0 ? '#b91c1c' : discrepancy > 0 ? '#15803d' : '#111827'}">${discrepancy > 0 ? '+' : ''}${escapePdfHtml(historyQuantity(discrepancy))}</td>
+      </tr>`;
+    }).join('');
+
+    reportElement.innerHTML = `
+      <div style="font-family:Arial,sans-serif">
+        <div style="border-bottom:3px solid #2563eb;padding-bottom:16px;margin-bottom:20px">
+          <div style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#6b7280">HandyPOS · Inventory</div>
+          <h1 style="font-size:28px;margin:8px 0 4px">Stock Audit Report</h1>
+          <div style="font-size:14px;color:#4b5563">Audit ${escapePdfHtml(auditId)}</div>
+        </div>
+        <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:13px">
+          <tr><td style="padding:6px 0;color:#6b7280;width:18%">Status</td><td style="padding:6px 0;font-weight:600">${escapePdfHtml(status)}</td><td style="padding:6px 0;color:#6b7280;width:18%">Submitted</td><td style="padding:6px 0">${escapePdfHtml(createdAt ? new Date(createdAt).toLocaleString() : '-')}</td></tr>
+          <tr><td style="padding:6px 0;color:#6b7280">Submitted by</td><td style="padding:6px 0">${escapePdfHtml(submittedBy)}</td><td style="padding:6px 0;color:#6b7280">Approved by</td><td style="padding:6px 0">${escapePdfHtml(approvedBy)}</td></tr>
+          <tr><td style="padding:6px 0;color:#6b7280">Approved at</td><td style="padding:6px 0">${escapePdfHtml(approvedAt ? new Date(approvedAt).toLocaleString() : '-')}</td><td style="padding:6px 0;color:#6b7280">Reason</td><td style="padding:6px 0">${escapePdfHtml(audit.notes || 'No reason recorded')}</td></tr>
+        </table>
+        <div style="display:flex;gap:12px;margin-bottom:20px">
+          <div style="border:1px solid #e5e7eb;border-radius:6px;padding:12px 16px;flex:1"><div style="font-size:11px;color:#6b7280">Products</div><strong>${items.length}</strong></div>
+          <div style="border:1px solid #e5e7eb;border-radius:6px;padding:12px 16px;flex:1"><div style="font-size:11px;color:#6b7280">Total variance value</div><strong>${escapePdfHtml(Number.isFinite(totalVariance) ? formatCurrency(totalVariance) : '-')}</strong></div>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="background:#eff6ff"><th style="padding:10px;text-align:left;border:1px solid #dbeafe">Product</th><th style="padding:10px;text-align:right;border:1px solid #dbeafe">System stock</th><th style="padding:10px;text-align:right;border:1px solid #dbeafe">Counted stock</th><th style="padding:10px;text-align:right;border:1px solid #dbeafe">Variance</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div style="margin-top:24px;font-size:10px;color:#6b7280">Generated ${escapePdfHtml(new Date().toLocaleString())}</div>
+      </div>`;
+    document.body.appendChild(reportElement);
+
+    try {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const html2pdfModule = await import('html2pdf.js');
+      const html2pdf = ((html2pdfModule as any).default ?? html2pdfModule) as any;
+      const { saveBlobFile } = await import('@/lib/file-download');
+      const safeAuditId = auditId.replace(/[^a-z0-9_-]+/gi, '-');
+      const filename = `stock-audit-${safeAuditId}.pdf`;
+      const pdfBlob = await html2pdf()
+        .set({
+          margin: 0.35,
+          filename,
+          image: { type: 'jpeg', quality: 0.95 },
+          html2canvas: { scale: 2, backgroundColor: '#ffffff' },
+          jsPDF: { unit: 'in', format: 'a4', orientation: 'landscape' },
+          pagebreak: { mode: ['css', 'legacy'] },
+        })
+        .from(reportElement)
+        .outputPdf('blob');
+      if (!await saveBlobFile(pdfBlob, filename)) throw new Error('The device could not save the PDF.');
+      toast({ title: 'Audit PDF downloaded', description: `The report for audit ${auditId} was saved.` });
+    } catch (error) {
+      console.error('[StockAudit] Could not export history audit PDF:', error);
+      toast({ variant: 'destructive', title: 'PDF export failed', description: 'Could not generate this audit report PDF.' });
+    } finally {
+      reportElement.remove();
+      setExportingHistoryAuditId(null);
     }
   };
 
@@ -817,10 +920,22 @@ export default function StockAuditPage() {
                         </button>
                         {isExpanded && (
                           <CardContent className="border-t bg-muted/20 p-4">
-                            <div className="mb-3 flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
-                              <span><strong className="text-foreground">Audit ID:</strong> {auditId}</span>
-                              {audit.approved_by && <span><strong className="text-foreground">Approved by:</strong> {audit.approved_by}</span>}
-                              {audit.approved_at && <span><strong className="text-foreground">Approved:</strong> {new Date(audit.approved_at).toLocaleString()}</span>}
+                            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                              <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
+                                <span><strong className="text-foreground">Audit ID:</strong> {auditId}</span>
+                                {audit.approved_by && <span><strong className="text-foreground">Approved by:</strong> {audit.approved_by}</span>}
+                                {audit.approved_at && <span><strong className="text-foreground">Approved:</strong> {new Date(audit.approved_at).toLocaleString()}</span>}
+                              </div>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void exportHistoryAuditPdf(audit)}
+                                disabled={exportingHistoryAuditId === auditId}
+                              >
+                                {exportingHistoryAuditId === auditId ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+                                {exportingHistoryAuditId === auditId ? 'Exporting…' : 'Download PDF'}
+                              </Button>
                             </div>
                             <div className="overflow-x-auto rounded-md border bg-background">
                               <Table>

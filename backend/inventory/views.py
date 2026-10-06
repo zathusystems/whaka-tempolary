@@ -1870,12 +1870,16 @@ class StockAuditViewSet(viewsets.ModelViewSet):
                     counted_stock = row['counted_stock']
                     if counted_stock < 0:
                         raise ValidationError('Counted stock cannot be negative.')
+                    discrepancy = counted_stock - inventory_item.stock_units
+                    unit_cost = inventory_item.cost or Decimal('0')
                     StockAuditItem.objects.create(
                         audit=audit,
                         inventory_item=inventory_item,
                         system_stock=inventory_item.stock_units,
                         counted_stock=counted_stock,
-                        discrepancy=counted_stock - inventory_item.stock_units,
+                        discrepancy=discrepancy,
+                        unit_cost_snapshot=unit_cost,
+                        discrepancy_value_snapshot=(abs(discrepancy) * unit_cost).quantize(Decimal('0.01')),
                     )
                 audit.total_discrepancy_value = sum(
                     (abs(row.counted_stock - row.system_stock) * (row.inventory_item.cost or Decimal('0'))

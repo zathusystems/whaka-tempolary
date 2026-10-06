@@ -945,6 +945,15 @@ class StockAuditItem(models.Model):
     system_stock = models.DecimalField(max_digits=12, decimal_places=3)
     counted_stock = models.DecimalField(max_digits=12, decimal_places=3)
     discrepancy = models.DecimalField(max_digits=12, decimal_places=3)
+
+    # Preserve the cost basis used when the audit was created. Inventory costs
+    # can change later, but an historical audit must keep its original value.
+    unit_cost_snapshot = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True
+    )
+    discrepancy_value_snapshot = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
     
     # Sync tracking
     is_dirty = models.BooleanField(

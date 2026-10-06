@@ -44,6 +44,7 @@ import { cn } from '@/lib/utils';
 import { authFetch } from '@/lib/auth-fetch';
 import { syncInventoryFromBackend } from '@/lib/services/inventory-sync';
 import { saveStockAuditPdf } from '@/lib/stock-audit-pdf';
+import { calculateStockAuditMetrics, stockAuditDirection } from '@/lib/stock-audit-metrics';
 import {
   Dialog,
   DialogContent,
@@ -93,26 +94,40 @@ const approvalErrorMessage = (error: unknown): string => {
   return Number.isFinite(status) && status > 0 ? `HTTP ${status}: ${readableMessage}` : readableMessage;
 };
 
-const mapServerAuditToStockTake = (audit: any): StockTake => ({
-  id: String(audit.id),
-  branchId: String(audit.branch ?? audit.branch_id ?? ''),
-  createdAt: audit.created_at || new Date().toISOString(),
-  createdBy: audit.created_by || '-',
-  status: audit.status === 'Approved' ? 'Approved' : audit.status === 'Rejected' ? 'Rejected' : 'Pending Approval',
-  totalDiscrepancyValue: numericValue(audit.total_discrepancy_value),
-  notes: audit.notes || '',
-  approvedBy: audit.approved_by || undefined,
-  approvedAt: audit.approved_at || undefined,
-  items: Array.isArray(audit.items) ? audit.items.map((item: any) => ({
+const mapServerAuditToStockTake = (audit: any): StockTake => {
+  const items = Array.isArray(audit.items) ? audit.items.map((item: any) => ({
     itemId: String(item.inventory_item ?? item.itemId ?? ''),
     itemName: item.inventory_item_name || item.itemName || 'Product',
     systemStock: numericValue(item.system_stock ?? item.systemStock),
     countedStock: numericValue(item.counted_stock ?? item.countedStock),
     discrepancy: numericValue(item.discrepancy),
-  })) : [],
-  _dirty: false,
-  _operation: 'update',
-});
+    // Keep absent values undefined so a local inventory cost can be used as a
+    // fallback. A real zero cost remains zero.
+    unitCost: item.unit_cost ?? item.unitCost ?? item.cost ?? undefined,
+    discrepancyValue: item.discrepancy_value === undefined && item.discrepancyValue === undefined
+      ? undefined
+      : Math.abs(numericValue(item.discrepancy_value ?? item.discrepancyValue)),
+  })) : [];
+  // The stored audit total is authoritative for historical records. Product
+  // costs can change after approval, so recalculating an old total from the
+  // current inventory costs would rewrite history on screen.
+  const totalDiscrepancyValue = numericValue(audit.total_discrepancy_value);
+
+  return {
+    id: String(audit.id),
+    branchId: String(audit.branch ?? audit.branch_id ?? ''),
+    createdAt: audit.created_at || new Date().toISOString(),
+    createdBy: audit.created_by || '-',
+    status: audit.status === 'Approved' ? 'Approved' : audit.status === 'Rejected' ? 'Rejected' : 'Pending Approval',
+    totalDiscrepancyValue,
+    notes: audit.notes || '',
+    approvedBy: audit.approved_by || undefined,
+    approvedAt: audit.approved_at || undefined,
+    items,
+    _dirty: false,
+    _operation: 'update',
+  };
+};
 
 const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onProcessed: (auditId: string) => void }) => {
   const { user } = useAuth();
@@ -121,11 +136,24 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
   const [isProcessing, setIsProcessing] = useState(false);
   const [isConfirming, setIsConfirming] = useState<'approve' | 'reject' | null>(null);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const auditMetrics = useMemo(() => calculateStockAuditMetrics(audit.items, audit.totalDiscrepancyValue), [audit.items, audit.totalDiscrepancyValue]);
 
   const handleExportPdf = async () => {
     setIsExportingPdf(true);
     try {
-      const saved = await saveStockAuditPdf(audit, formatCurrency);
+      const localItems = await db.inventory.bulkGet(audit.items.map((item) => item.itemId));
+      const reportAudit: StockTake = {
+        ...audit,
+        items: audit.items.map((item, index) => {
+          const localCost = localItems[index]?.cost;
+          const unitCost = item.unitCost ?? localCost;
+          const discrepancyValue = item.discrepancyValue ?? (
+            unitCost === undefined ? undefined : Math.abs(item.discrepancy) * unitCost
+          );
+          return { ...item, unitCost, discrepancyValue };
+        }),
+      };
+      const saved = await saveStockAuditPdf(reportAudit, formatCurrency);
       if (!saved) throw new Error('The device could not save the PDF.');
       toast({ title: 'Audit PDF downloaded', description: `The report for audit ${audit.id} was saved.` });
     } catch (error) {
@@ -254,8 +282,6 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
     }
   };
   
-  const discrepancyColor = audit.totalDiscrepancyValue > 0 ? 'text-green-600' : 'text-red-600';
-  const discrepancySign = audit.totalDiscrepancyValue > 0 ? '+' : '';
 
   return (
     <>
@@ -271,9 +297,10 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
                 Submitted by {audit.createdBy}
               </span>
             </div>
-            <div className="hidden sm:block text-right">
-                <p className="text-sm">Discrepancy</p>
-                <p className={cn("font-semibold", discrepancyColor)}>{discrepancySign}{formatCurrency(audit.totalDiscrepancyValue)}</p>
+            <div className="hidden sm:grid sm:grid-cols-3 sm:gap-3 text-right text-xs">
+                <div><p className="text-red-600">Shortage</p><p className="font-semibold text-red-800">{formatCurrency(auditMetrics.shortageValue)}</p></div>
+                <div><p className="text-green-600">Overage</p><p className="font-semibold text-green-800">{formatCurrency(auditMetrics.overageValue)}</p></div>
+                <div><p className={auditMetrics.netValue < 0 ? 'text-red-600' : auditMetrics.netValue > 0 ? 'text-green-600' : 'text-muted-foreground'}>{auditMetrics.netValue < 0 ? 'Overall shortage' : auditMetrics.netValue > 0 ? 'Overall overage' : 'Overall balanced'}</p><p className={cn('font-semibold', auditMetrics.netValue < 0 ? 'text-red-800' : auditMetrics.netValue > 0 ? 'text-green-800' : 'text-foreground')}>{auditMetrics.netValue < 0 ? '-' : auditMetrics.netValue > 0 ? '+' : ''}{formatCurrency(Math.abs(auditMetrics.netValue))}</p></div>
             </div>
           </div>
         </AccordionTrigger>
@@ -285,7 +312,8 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
                   <TableHead>Item</TableHead>
                   <TableHead className="text-right">System</TableHead>
                   <TableHead className="text-right">Counted</TableHead>
-                  <TableHead className="text-right">Discrepancy</TableHead>
+                  <TableHead className="text-right">Variance / direction</TableHead>
+                  <TableHead className="text-right">Value</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -296,9 +324,12 @@ const StockAuditApprovalItem = ({ audit, onProcessed }: { audit: StockTake; onPr
                     <TableCell className="text-right">{item.countedStock}</TableCell>
                     <TableCell className="text-right">
                          <Badge variant={item.discrepancy === 0 ? 'secondary' : (item.discrepancy > 0 ? 'default' : 'destructive')} className={item.discrepancy > 0 ? 'bg-green-600' : ''}>
-                            {item.discrepancy > 0 ? <ChevronUp className="mr-1 h-3 w-3" /> : <ChevronDown className="mr-1 h-3 w-3" />}
-                            {item.discrepancy > 0 ? '+' : ''}{item.discrepancy}
+                            {item.discrepancy > 0 ? <ChevronUp className="mr-1 h-3 w-3" /> : item.discrepancy < 0 ? <ChevronDown className="mr-1 h-3 w-3" /> : null}
+                            {stockAuditDirection(item.discrepancy)}: {item.discrepancy > 0 ? '+' : ''}{item.discrepancy}
                         </Badge>
+                    </TableCell>
+                    <TableCell className={cn('text-right font-semibold', item.discrepancy > 0 ? 'text-green-600' : item.discrepancy < 0 ? 'text-destructive' : '')}>
+                      {stockAuditDirection(item.discrepancy)}: {formatCurrency(item.discrepancyValue ?? Math.abs(item.discrepancy) * (item.unitCost || 0))}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -495,6 +526,11 @@ function ApprovalsPageContent() {
     if (!activeBranchId) return;
     let cancelled = false;
     setIsLoadingServerAudits(true);
+    // Keep the local product cache current so PDF exports can still resolve
+    // unit cost when an older audit endpoint omits the new cost fields.
+    void syncInventoryFromBackend(activeBranchId).catch((error) => {
+      console.warn('[Approvals] Could not refresh inventory costs:', error);
+    });
     authFetch.fetch<any>(`/inventory/stock-audits/pending/?branch_id=${encodeURIComponent(activeBranchId)}`)
       .then((response) => {
         if (cancelled) return;
@@ -522,7 +558,29 @@ function ApprovalsPageContent() {
 
   const pendingAudits = useMemo(() => {
     const byId = new Map<string, StockTake>();
-    [...serverPendingAudits, ...localPendingAudits].forEach((audit) => byId.set(audit.id, audit));
+    serverPendingAudits.forEach((audit) => byId.set(audit.id, audit));
+    localPendingAudits.forEach((localAudit) => {
+      const serverAudit = byId.get(localAudit.id);
+      if (!serverAudit) {
+        byId.set(localAudit.id, localAudit);
+        return;
+      }
+
+      const serverItemsById = new Map(serverAudit.items.map((item) => [item.itemId, item]));
+      byId.set(localAudit.id, {
+        ...serverAudit,
+        ...localAudit,
+        items: localAudit.items.map((localItem) => {
+          const serverItem = serverItemsById.get(localItem.itemId);
+          return {
+            ...serverItem,
+            ...localItem,
+            unitCost: localItem.unitCost ?? serverItem?.unitCost,
+            discrepancyValue: localItem.discrepancyValue ?? serverItem?.discrepancyValue,
+          };
+        }),
+      });
+    });
     return Array.from(byId.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }, [localPendingAudits, serverPendingAudits]);
 

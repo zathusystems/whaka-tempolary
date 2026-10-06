@@ -57,7 +57,11 @@ export interface ReportData {
   salesByStaff: { name: string; revenue: number; totalSales: number; transactions: number }[];
 }
 
-export const useReports = (dateRange?: DateRange) => {
+export const useReports = (
+  dateRange?: DateRange,
+  ordersOverride?: Order[],
+  ordersLoading = false,
+) => {
   const toFiniteNumber = (value: unknown, fallback = 0): number => {
     const parsed = typeof value === 'number' ? value : Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
@@ -80,11 +84,6 @@ export const useReports = (dateRange?: DateRange) => {
     }
 
     return Array.from(candidates);
-  };
-
-  const resolveNumber = (value: unknown): number | undefined => {
-    const parsed = typeof value === 'number' ? value : Number(value);
-    return Number.isFinite(parsed) ? parsed : undefined;
   };
 
   const normalizeName = (value: unknown): string =>
@@ -187,6 +186,16 @@ export const useReports = (dateRange?: DateRange) => {
       return;
     }
 
+    // The page supplies the same live order collection used by its Orders and
+    // Fiscal tabs. Do not start a second IndexedDB query while that collection
+    // is still loading.
+    if (ordersLoading) {
+      setLoading(true);
+      setError(null);
+      return;
+    }
+
+    let cancelled = false;
     const fetchData = async () => {
       setLoading(true);
       setError(null);
@@ -198,16 +207,19 @@ export const useReports = (dateRange?: DateRange) => {
         const branchCandidates = new Set(getBranchIdCandidates(activeBranchId));
 
         const [orders, allExpenses, inventory, staff] = await Promise.all([
-          db.orders
-            .where('branchId').equals(activeBranchId)
-            .and(order => 
-              order.createdAt >= from && 
-              order.createdAt <= to &&
-              order.status !== 'Voided' &&
-              order.status !== 'Cancelled'
-            )
-            .toArray(),
-          db.expenses.toArray(),
+          ordersOverride
+            ? Promise.resolve(ordersOverride.filter((order) =>
+                order.createdAt >= from &&
+                order.createdAt <= to &&
+                order.status !== 'Voided' &&
+                order.status !== 'Cancelled'
+              ))
+            : db.orders
+                .where('[branchId+createdAt]')
+                .between([activeBranchId, from], [activeBranchId, to], true, true)
+                .and((order) => order.status !== 'Voided' && order.status !== 'Cancelled')
+                .toArray(),
+          db.expenses.where('branchId').anyOf(Array.from(branchCandidates)).toArray(),
           db.inventory.where('branchId').equals(activeBranchId).toArray(),
           db.staff.where('branchId').equals(activeBranchId).toArray(),
         ]);
@@ -247,49 +259,6 @@ export const useReports = (dateRange?: DateRange) => {
 
           return expenseDateMs >= fromMs && expenseDateMs <= toMs;
         });
-
-        const ordersToPatch = orders
-          .map((order) => {
-            const vat = resolveNumber((order as any).vatAmount ?? (order as any).vat_amount);
-            const net = resolveNumber((order as any).netAmount ?? (order as any).net_amount);
-            const gross = resolveNumber((order as any).grossAmount ?? (order as any).gross_amount);
-
-            const existingTax = resolveNumber(order.tax);
-            const existingSubtotal = resolveNumber(order.subtotal);
-            const existingTotal = resolveNumber(order.total);
-
-            const resolvedTax = existingTax ?? vat;
-            const resolvedSubtotal =
-              existingSubtotal ??
-              net ??
-              (gross !== undefined && resolvedTax !== undefined ? gross - resolvedTax : undefined);
-            const resolvedTotal =
-              existingTotal ??
-              gross ??
-              (resolvedSubtotal !== undefined && resolvedTax !== undefined
-                ? resolvedSubtotal + resolvedTax
-                : undefined);
-
-            const changes: Partial<Order> = {};
-            if (existingTax === undefined && resolvedTax !== undefined) {
-              changes.tax = resolvedTax;
-            }
-            if (existingSubtotal === undefined && resolvedSubtotal !== undefined) {
-              changes.subtotal = resolvedSubtotal;
-            }
-            if (existingTotal === undefined && resolvedTotal !== undefined) {
-              changes.total = resolvedTotal;
-            }
-
-            return Object.keys(changes).length > 0
-              ? { key: order.id, changes }
-              : null;
-          })
-          .filter(Boolean) as Array<{ key: string; changes: Partial<Order> }>;
-
-        if (ordersToPatch.length > 0) {
-          await db.orders.bulkUpdate(ordersToPatch);
-        }
 
         const normalizedOrders = orders.map((order) => {
           const total = toFiniteNumber(order.total ?? order.grossAmount ?? order.gross_amount, 0);
@@ -494,9 +463,17 @@ export const useReports = (dateRange?: DateRange) => {
                 totalSales: c.totalSales
             }));
 
+        const sessionIds = Array.from(
+          new Set(normalizedOrders.map((order) => String(order.sessionId ?? '')).filter(Boolean))
+        );
+        const sessions = sessionIds.length > 0 ? await db.sessions.bulkGet(sessionIds) : [];
+        const sessionById = new Map(
+          sessions.filter(Boolean).map((session) => [String(session!.id), session!])
+        );
+
         const staffMap = new Map<string, { name: string; revenue: number; totalSales: number; transactions: number }>();
-        await Promise.all(normalizedOrders.map(async order => {
-            const session = order.sessionId ? await db.sessions.get(order.sessionId) : null;
+        normalizedOrders.forEach((order) => {
+            const session = order.sessionId ? sessionById.get(String(order.sessionId)) : null;
             if (!session) return;
             
             const staffMember = staff.find(s => s.id === session.userId);
@@ -507,7 +484,7 @@ export const useReports = (dateRange?: DateRange) => {
             existing.totalSales += order.total;
             existing.transactions += 1;
             staffMap.set(session.userId, existing);
-        }));
+        });
 
         const salesByStaff = Array.from(staffMap.values())
             .sort((a,b) => b.totalSales - a.totalSales)
@@ -518,6 +495,7 @@ export const useReports = (dateRange?: DateRange) => {
                 transactions: s.transactions
             }));
 
+        if (cancelled) return;
         setData({
             totalSales: toFiniteNumber(totalSales, 0),
             totalRevenue: toFiniteNumber(totalRevenue, 0),
@@ -539,15 +517,19 @@ export const useReports = (dateRange?: DateRange) => {
         });
 
       } catch (e: any) {
+        if (cancelled) return;
         setError(e);
         console.error("Failed to generate report data", e);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
     fetchData();
-  }, [dateRange, activeBranchId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [dateRange, activeBranchId, ordersOverride, ordersLoading]);
 
   return { data, loading, error };
 };

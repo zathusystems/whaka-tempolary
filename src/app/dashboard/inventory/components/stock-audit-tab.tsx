@@ -4,6 +4,8 @@ import React, { useState, useEffect } from 'react';
 import { Plus, AlertCircle, CheckCircle2, Clock, Loader2, Eye, Search, X } from 'lucide-react';
 import { authFetch } from '@/lib/auth-fetch';
 import { toast } from '@/hooks/use-toast';
+import { calculateStockAuditMetrics } from '@/lib/stock-audit-metrics';
+import { cn } from '@/lib/utils';
 
 import {
   Card,
@@ -43,6 +45,8 @@ interface StockAuditRecord {
   id: string;
   status: 'Pending' | 'Approved' | 'Rejected';
   totalDiscrepancyValue: number;
+  shortageValue: number;
+  overageValue: number;
   approvalRole?: string;
   mraVisible: boolean;
   inventoryLocked: boolean;
@@ -66,6 +70,25 @@ interface AuditCount {
   systemStock: number;
   countedStock: string;
 }
+
+const mapStockAuditRecord = (audit: any): StockAuditRecord => {
+  const metrics = calculateStockAuditMetrics(audit.items, audit.total_discrepancy_value);
+  return {
+    id: audit.id,
+    status: audit.status,
+    totalDiscrepancyValue: Number(audit.total_discrepancy_value) || 0,
+    shortageValue: metrics.shortageValue,
+    overageValue: metrics.overageValue,
+    approvalRole: audit.approval_role,
+    mraVisible: audit.mra_visible,
+    inventoryLocked: audit.inventory_locked,
+    createdBy: audit.created_by,
+    createdAt: audit.created_at,
+    approvedBy: audit.approved_by,
+    approvedAt: audit.approved_at,
+    itemCount: audit.items?.length || 0,
+  };
+};
 
 const stockAuditErrorMessage = (error: unknown): string => {
   const details = error as { message?: unknown; status?: unknown; data?: unknown };
@@ -135,34 +158,10 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
         );
 
         if (response && Array.isArray(response)) {
-          const auditRecords = response.map((audit: any) => ({
-            id: audit.id,
-            status: audit.status,
-            totalDiscrepancyValue: parseFloat(audit.total_discrepancy_value),
-            approvalRole: audit.approval_role,
-            mraVisible: audit.mra_visible,
-            inventoryLocked: audit.inventory_locked,
-            createdBy: audit.created_by,
-            createdAt: audit.created_at,
-            approvedBy: audit.approved_by,
-            approvedAt: audit.approved_at,
-            itemCount: audit.items?.length || 0,
-          }));
+          const auditRecords = response.map(mapStockAuditRecord);
           setAudits(auditRecords);
         } else if (response?.results && Array.isArray(response.results)) {
-          const auditRecords = response.results.map((audit: any) => ({
-            id: audit.id,
-            status: audit.status,
-            totalDiscrepancyValue: parseFloat(audit.total_discrepancy_value),
-            approvalRole: audit.approval_role,
-            mraVisible: audit.mra_visible,
-            inventoryLocked: audit.inventory_locked,
-            createdBy: audit.created_by,
-            createdAt: audit.created_at,
-            approvedBy: audit.approved_by,
-            approvedAt: audit.approved_at,
-            itemCount: audit.items?.length || 0,
-          }));
+          const auditRecords = response.results.map(mapStockAuditRecord);
           setAudits(auditRecords);
         }
       } catch (error) {
@@ -219,6 +218,8 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
           id: submitted.id,
           status: submitted.status,
           totalDiscrepancyValue: parseFloat(submitted.total_discrepancy_value || '0'),
+          shortageValue: calculateStockAuditMetrics(submitted.items, submitted.total_discrepancy_value).shortageValue,
+          overageValue: calculateStockAuditMetrics(submitted.items, submitted.total_discrepancy_value).overageValue,
           mraVisible: submitted.mra_visible,
           inventoryLocked: submitted.inventory_locked,
           createdBy: submitted.created_by,
@@ -443,7 +444,9 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
                   <TableRow>
                     <TableHead>Status</TableHead>
                     <TableHead>Items</TableHead>
-                    <TableHead>Discrepancy Value</TableHead>
+                    <TableHead>Shortage Value</TableHead>
+                    <TableHead>Overage Value</TableHead>
+                    <TableHead>Overall Result</TableHead>
                     <TableHead>Created By</TableHead>
                     <TableHead>Created At</TableHead>
                     <TableHead>Approved By</TableHead>
@@ -462,8 +465,10 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
                         </Badge>
                       </TableCell>
                       <TableCell>{audit.itemCount}</TableCell>
-                      <TableCell className="font-mono">
-                        {audit.totalDiscrepancyValue.toFixed(2)}
+                      <TableCell className="font-mono text-red-700">{audit.shortageValue.toFixed(2)}</TableCell>
+                      <TableCell className="font-mono text-green-700">{audit.overageValue.toFixed(2)}</TableCell>
+                      <TableCell className={audit.overageValue - audit.shortageValue < 0 ? 'font-mono text-red-700' : audit.overageValue - audit.shortageValue > 0 ? 'font-mono text-green-700' : 'font-mono'}>
+                        {audit.overageValue - audit.shortageValue < 0 ? 'Overall shortage: ' : audit.overageValue - audit.shortageValue > 0 ? 'Overall overage: +' : 'No net adjustment: '}{Math.abs(audit.overageValue - audit.shortageValue).toFixed(2)}
                       </TableCell>
                       <TableCell className="text-sm">{audit.createdBy}</TableCell>
                       <TableCell className="text-sm">
@@ -663,9 +668,17 @@ export function StockAuditTab({ branchId, inventoryData = [] }: StockAuditTabPro
                 </div>
 
                 <div>
-                  <label className="text-sm font-medium">Discrepancy Value</label>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    {selectedAudit.totalDiscrepancyValue.toFixed(2)}
+                  <label className="text-sm font-medium text-red-700">Shortage Value</label>
+                  <p className="text-sm text-red-700 mt-1">{selectedAudit.shortageValue.toFixed(2)}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-green-700">Overage Value</label>
+                  <p className="text-sm text-green-700 mt-1">{selectedAudit.overageValue.toFixed(2)}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium">Overall Result</label>
+                  <p className={cn('mt-1 text-sm', selectedAudit.overageValue - selectedAudit.shortageValue < 0 ? 'text-red-700' : selectedAudit.overageValue - selectedAudit.shortageValue > 0 ? 'text-green-700' : 'text-muted-foreground')}>
+                    {selectedAudit.overageValue - selectedAudit.shortageValue < 0 ? 'Overall shortage: ' : selectedAudit.overageValue - selectedAudit.shortageValue > 0 ? 'Overall overage: +' : 'No net adjustment: '}{Math.abs(selectedAudit.overageValue - selectedAudit.shortageValue).toFixed(2)}
                   </p>
                 </div>
               </div>

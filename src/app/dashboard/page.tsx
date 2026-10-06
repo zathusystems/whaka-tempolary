@@ -31,7 +31,6 @@ import {
 import type { DateRange } from 'react-day-picker';
 import { endOfDay, format, startOfDay, subDays } from 'date-fns';
 import { useRouter } from 'next/navigation';
-import Papa from 'papaparse';
 
 import { useAuth } from '@/hooks/use-auth';
 import { useCurrency } from '@/hooks/use-currency';
@@ -53,22 +52,12 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuPortal,
-  DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { Calendar } from '@/components/ui/calendar';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { downloadTextFile } from '@/lib/file-download';
+import { saveDashboardPdf } from '@/lib/dashboard-pdf';
 
 interface DashboardData {
   kpiData?: Array<{
@@ -225,6 +214,30 @@ function DashboardFilters({
   onExport: () => void;
   isExportDisabled?: boolean;
 }) {
+  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
+
+  const applyRange = (range?: DateRange, closeWhenComplete = false) => {
+    if (!range?.from) {
+      setDate(undefined);
+      return;
+    }
+
+    if (!range.to) {
+      setDate({ from: startOfDay(range.from) });
+      return;
+    }
+
+    const first = range.from <= range.to ? range.from : range.to;
+    const last = range.from <= range.to ? range.to : range.from;
+    setDate({ from: startOfDay(first), to: endOfDay(last) });
+    if (closeWhenComplete) setIsDatePickerOpen(false);
+  };
+
+  const applyPreset = (from: Date, to: Date) => {
+    setDate({ from: startOfDay(from), to: endOfDay(to) });
+    setIsDatePickerOpen(false);
+  };
+
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
       <div>
@@ -232,8 +245,8 @@ function DashboardFilters({
         <p className="text-muted-foreground">Welcome back, here&apos;s a look at your business.</p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
+        <Popover open={isDatePickerOpen} onOpenChange={setIsDatePickerOpen}>
+          <PopoverTrigger asChild>
             <Button
               id="date"
               variant={'outline'}
@@ -252,53 +265,39 @@ function DashboardFilters({
                 <span>Pick a date</span>
               )}
             </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent className="w-auto" align="end">
-            <DropdownMenuItem onClick={() => setDate({ from: startOfDay(new Date()), to: endOfDay(new Date()) })}>
-              Today
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={() => {
-                const yesterday = subDays(new Date(), 1);
-                setDate({ from: startOfDay(yesterday), to: endOfDay(yesterday) });
-              }}
-            >
-              Yesterday
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => setDate({ from: startOfDay(subDays(new Date(), 7)), to: endOfDay(new Date()) })}>
-              Last 7 Days
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => setDate({ from: startOfDay(subDays(new Date(), 30)), to: endOfDay(new Date()) })}>
-              Last 30 Days
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>Custom Range</DropdownMenuSubTrigger>
-              <DropdownMenuPortal>
-                <DropdownMenuSubContent className="w-auto p-0">
-                  <Calendar
-                    initialFocus
-                    mode="range"
-                    defaultMonth={date?.from}
-                    selected={date}
-                    onSelect={setDate}
-                    numberOfMonths={2}
-                  />
-                </DropdownMenuSubContent>
-              </DropdownMenuPortal>
-            </DropdownMenuSub>
-          </DropdownMenuContent>
-        </DropdownMenu>
+          </PopoverTrigger>
+          <PopoverContent className="w-auto p-0" align="end">
+            <div className="flex flex-col sm:flex-row">
+              <div className="grid min-w-[150px] gap-1 border-b p-3 sm:border-b-0 sm:border-r">
+                <p className="px-2 pb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Quick ranges</p>
+                <Button variant="ghost" className="justify-start" onClick={() => applyPreset(new Date(), new Date())}>Today</Button>
+                <Button variant="ghost" className="justify-start" onClick={() => { const yesterday = subDays(new Date(), 1); applyPreset(yesterday, yesterday); }}>Yesterday</Button>
+                <Button variant="ghost" className="justify-start" onClick={() => applyPreset(subDays(new Date(), 6), new Date())}>Last 7 days</Button>
+                <Button variant="ghost" className="justify-start" onClick={() => applyPreset(subDays(new Date(), 29), new Date())}>Last 30 days</Button>
+              </div>
+              <Calendar
+                initialFocus
+                mode="range"
+                defaultMonth={date?.from || new Date()}
+                selected={date}
+                onSelect={(range) => applyRange(range, Boolean(range?.from && range?.to))}
+                numberOfMonths={2}
+              />
+            </div>
+          </PopoverContent>
+        </Popover>
 
         <Button
           variant="outline"
-          size="icon"
+          size="sm"
           className="hidden sm:inline-flex"
           onClick={onExport}
           disabled={isExportDisabled}
+          title="Download PDF report"
+          aria-label="Download PDF report"
         >
-          <Download className="h-4 w-4" />
-          <span className="sr-only">Download Report</span>
+          <Download className="mr-2 h-4 w-4" />
+          <span>PDF</span>
         </Button>
       </div>
     </div>
@@ -942,7 +941,7 @@ export default function DashboardPage() {
     fetchDashboardData();
   }, [dateRange, activeBranchId]);
 
-  const handleExportDashboardData = () => {
+  const handleExportDashboardData = async () => {
     if (isLoading) {
       toast({
         title: 'Dashboard is still loading',
@@ -960,66 +959,16 @@ export default function DashboardPage() {
       return;
     }
 
-    const rows: Array<Record<string, string | number>> = [];
-
-    dashboardData.kpiData?.forEach((kpi) => {
-      rows.push({
-        section: 'KPI',
-        metric: kpi.title,
-        value: Number(kpi.value || 0),
-        change: kpi.change || '',
-      });
-    });
-
-    dashboardData.salesData?.forEach((point) => {
-      rows.push({
-        section: 'Sales Trend',
-        period: point.name,
-        total: Number(point.total || 0),
-      });
-    });
-
-    dashboardData.paymentData?.forEach((payment) => {
-      rows.push({
-        section: 'Payment Method',
-        method: payment.name,
-        amount: Number(payment.value || 0),
-      });
-    });
-
-    dashboardData.topProducts?.forEach((product) => {
-      rows.push({
-        section: 'Top Product',
-        name: product.name,
-        unitsSold: Number(product.unitsSold || 0),
-        revenue: Number(product.revenue || 0),
-        profit: Number(product.profit || 0),
-      });
-    });
-
-    dashboardData.lowStockItems?.forEach((item) => {
-      rows.push({
-        section: 'Low Stock',
-        name: item.name,
-        category: item.category,
-        stockUnits: Number(item.stock_units || 0),
-        reorderLevel: Number(item.reorder_level || 0),
-        status: item.status,
-      });
-    });
-
-    dashboardData.recentSales?.forEach((sale) => {
-      rows.push({
-        section: 'Recent Sale',
-        saleId: sale.id,
-        description: sale.description || '',
-        amount: Number(sale.amount || 0),
-        paymentMethod: sale.paymentMethod,
-        createdAt: sale.createdAt,
-      });
-    });
-
-    if (rows.length === 0) {
+    const hasReportData = Boolean(
+      dashboardData.kpiData?.length ||
+      dashboardData.salesData?.length ||
+      dashboardData.paymentData?.length ||
+      dashboardData.topProducts?.length ||
+      dashboardData.lowStockItems?.length ||
+      dashboardData.recentSales?.length ||
+      dashboardData.activeSession
+    );
+    if (!hasReportData) {
       toast({
         variant: 'destructive',
         title: 'No data to export',
@@ -1028,24 +977,27 @@ export default function DashboardPage() {
       return;
     }
 
-    const csv = Papa.unparse(rows);
-    const fromDate = format(dateRange?.from || new Date(), 'yyyy-MM-dd');
-    const toDate = format(dateRange?.to || new Date(), 'yyyy-MM-dd');
-    const filename = `dashboard-summary-${fromDate}-to-${toDate}.csv`;
-    const downloadStarted = downloadTextFile(csv, filename);
-
-    if (!downloadStarted) {
+    try {
+      const downloadStarted = await saveDashboardPdf(
+        dashboardData,
+        dateRange?.from,
+        dateRange?.to,
+        formatCurrency,
+      );
+      if (!downloadStarted) throw new Error('The device could not save the PDF.');
+    } catch (error) {
+      console.error('[Dashboard] Failed to export PDF:', error);
       toast({
         variant: 'destructive',
-        title: 'Export failed',
-        description: 'Unable to trigger file download on this device.',
+        title: 'PDF export failed',
+        description: error instanceof Error ? error.message : 'Unable to create the dashboard PDF.',
       });
       return;
     }
 
     toast({
-      title: 'Export complete',
-      description: `${rows.length} records were exported to ${filename}.`,
+      title: 'PDF export complete',
+      description: 'The dashboard report was downloaded for the selected date range.',
     });
   };
 

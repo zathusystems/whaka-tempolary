@@ -56,6 +56,8 @@ import {
 import { useAuth } from '@/hooks/use-auth';
 import { authFetch } from '@/lib/auth-fetch';
 import { saveBlobFile } from '@/lib/file-download';
+import { syncInventoryFromBackend } from '@/lib/services/inventory-sync';
+import { calculateStockAuditMetrics, stockAuditDirection } from '@/lib/stock-audit-metrics';
 
 const LOCAL_STORAGE_KEYS = {
     ACTIVE_BRANCH: 'handypos-active-branch'
@@ -75,6 +77,21 @@ type StockCountSheetRow = {
   'Counted Stock'?: unknown;
 };
 
+type AuditSheetComparisonIssue = {
+  kind: 'Mismatch' | 'Missing' | 'Extra' | 'Invalid';
+  itemId: string;
+  productName: string;
+  details: string;
+};
+
+type AuditSheetComparison = {
+  auditId: string;
+  filename: string;
+  matchedCount: number;
+  ignoredUnchangedCount: number;
+  issues: AuditSheetComparisonIssue[];
+};
+
 const STOCK_COUNT_SHEET_COLUMNS = [
   'Item ID',
   'Product Name',
@@ -91,6 +108,10 @@ const stockCountNumber = (value: unknown): number | null => {
   return Number.isFinite(parsed) ? parsed : Number.NaN;
 };
 
+const sameStockQuantity = (left: number | null, right: number): boolean => (
+  left !== null && Number.isFinite(left) && Math.abs(left - right) < 0.0005
+);
+
 const historyStatusLabel = (audit: any): string => {
   const status = String(audit?.status || 'Submitted');
   return status === 'Pending' ? 'Pending Approval' : status;
@@ -101,6 +122,12 @@ const historyItems = (audit: any): any[] => Array.isArray(audit?.items) ? audit.
 const historyQuantity = (value: unknown): string => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed.toLocaleString(undefined, { maximumFractionDigits: 3 }) : '-';
+};
+
+const historyGrossDiscrepancyValue = (audit: any): number => {
+  // Historical totals are stored when the audit is created. Do not recalculate
+  // them with today's product costs, which can make an approved audit drift.
+  return Number(audit?.total_discrepancy_value ?? audit?.totalDiscrepancyValue) || 0;
 };
 
 const readableErrorValue = (value: unknown, path = ''): string => {
@@ -154,7 +181,11 @@ export default function StockAuditPage() {
   const [hasImportedStockSheet, setHasImportedStockSheet] = useState(false);
   const [isExportingReport, setIsExportingReport] = useState(false);
   const [exportingHistoryAuditId, setExportingHistoryAuditId] = useState<string | null>(null);
+  const [auditSheetComparison, setAuditSheetComparison] = useState<AuditSheetComparison | null>(null);
+  const [isComparingAuditSheet, setIsComparingAuditSheet] = useState(false);
   const stockSheetInputRef = useRef<HTMLInputElement>(null);
+  const auditSheetInputRef = useRef<HTMLInputElement>(null);
+  const comparisonTargetAuditIdRef = useRef<string | null>(null);
   const stockReportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -175,7 +206,7 @@ export default function StockAuditPage() {
   );
 
   const form = useForm<StockTakeFormValues>();
-  const { control, handleSubmit, getValues } = form;
+  const { control, handleSubmit, getValues, setValue } = form;
 
   const { fields, replace } = useFieldArray({
     control,
@@ -193,7 +224,7 @@ export default function StockAuditPage() {
   useEffect(() => {
     // Dexie live queries can re-run while an input is being edited. Replacing
     // the field array on each result remounts inputs and makes them lose focus.
-    if (!inventoryItems || !activeBranchId || hydratedBranchIdRef.current === activeBranchId) return;
+    if (!inventoryItems || inventoryItems.length === 0 || !activeBranchId || hydratedBranchIdRef.current === activeBranchId) return;
 
     replace(inventoryItems.map((item) => ({
       ...item,
@@ -204,7 +235,25 @@ export default function StockAuditPage() {
   }, [activeBranchId, inventoryItems, replace]);
 
   useEffect(() => {
+    // A background refresh can add costs after the form has been hydrated.
+    // Update only the cost fields so an in-progress physical count is not
+    // replaced or its input values remounted.
+    if (!inventoryItems || !activeBranchId || hydratedBranchIdRef.current !== activeBranchId) return;
+    const currentItems = getValues('items') || [];
+    inventoryItems.forEach((item) => {
+      const index = currentItems.findIndex((currentItem) => String(currentItem.id) === String(item.id));
+      if (index < 0 || currentItems[index].cost === item.cost) return;
+      setValue(`items.${index}.cost`, item.cost, { shouldDirty: false });
+    });
+  }, [activeBranchId, getValues, inventoryItems, setValue]);
+
+  useEffect(() => {
     if (!activeBranchId) return;
+    // The audit form reads from the local inventory cache. Refresh it first so
+    // cost/unit is available even when the user opens Stock Audit directly.
+    void syncInventoryFromBackend(activeBranchId).catch((error) => {
+      console.warn('[StockAudit] Could not refresh inventory costs:', error);
+    });
     setIsLoadingAuditHistory(true);
     authFetch.fetch<any>(`/inventory/stock-audits/?branch_id=${encodeURIComponent(activeBranchId)}`)
       .then((response) => setAuditHistory(Array.isArray(response) ? response : response?.results || []))
@@ -227,7 +276,9 @@ export default function StockAuditPage() {
         acc.totalValue += systemStock * cost;
         if (counted) {
           acc.countedValue += countedStock * cost;
-          acc.totalDiscrepancy += (countedStock - systemStock) * cost;
+          // Match the backend's canonical audit total. Shortages and
+          // surpluses are both exposure and must not offset each other.
+          acc.totalDiscrepancy += Math.abs(countedStock - systemStock) * cost;
         }
         return acc;
       },
@@ -374,7 +425,7 @@ export default function StockAuditPage() {
       countedStock,
       countedStockProvided,
       discrepancy,
-      discrepancyValue: discrepancy * cost,
+      discrepancyValue: Math.abs(discrepancy) * cost,
       cost,
     };
   }), [watchedItems]);
@@ -392,6 +443,11 @@ export default function StockAuditPage() {
     return summary;
   }, { notCounted: 0, shortages: 0, surplus: 0, noChange: 0 }), [reportRows]);
 
+  const reportMetrics = useMemo(
+    () => calculateStockAuditMetrics(reportRows),
+    [reportRows]
+  );
+
   const exportStockTakeReportPdf = async () => {
     if (!stockReportRef.current || reportRows.length === 0) return;
     setIsExportingReport(true);
@@ -407,7 +463,7 @@ export default function StockAuditPage() {
           filename,
           image: { type: 'jpeg', quality: 0.95 },
           html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
-          jsPDF: { unit: 'in', format: 'a4', orientation: 'landscape' },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' },
           pagebreak: { mode: ['css', 'legacy'] },
         })
         .from(stockReportRef.current)
@@ -440,9 +496,16 @@ export default function StockAuditPage() {
       const submittedBy = audit.created_by || audit.createdBy || 'Unknown';
       const approvedBy = audit.approved_by || audit.approvedBy || '-';
       const approvedAt = audit.approved_at || audit.approvedAt;
-      const totalVariance = Number(audit.total_discrepancy_value ?? audit.totalDiscrepancyValue);
+      const totalVariance = historyGrossDiscrepancyValue(audit);
+      const historyMetrics = calculateStockAuditMetrics(items, totalVariance);
       const safeAuditId = auditId.replace(/[^a-z0-9_-]+/gi, '-');
       const filename = `stock-audit-${safeAuditId}.pdf`;
+      const localInventory = await db.inventory.bulkGet(items.map((item) => String(item.inventory_item ?? item.itemId ?? '')));
+      const localInventoryById = new Map(
+        localInventory
+          .filter(Boolean)
+          .map((item) => [String(item!.id), item!])
+      );
       const pdf = new JsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
       const pageWidth = pdf.internal.pageSize.getWidth();
       const pageHeight = pdf.internal.pageSize.getHeight();
@@ -484,23 +547,36 @@ export default function StockAuditPage() {
       writeLabelValue('Reason', String(audit.notes || 'No reason recorded'), margin + contentWidth / 2, 55);
       y += 14;
 
-      pdf.setFillColor(239, 246, 255);
-      pdf.roundedRect(margin, y - 4, contentWidth, 15, 2, 2, 'F');
-      pdf.setFontSize(9);
-      pdf.setTextColor(75, 85, 99);
-      pdf.text('Products', margin + 5, y + 3);
-      pdf.text('Total variance value', margin + contentWidth / 2, y + 3);
-      pdf.setFont('helvetica', 'bold');
-      pdf.setTextColor(17, 24, 39);
-      pdf.text(String(items.length), margin + 5, y + 9);
-      pdf.text(Number.isFinite(totalVariance) ? formatCurrency(totalVariance) : '-', margin + contentWidth / 2, y + 9);
-      y += 25;
+      const summary = [
+        ['Products', String(items.length)],
+        ['Shortage value', formatCurrency(historyMetrics.shortageValue)],
+        ['Overage value', formatCurrency(historyMetrics.overageValue)],
+        [historyMetrics.netValue < 0 ? 'Overall shortage' : historyMetrics.netValue > 0 ? 'Overall overage' : 'Overall balanced', `${historyMetrics.netValue < 0 ? '-' : historyMetrics.netValue > 0 ? '+' : ''}${formatCurrency(Math.abs(historyMetrics.netValue))}`],
+      ];
+      const summaryWidth = contentWidth / summary.length;
+      summary.forEach(([label, value], index) => {
+        const x = margin + index * summaryWidth;
+        pdf.setFillColor(239, 246, 255);
+        pdf.roundedRect(x + 1, y - 4, summaryWidth - 2, 18, 2, 2, 'F');
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(7.5);
+        pdf.setTextColor(75, 85, 99);
+        pdf.text(label, x + 4, y + 2);
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(9.5);
+        pdf.setTextColor(index === 1 || (index === 3 && historyMetrics.netValue < 0) ? 185 : index === 2 || (index === 3 && historyMetrics.netValue > 0) ? 21 : 17, index === 1 || (index === 3 && historyMetrics.netValue < 0) ? 28 : index === 2 || (index === 3 && historyMetrics.netValue > 0) ? 128 : 24, index === 1 || (index === 3 && historyMetrics.netValue < 0) ? 28 : index === 2 || (index === 3 && historyMetrics.netValue > 0) ? 61 : 39);
+        pdf.text(value, x + 4, y + 11);
+      });
+      y += 28;
 
       const columns = [
-        { title: 'Product', x: margin, width: contentWidth * 0.5, align: 'left' as const },
-        { title: 'System stock', x: margin + contentWidth * 0.5, width: contentWidth * 0.17, align: 'right' as const },
-        { title: 'Counted stock', x: margin + contentWidth * 0.67, width: contentWidth * 0.17, align: 'right' as const },
-        { title: 'Variance', x: margin + contentWidth * 0.84, width: contentWidth * 0.16, align: 'right' as const },
+        { title: 'Product', x: margin, width: contentWidth * 0.34, align: 'left' as const },
+        { title: 'System stock', x: margin + contentWidth * 0.34, width: contentWidth * 0.11, align: 'right' as const },
+        { title: 'Counted stock', x: margin + contentWidth * 0.45, width: contentWidth * 0.11, align: 'right' as const },
+        { title: 'Variance', x: margin + contentWidth * 0.56, width: contentWidth * 0.11, align: 'right' as const },
+        { title: 'Direction', x: margin + contentWidth * 0.67, width: contentWidth * 0.10, align: 'left' as const },
+        { title: 'Unit cost', x: margin + contentWidth * 0.77, width: contentWidth * 0.11, align: 'right' as const },
+        { title: 'Value', x: margin + contentWidth * 0.88, width: contentWidth * 0.12, align: 'right' as const },
       ];
       const drawTableHeader = () => {
         pdf.setFillColor(37, 99, 235);
@@ -520,8 +596,16 @@ export default function StockAuditPage() {
         const systemStock = Number(item.system_stock ?? item.systemStock);
         const countedStock = Number(item.counted_stock ?? item.countedStock);
         const discrepancy = Number(item.discrepancy ?? (countedStock - systemStock));
+        const itemId = String(item.inventory_item ?? item.itemId ?? '');
+        const localCost = localInventoryById.get(itemId)?.cost;
+        const unitCost = Number(item.unit_cost ?? item.unitCost ?? item.cost ?? localCost) || 0;
+        const discrepancyValueRaw = item.discrepancy_value ?? item.discrepancyValue;
+        const discrepancyValue = discrepancyValueRaw === undefined || discrepancyValueRaw === null || discrepancyValueRaw === ''
+          ? Math.abs(discrepancy) * unitCost
+          : Math.abs(Number(discrepancyValueRaw) || 0);
+        const direction = stockAuditDirection(discrepancy);
         const nameLines = pdf.splitTextToSize(String(item.inventory_item_name || item.itemName || 'Product'), columns[0].width - 4);
-        const rowHeight = Math.max(8, nameLines.length * 4.5 + 3);
+        const rowHeight = Math.max(8, nameLines.length * 4.5 + 3, pdf.splitTextToSize(direction, columns[4].width - 4).length * 4.5 + 3);
         if (y + rowHeight > pageHeight - margin - 10) {
           pdf.addPage();
           y = margin;
@@ -539,6 +623,13 @@ export default function StockAuditPage() {
         pdf.setTextColor(discrepancy < 0 ? 185 : discrepancy > 0 ? 21 : 17, discrepancy < 0 ? 28 : discrepancy > 0 ? 128 : 24, discrepancy < 0 ? 28 : discrepancy > 0 ? 61 : 39);
         pdf.setFont('helvetica', 'bold');
         pdf.text(`${discrepancy > 0 ? '+' : ''}${historyQuantity(discrepancy)}`, columns[3].x + columns[3].width - 2, y + 4, { align: 'right' });
+        pdf.setFont('helvetica', 'normal');
+        pdf.setTextColor(17, 24, 39);
+        pdf.text(direction, columns[4].x + 2, y + 4);
+        pdf.text(formatCurrency(unitCost), columns[5].x + columns[5].width - 2, y + 4, { align: 'right' });
+        pdf.setFont('helvetica', 'bold');
+        pdf.setTextColor(discrepancy < 0 ? 185 : discrepancy > 0 ? 21 : 17, discrepancy < 0 ? 28 : discrepancy > 0 ? 128 : 17, discrepancy < 0 ? 28 : discrepancy > 0 ? 61 : 39);
+        pdf.text(formatCurrency(discrepancyValue), columns[6].x + columns[6].width - 2, y + 4, { align: 'right' });
         y += rowHeight;
       });
 
@@ -554,6 +645,135 @@ export default function StockAuditPage() {
       toast({ variant: 'destructive', title: 'PDF export failed', description: 'Could not generate this audit report PDF.' });
     } finally {
       setExportingHistoryAuditId(null);
+    }
+  };
+
+  const startAuditSheetComparison = (auditId: string) => {
+    comparisonTargetAuditIdRef.current = auditId;
+    auditSheetInputRef.current?.click();
+  };
+
+  const compareAuditSheet = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    const auditId = comparisonTargetAuditIdRef.current;
+    comparisonTargetAuditIdRef.current = null;
+    if (!file || !auditId) return;
+
+    const audit = auditHistory.find((entry) => String(entry?.id) === auditId);
+    if (!audit) {
+      toast({ variant: 'destructive', title: 'Audit not found', description: 'Refresh audit history and try again.' });
+      return;
+    }
+
+    setIsComparingAuditSheet(true);
+    try {
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      if (!sheet) throw new Error('The workbook does not contain a worksheet.');
+      const rows = XLSX.utils.sheet_to_json<StockCountSheetRow>(sheet, { defval: '', raw: false });
+      if (rows.length === 0) throw new Error('The worksheet is empty.');
+      if (!Object.prototype.hasOwnProperty.call(rows[0], 'Item ID') || !Object.prototype.hasOwnProperty.call(rows[0], 'Counted Stock')) {
+        throw new Error('Use a stock count sheet with Item ID and Counted Stock columns.');
+      }
+
+      const issues: AuditSheetComparisonIssue[] = [];
+      const uploadedById = new Map<string, { itemId: string; productName: string; systemStock: number | null; countedStock: number }>();
+
+      rows.forEach((row, index) => {
+        const rowNumber = index + 2;
+        const itemId = String(row['Item ID'] ?? '').trim();
+        const countedStock = stockCountNumber(row['Counted Stock']);
+        if (countedStock === null) return; // Blank means this product was not counted.
+        if (!itemId) {
+          issues.push({ kind: 'Invalid', itemId: `Row ${rowNumber}`, productName: String(row['Product Name'] || 'Unknown product'), details: 'The row has a counted quantity but no Item ID.' });
+          return;
+        }
+        if (!Number.isFinite(countedStock) || countedStock < 0) {
+          issues.push({ kind: 'Invalid', itemId, productName: String(row['Product Name'] || 'Unknown product'), details: `Invalid counted stock on row ${rowNumber}.` });
+          return;
+        }
+        if (uploadedById.has(itemId)) {
+          issues.push({ kind: 'Invalid', itemId, productName: String(row['Product Name'] || 'Unknown product'), details: `The product appears more than once (row ${rowNumber}).` });
+          return;
+        }
+        uploadedById.set(itemId, {
+          itemId,
+          productName: String(row['Product Name'] || 'Product'),
+          systemStock: stockCountNumber(row['System Stock']),
+          countedStock,
+        });
+      });
+
+      const auditItems = historyItems(audit);
+      const auditById = new Map(auditItems.map((item: any) => [
+        String(item.inventory_item ?? item.itemId ?? ''),
+        item,
+      ]));
+      let matchedCount = 0;
+      let ignoredUnchangedCount = 0;
+
+      uploadedById.forEach((sheetItem) => {
+        const auditItem = auditById.get(sheetItem.itemId);
+        if (!auditItem) {
+          // The audit stores only changed products. A row whose count equals
+          // its sheet system stock was intentionally excluded from the audit.
+          if (sameStockQuantity(sheetItem.systemStock, sheetItem.countedStock)) {
+            ignoredUnchangedCount += 1;
+          } else {
+            issues.push({
+              kind: 'Extra',
+              itemId: sheetItem.itemId,
+              productName: sheetItem.productName,
+              details: 'The sheet records a stock change that is not present in this audit.',
+            });
+          }
+          return;
+        }
+
+        const auditSystemStock = Number(auditItem.system_stock ?? auditItem.systemStock);
+        const auditCountedStock = Number(auditItem.counted_stock ?? auditItem.countedStock);
+        const differences: string[] = [];
+        if (!sameStockQuantity(sheetItem.systemStock, auditSystemStock)) {
+          differences.push(`system stock: sheet ${historyQuantity(sheetItem.systemStock)} vs audit ${historyQuantity(auditSystemStock)}`);
+        }
+        if (!sameStockQuantity(sheetItem.countedStock, auditCountedStock)) {
+          differences.push(`counted stock: sheet ${historyQuantity(sheetItem.countedStock)} vs audit ${historyQuantity(auditCountedStock)}`);
+        }
+
+        if (differences.length > 0) {
+          issues.push({
+            kind: 'Mismatch',
+            itemId: sheetItem.itemId,
+            productName: sheetItem.productName || auditItem.inventory_item_name || auditItem.itemName || 'Product',
+            details: differences.join('; '),
+          });
+        } else {
+          matchedCount += 1;
+        }
+      });
+
+      auditById.forEach((auditItem: any, itemId: string) => {
+        if (uploadedById.has(itemId)) return;
+        issues.push({
+          kind: 'Missing',
+          itemId,
+          productName: auditItem.inventory_item_name || auditItem.itemName || 'Product',
+          details: 'This audited stock change is missing from the uploaded sheet or its count was left blank.',
+        });
+      });
+
+      setAuditSheetComparison({
+        auditId,
+        filename: file.name,
+        matchedCount,
+        ignoredUnchangedCount,
+        issues,
+      });
+    } catch (error) {
+      toast({ variant: 'destructive', title: 'Could not compare audit sheet', description: error instanceof Error ? error.message : 'The selected file could not be read.' });
+    } finally {
+      setIsComparingAuditSheet(false);
     }
   };
 
@@ -588,13 +808,21 @@ export default function StockAuditPage() {
       createdAt: new Date().toISOString(),
       createdBy: user.displayName || user.email,
       status: 'Pending Approval',
-      items: changedItems.map(item => ({
-        itemId: item.id,
-        itemName: item.name,
-        systemStock: Number(item.stockUnits) || 0,
-        countedStock: Number(item.countedStock) || 0,
-        discrepancy: (Number(item.countedStock) || 0) - (Number(item.stockUnits) || 0),
-      })),
+      items: changedItems.map(item => {
+        const cost = item.cost === null || item.cost === undefined ? undefined : Number(item.cost);
+        const discrepancy = (Number(item.countedStock) || 0) - (Number(item.stockUnits) || 0);
+        return {
+          itemId: item.id,
+          itemName: item.name,
+          systemStock: Number(item.stockUnits) || 0,
+          countedStock: Number(item.countedStock) || 0,
+          discrepancy,
+          ...(cost !== undefined && Number.isFinite(cost) ? {
+            unitCost: cost,
+            discrepancyValue: Math.abs(discrepancy) * cost,
+          } : {}),
+        };
+      }),
       totalDiscrepancyValue: totalDiscrepancy,
       notes: auditReason.trim(),
     };
@@ -680,7 +908,7 @@ export default function StockAuditPage() {
     return (
       <Badge variant={isSurplus ? 'default' : 'destructive'} className={isSurplus ? 'bg-green-600' : ''}>
         {isSurplus ? <ChevronUp className="mr-1 h-3 w-3" /> : <ChevronDown className="mr-1 h-3 w-3" />}
-        {isSurplus ? '+' : ''}{discrepancy}
+        {isSurplus ? 'Overage' : 'Shortage'}: {isSurplus ? '+' : ''}{discrepancy}
       </Badge>
     );
   };
@@ -730,7 +958,7 @@ export default function StockAuditPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
           <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                   <CardTitle className="text-sm font-medium">System Stock Value</CardTitle>
@@ -749,14 +977,40 @@ export default function StockAuditPage() {
                   <div className="text-2xl font-bold">{formatCurrency(countedValue)}</div>
               </CardContent>
           </Card>
-          <Card className={cn(totalDiscrepancy !== 0 && (totalDiscrepancy > 0 ? 'border-green-500' : 'border-destructive'))}>
+          <Card className="border-destructive/30 bg-destructive/5 shadow-sm">
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">Discrepancy Value</CardTitle>
+              <CardTitle className="text-sm font-medium text-destructive">Shortage Value</CardTitle>
               </CardHeader>
               <CardContent>
-                  <div className={cn("text-2xl font-bold", totalDiscrepancy !== 0 && (totalDiscrepancy > 0 ? 'text-green-600' : 'text-destructive'))}>
-                    {totalDiscrepancy > 0 ? '+' : ''}{formatCurrency(totalDiscrepancy)}
+                  <div className="text-2xl font-bold text-destructive">{formatCurrency(reportMetrics.shortageValue)}</div>
+                  <p className="mt-1 text-xs text-muted-foreground">{reportMetrics.shortageCount} below system stock</p>
+              </CardContent>
+          </Card>
+          <Card className="border-emerald-500/30 bg-emerald-500/5 shadow-sm">
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium text-emerald-600 dark:text-emerald-400">Overage Value</CardTitle>
+              </CardHeader>
+              <CardContent>
+                  <div className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">{formatCurrency(reportMetrics.overageValue)}</div>
+                  <p className="mt-1 text-xs text-muted-foreground">{reportMetrics.overageCount} above system stock</p>
+              </CardContent>
+          </Card>
+          <Card className={cn(
+            'shadow-sm',
+            reportMetrics.netValue < 0
+              ? 'border-destructive/30 bg-destructive/5'
+              : reportMetrics.netValue > 0
+                ? 'border-emerald-500/30 bg-emerald-500/5'
+                : 'border-border bg-card'
+          )}>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Net Adjustment</CardTitle>
+              </CardHeader>
+              <CardContent>
+                  <div className={cn('text-2xl font-bold', reportMetrics.netValue < 0 ? 'text-destructive' : reportMetrics.netValue > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-foreground')}>
+                    {reportMetrics.netValue < 0 ? '-' : reportMetrics.netValue > 0 ? '+' : ''}{formatCurrency(Math.abs(reportMetrics.netValue))}
                   </div>
+                  <p className="mt-1 text-xs text-muted-foreground">Overage minus shortage</p>
               </CardContent>
           </Card>
       </div>
@@ -784,7 +1038,7 @@ export default function StockAuditPage() {
                     <TableHead className="w-40 text-right">Counted Stock</TableHead>
                     <TableHead className="text-right">Discrepancy</TableHead>
                     <TableHead className="text-right">Cost/Unit</TableHead>
-                    <TableHead className="text-right">Discrepancy Value</TableHead>
+                    <TableHead className="text-right">Value (Shortage/Overage)</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -796,7 +1050,7 @@ export default function StockAuditPage() {
                     const countedStock = countedStockProvided ? (Number(watchedItem?.countedStock) || 0) : 0;
                     const cost = Number(field.cost) || 0;
                     const discrepancy = countedStockProvided ? countedStock - systemStock : 0;
-                    const discrepancyValue = countedStockProvided ? discrepancy * cost : 0;
+                    const discrepancyValue = countedStockProvided ? Math.abs(discrepancy) * cost : 0;
                     const countedStockRegistration = form.register(`items.${index}.countedStock`);
                     
                     return (
@@ -819,8 +1073,8 @@ export default function StockAuditPage() {
                             <TableCell className="text-right">{renderDiscrepancy(form.watch(`items.${index}`))}
                             </TableCell>
                              <TableCell className="text-right font-mono">{formatCurrency(cost)}</TableCell>
-                            <TableCell className={cn("text-right font-semibold", discrepancyValue !== 0 && (discrepancyValue > 0 ? 'text-green-600' : 'text-destructive'))}>
-                                {discrepancyValue > 0 ? '+' : ''}{formatCurrency(discrepancyValue)}
+                            <TableCell className={cn("text-right font-semibold", discrepancyValue !== 0 && (discrepancy > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-destructive'))}>
+                                {formatCurrency(discrepancyValue)}
                             </TableCell>
                         </TableRow>
                     );
@@ -861,9 +1115,17 @@ export default function StockAuditPage() {
                         <span className="font-medium">{getValues('items')?.filter(i => i.countedStockProvided !== false && (Number(i.countedStock) || 0) > (i.stockUnits || 0)).length || 0}</span>
                     </div>
                     <div className="flex justify-between font-semibold pt-2 border-t">
-                        <span>Total Discrepancy Value:</span>
-                        <span className={cn(totalDiscrepancy !== 0 && (totalDiscrepancy > 0 ? 'text-green-600' : 'text-destructive'))}>
-                          {totalDiscrepancy >= 0 ? `+${formatCurrency(totalDiscrepancy)}` : `-${formatCurrency(Math.abs(totalDiscrepancy))}`}
+                        <span>Shortage Value:</span>
+                        <span className="text-destructive">{formatCurrency(reportMetrics.shortageValue)}</span>
+                    </div>
+                    <div className="flex justify-between font-semibold">
+                        <span>Overage Value:</span>
+                        <span className="text-emerald-600 dark:text-emerald-400">{formatCurrency(reportMetrics.overageValue)}</span>
+                    </div>
+                    <div className="flex justify-between font-semibold">
+                        <span>Net Adjustment:</span>
+                        <span className={reportMetrics.netValue < 0 ? 'text-destructive' : reportMetrics.netValue > 0 ? 'text-emerald-600 dark:text-emerald-400' : ''}>
+                          {reportMetrics.netValue < 0 ? '-' : reportMetrics.netValue > 0 ? '+' : ''}{formatCurrency(Math.abs(reportMetrics.netValue))}
                         </span>
                     </div>
                 </CardContent>
@@ -887,6 +1149,14 @@ export default function StockAuditPage() {
             )}
         </DialogContent>
       </Dialog>
+
+      <input
+        ref={auditSheetInputRef}
+        type="file"
+        accept=".xlsx,.xls"
+        className="hidden"
+        onChange={(event) => void compareAuditSheet(event)}
+      />
 
       <Dialog open={isHistoryDialogOpen} onOpenChange={setIsHistoryDialogOpen}>
         <DialogContent className="max-w-6xl">
@@ -926,7 +1196,8 @@ export default function StockAuditPage() {
                     const isExpanded = expandedAuditId === auditId;
                     const status = historyStatusLabel(audit);
                     const items = historyItems(audit);
-                    const totalVariance = Number(audit.total_discrepancy_value ?? audit.totalDiscrepancyValue);
+                    const totalVariance = historyGrossDiscrepancyValue(audit);
+                    const historyMetrics = calculateStockAuditMetrics(items, totalVariance);
                     const statusVariant = status === 'Rejected' ? 'destructive' : status === 'Approved' ? 'default' : 'secondary';
 
                     return (
@@ -946,7 +1217,13 @@ export default function StockAuditPage() {
                             <p className="text-xs text-muted-foreground">Submitted by {audit.created_by || audit.createdBy || 'Unknown'} · {items.length} item{items.length === 1 ? '' : 's'}</p>
                           </div>
                           <div className="flex shrink-0 items-center gap-3">
-                            <div className="hidden text-right sm:block"><p className="text-xs text-muted-foreground">Total variance</p><p className={cn('font-semibold', totalVariance > 0 ? 'text-green-600' : totalVariance < 0 ? 'text-destructive' : '')}>{Number.isFinite(totalVariance) ? formatCurrency(totalVariance) : '-'}</p></div>
+                            <div className="hidden text-right sm:block">
+                              <div className="grid grid-cols-3 gap-3 text-xs">
+                                <div><p className="text-red-600">Shortage</p><p className="font-semibold text-red-800">{formatCurrency(historyMetrics.shortageValue)}</p></div>
+                                <div><p className="text-green-600">Overage</p><p className="font-semibold text-green-800">{formatCurrency(historyMetrics.overageValue)}</p></div>
+                                <div><p className={historyMetrics.netValue < 0 ? 'text-red-600' : historyMetrics.netValue > 0 ? 'text-green-600' : 'text-muted-foreground'}>{historyMetrics.netValue < 0 ? 'Overall shortage' : historyMetrics.netValue > 0 ? 'Overall overage' : 'Overall balanced'}</p><p className={cn('font-semibold', historyMetrics.netValue < 0 ? 'text-red-800' : historyMetrics.netValue > 0 ? 'text-green-800' : 'text-foreground')}>{historyMetrics.netValue < 0 ? '-' : historyMetrics.netValue > 0 ? '+' : ''}{formatCurrency(Math.abs(historyMetrics.netValue))}</p></div>
+                              </div>
+                            </div>
                             {isExpanded ? <ChevronUp className="h-5 w-5 text-muted-foreground" /> : <ChevronDown className="h-5 w-5 text-muted-foreground" />}
                           </div>
                         </button>
@@ -968,16 +1245,28 @@ export default function StockAuditPage() {
                                 {exportingHistoryAuditId === auditId ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
                                 {exportingHistoryAuditId === auditId ? 'Exporting…' : 'Download PDF'}
                               </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => startAuditSheetComparison(auditId)}
+                                disabled={isComparingAuditSheet || items.length === 0}
+                              >
+                                {isComparingAuditSheet ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                                Compare Excel
+                              </Button>
                             </div>
                             <div className="overflow-x-auto rounded-md border bg-background">
                               <Table>
-                                <TableHeader><TableRow><TableHead>Product</TableHead><TableHead className="text-right">System stock</TableHead><TableHead className="text-right">Counted stock</TableHead><TableHead className="text-right">Variance</TableHead></TableRow></TableHeader>
+                                <TableHeader><TableRow><TableHead>Product</TableHead><TableHead className="text-right">System stock</TableHead><TableHead className="text-right">Counted stock</TableHead><TableHead className="text-right">Variance</TableHead><TableHead className="text-right">Value / direction</TableHead></TableRow></TableHeader>
                                 <TableBody>
-                                  {items.length === 0 ? <TableRow><TableCell colSpan={4} className="py-6 text-center text-sm text-muted-foreground">No item details recorded.</TableCell></TableRow> : items.map((item: any, index: number) => {
+                                  {items.length === 0 ? <TableRow><TableCell colSpan={5} className="py-6 text-center text-sm text-muted-foreground">No item details recorded.</TableCell></TableRow> : items.map((item: any, index: number) => {
                                     const systemStock = Number(item.system_stock ?? item.systemStock);
                                     const countedStock = Number(item.counted_stock ?? item.countedStock);
                                     const discrepancy = Number(item.discrepancy ?? (countedStock - systemStock));
-                                    return <TableRow key={item.id || index}><TableCell className="font-medium">{item.inventory_item_name || item.itemName || 'Product'}</TableCell><TableCell className="text-right">{historyQuantity(systemStock)}</TableCell><TableCell className="text-right">{historyQuantity(countedStock)}</TableCell><TableCell className={cn('text-right font-semibold', discrepancy > 0 ? 'text-green-600' : discrepancy < 0 ? 'text-destructive' : '')}>{discrepancy > 0 ? '+' : ''}{historyQuantity(discrepancy)}</TableCell></TableRow>;
+                                    const itemValue = Number(item.discrepancy_value ?? item.discrepancyValue) || Math.abs(discrepancy) * (Number(item.unit_cost ?? item.unitCost ?? item.cost) || 0);
+                                    const direction = stockAuditDirection(discrepancy);
+                                    return <TableRow key={item.id || index}><TableCell className="font-medium">{item.inventory_item_name || item.itemName || 'Product'}</TableCell><TableCell className="text-right">{historyQuantity(systemStock)}</TableCell><TableCell className="text-right">{historyQuantity(countedStock)}</TableCell><TableCell className={cn('text-right font-semibold', discrepancy > 0 ? 'text-green-600' : discrepancy < 0 ? 'text-destructive' : '')}>{direction}: {discrepancy > 0 ? '+' : ''}{historyQuantity(discrepancy)}</TableCell><TableCell className={cn('text-right font-semibold', discrepancy > 0 ? 'text-green-600' : discrepancy < 0 ? 'text-destructive' : '')}>{direction}: {formatCurrency(itemValue)}</TableCell></TableRow>;
                                   })}
                                 </TableBody>
                               </Table>
@@ -994,9 +1283,66 @@ export default function StockAuditPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={Boolean(auditSheetComparison)}
+        onOpenChange={(open) => { if (!open) setAuditSheetComparison(null); }}
+      >
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Compare uploaded audit sheet</DialogTitle>
+            <DialogDescription>
+              {auditSheetComparison
+                ? `${auditSheetComparison.filename} compared with audit ${auditSheetComparison.auditId}.`
+                : 'Compare the uploaded counts with the saved audit.'}
+            </DialogDescription>
+          </DialogHeader>
+          {auditSheetComparison && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <Card className="border-emerald-500/25 bg-emerald-500/5"><CardContent className="p-3"><p className="text-xs uppercase tracking-wide text-muted-foreground">Matched</p><p className="mt-1 text-2xl font-bold text-emerald-600 dark:text-emerald-400">{auditSheetComparison.matchedCount}</p></CardContent></Card>
+                <Card><CardContent className="p-3"><p className="text-xs uppercase tracking-wide text-muted-foreground">Differences</p><p className="mt-1 text-2xl font-bold text-destructive">{auditSheetComparison.issues.filter((issue) => issue.kind === 'Mismatch').length}</p></CardContent></Card>
+                <Card className="border-amber-500/25 bg-amber-500/5"><CardContent className="p-3"><p className="text-xs uppercase tracking-wide text-muted-foreground">Missing</p><p className="mt-1 text-2xl font-bold text-amber-600 dark:text-amber-400">{auditSheetComparison.issues.filter((issue) => issue.kind === 'Missing').length}</p></CardContent></Card>
+                <Card><CardContent className="p-3"><p className="text-xs uppercase tracking-wide text-muted-foreground">Extra / invalid</p><p className="mt-1 text-2xl font-bold">{auditSheetComparison.issues.filter((issue) => issue.kind === 'Extra' || issue.kind === 'Invalid').length}</p></CardContent></Card>
+              </div>
+
+              <p className="text-sm text-muted-foreground">
+                {auditSheetComparison.ignoredUnchangedCount} unchanged product{auditSheetComparison.ignoredUnchangedCount === 1 ? '' : 's'} ignored because approved audits store only stock changes.
+              </p>
+
+              {auditSheetComparison.issues.length === 0 ? (
+                <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-5 text-center text-sm text-emerald-700 dark:text-emerald-300">
+                  The uploaded sheet matches every stock change recorded in this audit.
+                </div>
+              ) : (
+                <div className="max-h-[45vh] overflow-y-auto rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow><TableHead>Status</TableHead><TableHead>Product</TableHead><TableHead>Item ID</TableHead><TableHead>Details</TableHead></TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {auditSheetComparison.issues.map((issue, index) => (
+                        <TableRow key={`${issue.itemId}-${index}`}>
+                          <TableCell><Badge variant={issue.kind === 'Mismatch' ? 'destructive' : issue.kind === 'Missing' ? 'outline' : 'secondary'}>{issue.kind}</Badge></TableCell>
+                          <TableCell className="font-medium">{issue.productName}</TableCell>
+                          <TableCell className="font-mono text-xs">{issue.itemId}</TableCell>
+                          <TableCell className="text-sm text-muted-foreground">{issue.details}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAuditSheetComparison(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={isReportDialogOpen} onOpenChange={setIsReportDialogOpen}>
-        <DialogContent className="max-w-[96vw] gap-0 overflow-hidden p-0 sm:max-w-7xl">
-          <DialogHeader className="relative overflow-hidden border-b bg-gradient-to-br from-primary/10 via-background to-background px-6 py-6 text-left">
+        <DialogContent className="max-w-[96vw] gap-0 overflow-hidden border-border bg-background p-0 shadow-2xl sm:max-w-7xl">
+          <DialogHeader className="relative overflow-hidden border-b border-border bg-gradient-to-br from-primary/15 via-card to-background px-6 py-6 text-left">
             <div className="absolute inset-x-0 top-0 h-1 bg-primary" />
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="space-y-1.5">
@@ -1011,14 +1357,14 @@ export default function StockAuditPage() {
                   Review every uploaded count against the latest system stock. Your inventory remains unchanged until an authorized manager approves the audit.
                 </DialogDescription>
               </div>
-              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 sm:max-w-xs">
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300 sm:max-w-xs">
                 <p className="font-semibold">Review before submitting</p>
                 <p className="mt-0.5 leading-5">Not counted products are excluded. A zero is treated as a real counted quantity.</p>
               </div>
             </div>
           </DialogHeader>
 
-          <div className="overflow-x-auto border-b bg-card px-6 py-3">
+          <div className="overflow-x-auto border-b border-border bg-card px-6 py-3">
             <div className="mx-auto flex min-w-[520px] max-w-3xl items-center justify-between gap-3 text-xs">
               <div className="flex items-center gap-2 font-semibold text-primary">
                 <span className="flex h-7 w-7 items-center justify-center rounded-full bg-primary text-sm text-primary-foreground shadow-sm">1</span>
@@ -1037,40 +1383,42 @@ export default function StockAuditPage() {
             </div>
           </div>
 
-          <div className="max-h-[72vh] overflow-y-auto bg-background px-6 py-5">
-            <div ref={stockReportRef} className="space-y-5 bg-white text-black">
-              <div className="flex flex-col gap-4 border-b pb-4 lg:flex-row lg:items-end lg:justify-between">
+          <div className="max-h-[72vh] overflow-y-auto bg-background px-4 py-5 sm:px-6">
+            <div ref={stockReportRef} className="space-y-5 bg-card text-card-foreground">
+              <div className="flex flex-col gap-4 border-b border-border pb-4 lg:flex-row lg:items-end lg:justify-between">
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">Stock take report</p>
-                  <h2 className="mt-1 text-xl font-bold">Physical count reconciliation</h2>
-                  <p className="mt-1 text-sm text-gray-600">Branch: {activeBranchId || '-'} · Prepared: {new Date().toLocaleString()}</p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Stock take report</p>
+                  <h2 className="mt-1 text-xl font-bold text-foreground">Physical count reconciliation</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">Branch: {activeBranchId || '-'} · Prepared: {new Date().toLocaleString()}</p>
                 </div>
-                <div className="grid grid-cols-3 gap-4 rounded-lg border bg-gray-50 px-4 py-3 text-right text-sm">
-                  <div><div className="text-xs text-gray-500">System value</div><div className="mt-1 font-semibold">{formatCurrency(totalValue)}</div></div>
-                  <div><div className="text-xs text-gray-500">Counted value</div><div className="mt-1 font-semibold">{formatCurrency(countedValue)}</div></div>
-                  <div><div className="text-xs text-gray-500">Variance</div><div className={cn('mt-1 font-semibold', totalDiscrepancy > 0 ? 'text-green-700' : totalDiscrepancy < 0 ? 'text-red-700' : 'text-gray-900')}>{totalDiscrepancy > 0 ? '+' : ''}{formatCurrency(totalDiscrepancy)}</div></div>
+                <div className="grid grid-cols-2 gap-3 rounded-xl border border-border bg-muted/30 px-4 py-3 text-right text-sm sm:grid-cols-5">
+                  <div><div className="text-xs text-muted-foreground">System value</div><div className="mt-1 font-semibold text-foreground">{formatCurrency(totalValue)}</div></div>
+                  <div><div className="text-xs text-muted-foreground">Counted value</div><div className="mt-1 font-semibold text-foreground">{formatCurrency(countedValue)}</div></div>
+                  <div><div className="text-xs text-destructive">Shortage value</div><div className="mt-1 font-semibold text-destructive">{formatCurrency(reportMetrics.shortageValue)}</div></div>
+                  <div><div className="text-xs text-emerald-600 dark:text-emerald-400">Overage value</div><div className="mt-1 font-semibold text-emerald-600 dark:text-emerald-400">{formatCurrency(reportMetrics.overageValue)}</div></div>
+                  <div><div className="text-xs text-muted-foreground">Net adjustment</div><div className={cn('mt-1 font-semibold', reportMetrics.netValue < 0 ? 'text-destructive' : reportMetrics.netValue > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-foreground')}>{reportMetrics.netValue < 0 ? '-' : reportMetrics.netValue > 0 ? '+' : ''}{formatCurrency(Math.abs(reportMetrics.netValue))}</div></div>
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                <div className="rounded-lg border border-blue-200 bg-blue-50 p-3"><p className="text-xs font-medium uppercase tracking-wide text-blue-700">Reviewed</p><p className="mt-1 text-2xl font-bold text-blue-950">{reportRows.length - reportSummary.notCounted}</p><p className="text-xs text-blue-700">products counted</p></div>
-                <div className="rounded-lg border border-red-200 bg-red-50 p-3"><p className="text-xs font-medium uppercase tracking-wide text-red-700">Shortages</p><p className="mt-1 text-2xl font-bold text-red-950">{reportSummary.shortages}</p><p className="text-xs text-red-700">below system stock</p></div>
-                <div className="rounded-lg border border-green-200 bg-green-50 p-3"><p className="text-xs font-medium uppercase tracking-wide text-green-700">Surplus</p><p className="mt-1 text-2xl font-bold text-green-950">{reportSummary.surplus}</p><p className="text-xs text-green-700">above system stock</p></div>
-                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-medium uppercase tracking-wide text-amber-700">Not counted</p><p className="mt-1 text-2xl font-bold text-amber-950">{reportSummary.notCounted}</p><p className="text-xs text-amber-700">excluded from audit</p></div>
+                <div className="rounded-xl border border-primary/25 bg-primary/5 p-3"><p className="text-xs font-medium uppercase tracking-wide text-primary">Reviewed</p><p className="mt-1 text-2xl font-bold text-foreground">{reportRows.length - reportSummary.notCounted}</p><p className="text-xs text-muted-foreground">products counted</p></div>
+                <div className="rounded-xl border border-destructive/25 bg-destructive/5 p-3"><p className="text-xs font-medium uppercase tracking-wide text-destructive">Shortages</p><p className="mt-1 text-2xl font-bold text-destructive">{reportSummary.shortages}</p><p className="text-xs text-muted-foreground">below system stock</p></div>
+                <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-3"><p className="text-xs font-medium uppercase tracking-wide text-emerald-600 dark:text-emerald-400">Overages</p><p className="mt-1 text-2xl font-bold text-emerald-600 dark:text-emerald-400">{reportSummary.surplus}</p><p className="text-xs text-muted-foreground">above system stock</p></div>
+                <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-3"><p className="text-xs font-medium uppercase tracking-wide text-amber-600 dark:text-amber-400">Not counted</p><p className="mt-1 text-2xl font-bold text-foreground">{reportSummary.notCounted}</p><p className="text-xs text-muted-foreground">excluded from audit</p></div>
               </div>
 
-              <div className="overflow-x-auto rounded-xl border">
+              <div className="overflow-x-auto rounded-xl border border-border">
                 <Table className="min-w-[980px] text-xs">
-                  <TableHeader className="bg-gray-50">
+                  <TableHeader className="bg-muted/50">
                     <TableRow>
-                      <TableHead className="text-gray-700">Product</TableHead>
-                      <TableHead className="text-gray-700">SKU / Barcode</TableHead>
-                      <TableHead className="text-right text-gray-700">System</TableHead>
-                      <TableHead className="text-right text-gray-700">Counted</TableHead>
-                      <TableHead className="text-right text-gray-700">Variance</TableHead>
-                      <TableHead className="text-right text-gray-700">Unit cost</TableHead>
-                      <TableHead className="text-right text-gray-700">Variance value</TableHead>
-                      <TableHead className="text-gray-700">Status</TableHead>
+                      <TableHead>Product</TableHead>
+                      <TableHead>SKU / Barcode</TableHead>
+                      <TableHead className="text-right">System</TableHead>
+                      <TableHead className="text-right">Counted</TableHead>
+                      <TableHead className="text-right">Variance</TableHead>
+                      <TableHead className="text-right">Unit cost</TableHead>
+                      <TableHead className="text-right">Variance value</TableHead>
+                      <TableHead>Status</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -1078,14 +1426,14 @@ export default function StockAuditPage() {
                       const status = !item.countedStockProvided ? 'Not counted' : item.discrepancy === 0 ? 'No change' : item.discrepancy > 0 ? 'Surplus' : 'Shortage';
                       const statusVariant = status === 'Shortage' ? 'destructive' : status === 'Surplus' ? 'default' : status === 'Not counted' ? 'outline' : 'secondary';
                       return (
-                        <TableRow key={item.id} className="odd:bg-gray-50/60">
-                          <TableCell className="font-medium text-black">{item.name}</TableCell>
-                          <TableCell className="text-gray-700">{item.sku || item.productCode || '-'}{item.barcode ? ` / ${item.barcode}` : ''}</TableCell>
-                          <TableCell className="text-right text-black">{item.systemStock} {item.unitType || ''}</TableCell>
-                          <TableCell className="text-right text-black">{item.countedStockProvided ? `${item.countedStock} ${item.unitType || ''}` : 'Not counted'}</TableCell>
-                          <TableCell className={cn('text-right font-semibold', item.countedStockProvided && (item.discrepancy > 0 ? 'text-green-700' : item.discrepancy < 0 ? 'text-red-700' : 'text-black'))}>{item.countedStockProvided ? `${item.discrepancy > 0 ? '+' : ''}${item.discrepancy}` : '—'}</TableCell>
-                          <TableCell className="text-right text-black">{formatCurrency(item.cost)}</TableCell>
-                          <TableCell className={cn('text-right font-semibold', item.countedStockProvided && (item.discrepancyValue > 0 ? 'text-green-700' : item.discrepancyValue < 0 ? 'text-red-700' : 'text-black'))}>{item.countedStockProvided ? `${item.discrepancyValue > 0 ? '+' : ''}${formatCurrency(item.discrepancyValue)}` : '—'}</TableCell>
+                        <TableRow key={item.id} className="odd:bg-muted/20">
+                          <TableCell className="font-medium text-foreground">{item.name}</TableCell>
+                          <TableCell className="text-muted-foreground">{item.sku || item.productCode || '-'}{item.barcode ? ` / ${item.barcode}` : ''}</TableCell>
+                          <TableCell className="text-right text-foreground">{item.systemStock} {item.unitType || ''}</TableCell>
+                          <TableCell className="text-right text-foreground">{item.countedStockProvided ? `${item.countedStock} ${item.unitType || ''}` : 'Not counted'}</TableCell>
+                          <TableCell className={cn('text-right font-semibold', item.countedStockProvided && (item.discrepancy > 0 ? 'text-emerald-600 dark:text-emerald-400' : item.discrepancy < 0 ? 'text-destructive' : 'text-foreground'))}>{item.countedStockProvided ? `${item.discrepancy > 0 ? '+' : ''}${item.discrepancy}` : '—'}</TableCell>
+                          <TableCell className="text-right text-foreground">{formatCurrency(item.cost)}</TableCell>
+                          <TableCell className={cn('text-right font-semibold', item.countedStockProvided && (item.discrepancy > 0 ? 'text-emerald-600 dark:text-emerald-400' : item.discrepancy < 0 ? 'text-destructive' : 'text-foreground'))}>{item.countedStockProvided ? `${stockAuditDirection(item.discrepancy)}: ${formatCurrency(item.discrepancyValue)}` : '—'}</TableCell>
                           <TableCell><Badge variant={statusVariant}>{status}</Badge></TableCell>
                         </TableRow>
                       );

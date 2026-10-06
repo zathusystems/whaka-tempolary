@@ -455,7 +455,8 @@ export async function generatePurchaseInvoicePDF({
       filename,
       image: { type: 'jpeg', quality: 0.98 },
       html2canvas: { scale: 2, useCORS: true },
-      jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
+      // Keep purchase invoice exports consistent with the rest of the application: A4 paper.
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
     })
     .from(container)
     .save();

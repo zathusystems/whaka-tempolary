@@ -377,7 +377,8 @@ export async function generateInvoicePDF(invoice: Invoice, businessName: string,
     filename: `Invoice_${invoice.invoiceNumber}_Copies.pdf`,
     image: { type: 'jpeg', quality: 0.98 },
     html2canvas: { scale: 2 },
-    jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
+    // Keep invoice exports consistent with the rest of the application: A4 paper.
+    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
   };
 
   return html2pdf().set(options).from(container).save();

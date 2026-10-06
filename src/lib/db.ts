@@ -437,6 +437,8 @@ export interface StockTakeItem {
     systemStock: number;
     countedStock: number;
     discrepancy: number;
+    unitCost?: number;
+    discrepancyValue?: number;
 }
 
 export interface StockTake {
@@ -837,6 +839,12 @@ export class HandyPosDatabase extends Dexie {
         // once a branch already had an approved audit.
         this.version(37).stores({
             stockTakes: 'id, branchId, createdAt, status, _dirty, [branchId+status]',
+        });
+
+        // Reports query orders by branch and date. Keep that range query indexed
+        // so large local order histories do not have to be scanned in full.
+        this.version(38).stores({
+            orders: 'id, orderNumber, status, createdAt, updatedAt, branchId, sessionId, _dirty, &[branchId+status+createdAt], [branchId+createdAt]',
         });
     }
 }

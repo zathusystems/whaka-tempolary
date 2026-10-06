@@ -534,17 +534,31 @@ class StockAuditItemSerializer(serializers.ModelSerializer):
         source='inventory_item.name',
         read_only=True
     )
+    unit_cost = serializers.SerializerMethodField()
+    discrepancy_value = serializers.SerializerMethodField()
+
+    def get_unit_cost(self, obj):
+        # New audits use the immutable snapshot. Older rows fall back to the
+        # current product cost because they predate the snapshot fields.
+        return obj.unit_cost_snapshot if obj.unit_cost_snapshot is not None else obj.inventory_item.cost
+
+    def get_discrepancy_value(self, obj):
+        if obj.discrepancy_value_snapshot is not None:
+            return obj.discrepancy_value_snapshot
+        cost = obj.inventory_item.cost or Decimal('0')
+        return (abs(obj.discrepancy) * cost).quantize(Decimal('0.01'))
     
     class Meta:
         model = StockAuditItem
         fields = [
             'id', 'inventory_item', 'inventory_item_name',
-            'system_stock', 'counted_stock', 'discrepancy'
+            'system_stock', 'counted_stock', 'discrepancy',
+            'unit_cost', 'discrepancy_value'
         ]
         # The server captures the live system stock when the audit is created.
         # Clients submit only the physical counted quantity and must not be
         # required or allowed to provide a stale spreadsheet snapshot.
-        read_only_fields = ['id', 'system_stock', 'discrepancy']
+        read_only_fields = ['id', 'system_stock', 'discrepancy', 'unit_cost', 'discrepancy_value']
 
 
 class StockAuditSerializer(serializers.ModelSerializer):

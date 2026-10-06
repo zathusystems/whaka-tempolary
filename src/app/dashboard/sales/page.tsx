@@ -38,7 +38,6 @@ import {
 } from 'recharts';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useForm, useFieldArray } from 'react-hook-form';
-import Papa from 'papaparse';
 
 import { useReports } from '@/hooks/use-reports';
 import { useAuth } from '@/hooks/use-auth';
@@ -91,8 +90,13 @@ import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { logAuditAction } from '@/lib/audit';
-import { downloadTextFile } from '@/lib/file-download';
 import { calculateZReportSummary } from '@/lib/z-report-print';
+import {
+  saveFinancialReportPdf,
+  saveMraAuditPdf,
+  type FinancialReportPdfData,
+  type MraAuditPdfRow,
+} from '@/lib/financial-report-pdf';
 import {
   getProductReportingCategoryMeta,
   type ProductReportingCategory,
@@ -464,7 +468,6 @@ export default function ReportsPage() {
     const [isEisEnabled, setIsEisEnabled] = useState(false);
     const [fiscalYearStartMonth, setFiscalYearStartMonth] = useState(1);
     const { format: formatCurrency } = useCurrency();
-    const { data, loading, error } = useReports(date);
 
     // Get active branch from localStorage
     React.useEffect(() => {
@@ -508,11 +511,14 @@ export default function ReportsPage() {
     const allOrders = useLiveQuery(async () => {
         if (!activeBranchId) return undefined;
         const orders = await db.orders
-            .where('branchId').equals(activeBranchId)
-            .and(order => order.createdAt >= fromDate && order.createdAt <= toDate)
+            .where('[branchId+createdAt]')
+            .between([activeBranchId, fromDate], [activeBranchId, toDate], true, true)
             .toArray();
         return sortOrdersByMostRecent(orders);
     }, [activeBranchId, fromDate, toDate]);
+
+    const reportOrdersLoading = activeBranchId !== null && allOrders === undefined;
+    const { data, loading, error } = useReports(date, allOrders, reportOrdersLoading);
 
     const orderPagination = usePaginatedItems(allOrders ?? [], 25);
 
@@ -546,19 +552,20 @@ export default function ReportsPage() {
         
         const intervalDays = eachDayOfInterval({ start: date.from, end: date.to || date.from });
         
+        const salesByDay = new Map<string, number>();
+        activeOrders.forEach((order) => {
+            const orderDate = new Date(order.createdAt);
+            if (Number.isNaN(orderDate.getTime())) return;
+            const dayKey = format(orderDate, 'yyyy-MM-dd');
+            salesByDay.set(dayKey, (salesByDay.get(dayKey) || 0) + order.total);
+        });
+
         const dataByDay = intervalDays.map(day => {
-            const dayStart = startOfDay(day);
-            const dayEnd = endOfDay(day);
-            const daySales = activeOrders
-                .filter(order => {
-                    const orderDate = new Date(order.createdAt);
-                    return orderDate >= dayStart && orderDate <= dayEnd;
-                })
-                .reduce((sum, order) => sum + order.total, 0);
+            const dayKey = format(day, 'yyyy-MM-dd');
 
             return {
                 name: format(day, 'MMM d'),
-                total: daySales,
+                total: salesByDay.get(dayKey) || 0,
             };
         });
         return dataByDay;
@@ -602,49 +609,59 @@ export default function ReportsPage() {
         { title: 'Fiscal Rejected', value: `${eisSummary.eisStatusCounts.rejected}`, icon: X },
     ];
 
-    const handleExportReport = () => {
-        if (!allOrders || allOrders.length === 0) {
+    const handleExportReport = async () => {
+        if (loading) {
+            toast({
+                title: 'Report is still loading',
+                description: 'Please wait for the selected-period figures to finish loading.',
+            });
+            return;
+        }
+
+        const hasReportData = Boolean(
+            data.totalTransactions > 0 ||
+            data.totalSales !== 0 ||
+            data.totalExpenses !== 0 ||
+            data.salesByCategory.length > 0
+        );
+        if (!hasReportData) {
             toast({
                 variant: 'destructive',
                 title: 'No data to export',
-                description: 'There are no orders in the selected date range.',
+                description: 'There are no report figures in the selected date range.',
             });
             return;
         }
 
-        const rows = allOrders.map((order) => ({
-            order_number: order.orderNumber,
-            created_at: order.createdAt,
-            status: order.status,
-            payment_method: order.paymentMethod,
-            subtotal: Number(order.subtotal ?? order.netAmount ?? order.net_amount ?? 0),
-            tax: Number(order.tax ?? order.vatAmount ?? order.vat_amount ?? 0),
-            total: Number(order.total ?? order.grossAmount ?? order.gross_amount ?? 0),
-            cogs: Number(order.cogs ?? 0),
-        }));
-
-        const csv = Papa.unparse(rows);
-        const fromLabel = date?.from ? format(date.from, 'yyyy-MM-dd') : 'from';
-        const toLabel = format(date?.to || date?.from || new Date(), 'yyyy-MM-dd');
-        const filename = `financial-report-${fromLabel}-to-${toLabel}.csv`;
-        const downloadStarted = downloadTextFile(csv, filename);
-
-        if (!downloadStarted) {
+        try {
+            const reportData: FinancialReportPdfData = {
+                ...data,
+                salesTrend: salesChartData,
+            };
+            const downloadStarted = await saveFinancialReportPdf(reportData, date?.from, date?.to, formatCurrency);
+            if (downloadStarted) {
+                toast({
+                    title: 'PDF export complete',
+                    description: 'The selected-period financial summary was downloaded as a PDF.',
+                });
+                return;
+            }
             toast({
                 variant: 'destructive',
                 title: 'Export failed',
-                description: 'Could not start file download. Please try again.',
+                description: 'Could not save the PDF. Please try again.',
             });
-            return;
+        } catch (error) {
+            console.error('[Reports] Financial PDF export failed:', error);
+            toast({
+                variant: 'destructive',
+                title: 'Export failed',
+                description: 'Could not generate the PDF. Please try again.',
+            });
         }
-
-        toast({
-            title: 'Export complete',
-            description: `${rows.length} records downloaded as ${filename}.`,
-        });
     };
 
-    const handleExportMraAudit = () => {
+    const handleExportMraAudit = async () => {
         if (!normalizedOrdersForEis || normalizedOrdersForEis.length === 0) {
             toast({
                 variant: 'destructive',
@@ -672,31 +689,31 @@ export default function ReportsPage() {
                     : '';
 
                 return {
-                    receipt_id: order.id,
-                    order_number: order.orderNumber,
-                    created_at: order.createdAt,
+                    receiptId: order.id,
+                    orderNumber: order.orderNumber,
+                    createdAt: order.createdAt,
                     status: order.status,
-                    payment_method: order.paymentMethod,
+                    paymentMethod: order.paymentMethod,
                     subtotal: Number(order.subtotal ?? order.netAmount ?? order.net_amount ?? 0),
                     tax: Number(order.tax ?? order.vatAmount ?? order.vat_amount ?? 0),
                     total: Number(order.total ?? order.grossAmount ?? order.gross_amount ?? 0),
-                    fiscal_invoice_number: fiscalInvoice,
-                    eis_status: eisStatus,
-                    eis_uuid: toTrimmedString((order as any)?.eisUuid ?? (order as any)?.eis_uuid),
-                    eis_submitted_at: toTrimmedString((order as any)?.eisSubmittedAt ?? (order as any)?.eis_submitted_at),
-                    qr_code_payload: toTrimmedString((order as any)?.qrCodePayload ?? (order as any)?.qr_code_payload),
-                    digital_signature: toTrimmedString((order as any)?.digitalSignature ?? (order as any)?.digital_signature),
-                    buyer_name: buyer.name,
-                    buyer_phone: buyer.phone,
-                    buyer_tin: buyer.tin,
-                    buyer_email: buyer.email,
-                    buyer_address: buyer.address,
-                    branch_id: order.branchId,
-                    session_id: order.sessionId,
+                    fiscalInvoiceNumber: fiscalInvoice,
+                    eisStatus,
+                    eisUuid: toTrimmedString((order as any)?.eisUuid ?? (order as any)?.eis_uuid),
+                    eisSubmittedAt: toTrimmedString((order as any)?.eisSubmittedAt ?? (order as any)?.eis_submitted_at),
+                    qrCodePayload: toTrimmedString((order as any)?.qrCodePayload ?? (order as any)?.qr_code_payload),
+                    digitalSignature: toTrimmedString((order as any)?.digitalSignature ?? (order as any)?.digital_signature),
+                    buyerName: buyer.name,
+                    buyerPhone: buyer.phone,
+                    buyerTin: buyer.tin,
+                    buyerEmail: buyer.email,
+                    buyerAddress: buyer.address,
+                    branchId: order.branchId,
+                    sessionId: order.sessionId,
                     items: itemsSummary,
                 };
             })
-            .filter(Boolean) as Array<Record<string, any>>;
+            .filter(Boolean) as MraAuditPdfRow[];
 
         if (rows.length === 0) {
             toast({
@@ -707,25 +724,28 @@ export default function ReportsPage() {
             return;
         }
 
-        const csv = Papa.unparse(rows);
-        const fromLabel = date?.from ? format(date.from, 'yyyy-MM-dd') : 'from';
-        const toLabel = format(date?.to || date?.from || new Date(), 'yyyy-MM-dd');
-        const filename = `mra-audit-${fromLabel}-to-${toLabel}.csv`;
-        const downloadStarted = downloadTextFile(csv, filename);
-
-        if (!downloadStarted) {
+        try {
+            const downloadStarted = await saveMraAuditPdf(rows, date?.from, date?.to, formatCurrency);
+            if (downloadStarted) {
+                toast({
+                    title: 'PDF export complete',
+                    description: `${rows.length} receipts downloaded as a PDF.`,
+                });
+                return;
+            }
             toast({
                 variant: 'destructive',
                 title: 'Export failed',
-                description: 'Could not start file download. Please try again.',
+                description: 'Could not save the PDF. Please try again.',
             });
-            return;
+        } catch (error) {
+            console.error('[Reports] MRA PDF export failed:', error);
+            toast({
+                variant: 'destructive',
+                title: 'Export failed',
+                description: 'Could not generate the PDF. Please try again.',
+            });
         }
-
-        toast({
-            title: 'Export complete',
-            description: `${rows.length} receipts downloaded as ${filename}.`,
-        });
     };
 
   return (
@@ -809,8 +829,8 @@ export default function ReportsPage() {
                     </DropdownMenuSub>
                 </DropdownMenuContent>
             </DropdownMenu>
-             <Button variant="outline" onClick={handleExportReport}><Download className="mr-2 h-4 w-4" /> Export</Button>
-             <Button variant="outline" onClick={handleExportMraAudit}><Landmark className="mr-2 h-4 w-4" /> MRA Audit</Button>
+             <Button variant="outline" onClick={() => void handleExportReport()}><Download className="mr-2 h-4 w-4" /> Financial Report PDF</Button>
+             <Button variant="outline" onClick={() => void handleExportMraAudit()}><Landmark className="mr-2 h-4 w-4" /> MRA Audit PDF</Button>
         </div>
       </div>
       

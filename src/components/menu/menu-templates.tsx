@@ -58,6 +58,7 @@ const generatePDFContent = (items: InventoryItem[], layout: string): string => {
       <meta charset="UTF-8">
       <title>Menu</title>
       <style>
+        @page { size: A4; margin: 0; }
         body {
           font-family: Arial, sans-serif;
           margin: 40px;
@@ -113,6 +114,7 @@ const generateGridPDFContent = (items: InventoryItem[]): string => {
       <meta charset="UTF-8">
       <title>Menu</title>
       <style>
+        @page { size: A4; margin: 0; }
         body {
           font-family: Arial, sans-serif;
           margin: 20px;
@@ -166,6 +168,7 @@ const generateTablePDFContent = (items: InventoryItem[]): string => {
       <meta charset="UTF-8">
       <title>Menu</title>
       <style>
+        @page { size: A4; margin: 0; }
         body {
           font-family: Arial, sans-serif;
           margin: 20px;

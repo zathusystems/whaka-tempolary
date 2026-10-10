@@ -3,12 +3,15 @@
 import React, { useState } from 'react';
 import Link from 'next/link';
 import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
+import { unzipSync, zipSync } from 'fflate';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   MoreHorizontal,
   PlusCircle,
   Upload,
   Download,
+  FileSpreadsheet,
   Edit,
   History,
   Trash2,
@@ -30,6 +33,7 @@ import { db, type InventoryItem, type MRAMapping, type RecipeIngredient } from '
 import { type BusinessType } from '@/lib/inventory/config';
 import { formatInventoryQuantity, shouldPreferWholeStockCounts } from '@/lib/quantity-format';
 import { deleteProduct } from '@/lib/services/product-service';
+import { saveBlobFile } from '@/lib/file-download';
 import { useAuth } from '@/hooks/use-auth';
 import { useCurrency } from '@/hooks/use-currency';
 import { ProductDetailsModal } from './product-details-modal';
@@ -215,6 +219,7 @@ export function InventoryTab({
     // Product details modal state
     const [selectedProduct, setSelectedProduct] = useState<InventoryItem | null>(null);
     const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
+    const initialStockTemplateInputRef = React.useRef<HTMLInputElement>(null);
     const normalizedSearchTerm = searchTerm.trim().toLowerCase();
     const filteredInventoryData = React.useMemo(() => {
         if (!normalizedSearchTerm) return inventoryData || [];
@@ -312,6 +317,222 @@ export function InventoryTab({
                 variant: 'destructive',
                 title: 'Export Failed',
                 description: 'Could not export the inventory file. Please try again.',
+            });
+        }
+    };
+
+    const handlePopulateInitialStockTemplate = async (
+        event: React.ChangeEvent<HTMLInputElement>
+    ) => {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) return;
+
+        if (!inventoryData || inventoryData.length === 0) {
+            toast({ variant: 'destructive', title: 'No inventory to export' });
+            return;
+        }
+
+        try {
+            const fileBytes = new Uint8Array(await file.arrayBuffer());
+            const workbook = XLSX.read(fileBytes, { type: 'array' });
+            const sheetName = workbook.SheetNames[0];
+            const worksheet = sheetName ? workbook.Sheets[sheetName] : undefined;
+            if (!worksheet) throw new Error('The workbook does not contain a worksheet.');
+
+            const cellAddresses = Object.keys(worksheet).filter((key) => !key.startsWith('!'));
+            if (cellAddresses.length === 0) throw new Error('The worksheet is empty.');
+            const decodedCells = cellAddresses.map((address) => XLSX.utils.decode_cell(address));
+            const normalizeHeader = (value: unknown) => String(value ?? '')
+                .trim()
+                .toLowerCase()
+                .replace(/[\s_-]+/g, '');
+            const headerAddress = cellAddresses.find((address) => {
+                const value = (worksheet as any)[address]?.v ?? (worksheet as any)[address]?.w ?? '';
+                return ['name', 'itemname', 'productname'].includes(normalizeHeader(value));
+            });
+            if (!headerAddress) {
+                throw new Error('Could not find a Product Name or name column in the template.');
+            }
+            const headerCell = XLSX.utils.decode_cell(headerAddress);
+            const headerColumns = new Set(
+                decodedCells.filter((cell) => cell.r === headerCell.r).map((cell) => cell.c)
+            );
+            const merges = Array.isArray((worksheet as any)['!merges']) ? (worksheet as any)['!merges'] : [];
+            const relevantCells = decodedCells.filter((cell) => (
+                cell.r >= headerCell.r && (
+                    headerColumns.has(cell.c) || merges.some((merge: any) => (
+                        cell.r >= merge.s.r && cell.r <= merge.e.r &&
+                        cell.c >= merge.s.c && cell.c <= merge.e.c
+                    ))
+                )
+            ));
+            const maxRelevantRow = Math.max(
+                headerCell.r,
+                ...relevantCells.map((cell) => cell.r),
+                ...merges.map((merge: any) => merge.e.r)
+            );
+            const maxRelevantColumn = Math.max(
+                ...Array.from(headerColumns),
+                ...merges.map((merge: any) => merge.e.c)
+            );
+            const compactRange = {
+                s: { r: 0, c: 0 },
+                e: {
+                    r: maxRelevantRow,
+                    c: maxRelevantColumn,
+                },
+            };
+            const matrix = XLSX.utils.sheet_to_json<unknown[]>(worksheet, {
+                header: 1,
+                range: XLSX.utils.encode_range(compactRange),
+                defval: '',
+                raw: false,
+            });
+            const headerRowIndex = headerCell.r;
+
+            const headers = matrix[headerRowIndex].map((value) => String(value ?? '').trim());
+            const columnIndex = (aliases: string[]) => headers.findIndex((header) =>
+                aliases.includes(normalizeHeader(header))
+            );
+            const productColumn = columnIndex(['name', 'itemname', 'productname']);
+            const mappedColumns = {
+                barcode: columnIndex(['barcode', 'barcodevalue', 'barcode']),
+                name: productColumn,
+                description: columnIndex(['description', 'productdescription']),
+                price: columnIndex(['price', 'sellingprice', 'saleprice', 'unitprice']),
+                quantity: columnIndex(['stockunits', 'stock', 'quantity', 'qty', 'onhand', 'currentstock', 'quantityinstock']),
+                totalCost: columnIndex(['totalcost', 'totalcostprice', 'stockcost', 'costprice']),
+                cost: columnIndex(['cost', 'purchasecost', 'buyingprice', 'costperunit']),
+                dateBought: columnIndex(['datebought', 'purchasedate', 'receiveddate']),
+            };
+            if (mappedColumns.name < 0 || mappedColumns.quantity < 0) {
+                throw new Error('The template must include Product Name and Quantity in Stock columns.');
+            }
+
+            const firstDataRow = headerRowIndex + 1;
+            const lastExistingRow = Math.max(
+                firstDataRow,
+                ...relevantCells.map((cell) => cell.r)
+            );
+            // SheetJS is used only to read the table. Its writer does not retain
+            // the workbook's original font/fill styles, so patch the original
+            // worksheet XML instead. This keeps the MRA note and every template
+            // style exactly as uploaded.
+            const archive = unzipSync(fileBytes);
+            const worksheetPath = Object.keys(archive)
+                .filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(path))
+                .sort()[0];
+            if (!worksheetPath) throw new Error('The workbook does not contain a worksheet file.');
+
+            const worksheetXml = new TextDecoder().decode(archive[worksheetPath]);
+            const xmlDocument = new DOMParser().parseFromString(worksheetXml, 'application/xml');
+            if (xmlDocument.getElementsByTagName('parsererror').length > 0) {
+                throw new Error('The worksheet XML could not be read.');
+            }
+            const sheetData = xmlDocument.getElementsByTagName('sheetData')[0];
+            if (!sheetData) throw new Error('The worksheet does not contain a data section.');
+            const xmlNamespace = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+            const rowNumber = (row: Element): number => Number(row.getAttribute('r') || 0);
+            const getRows = (): Element[] => Array.from(sheetData.children)
+                .filter((child): child is Element => child.localName === 'row');
+            const getRow = (excelRowNumber: number): Element | undefined =>
+                getRows().find((row) => rowNumber(row) === excelRowNumber);
+            const getCell = (row: Element, column: number): Element | undefined => {
+                const address = XLSX.utils.encode_cell({ r: rowNumber(row) - 1, c: column });
+                return Array.from(row.children)
+                    .filter((child): child is Element => child.localName === 'c')
+                    .find((cell) => cell.getAttribute('r') === address);
+            };
+            const sampleExcelRow = firstDataRow + 1;
+            const styleByColumn = new Map<number, string | null>();
+            for (const column of Object.values(mappedColumns)) {
+                if (column < 0) continue;
+                styleByColumn.set(column, getCell(getRow(sampleExcelRow) || xmlDocument.createElement('row'), column)?.getAttribute('s') || null);
+            }
+
+            const outputColumns = Array.from(new Set(Object.values(mappedColumns).filter((column) => column >= 0)));
+            for (let excelRow = sampleExcelRow; excelRow <= lastExistingRow + 1; excelRow += 1) {
+                const row = getRow(excelRow);
+                if (!row) continue;
+                for (const column of outputColumns) {
+                    const cell = getCell(row, column);
+                    if (cell) row.removeChild(cell);
+                }
+            }
+
+            const setCellValue = (row: Element, column: number, value: string | number) => {
+                if (column < 0) return;
+                const cell = xmlDocument.createElementNS(xmlNamespace, 'c');
+                cell.setAttribute('r', XLSX.utils.encode_cell({ r: rowNumber(row) - 1, c: column }));
+                const style = styleByColumn.get(column);
+                if (style) cell.setAttribute('s', style);
+                if (typeof value === 'number' && Number.isFinite(value)) {
+                    const valueNode = xmlDocument.createElementNS(xmlNamespace, 'v');
+                    valueNode.textContent = String(value);
+                    cell.appendChild(valueNode);
+                } else if (String(value) !== '') {
+                    cell.setAttribute('t', 'inlineStr');
+                    const inlineString = xmlDocument.createElementNS(xmlNamespace, 'is');
+                    const textNode = xmlDocument.createElementNS(xmlNamespace, 't');
+                    textNode.textContent = String(value);
+                    inlineString.appendChild(textNode);
+                    cell.appendChild(inlineString);
+                }
+                const nextCell = Array.from(row.children)
+                    .filter((child): child is Element => child.localName === 'c')
+                    .find((existingCell) => {
+                        const existingAddress = existingCell.getAttribute('r') || 'A1';
+                        return XLSX.utils.decode_cell(existingAddress).c > column;
+                    });
+                row.insertBefore(cell, nextCell || null);
+            };
+            const ensureRow = (excelRowNumber: number): Element => {
+                const existing = getRow(excelRowNumber);
+                if (existing) return existing;
+                const row = xmlDocument.createElementNS(xmlNamespace, 'row');
+                row.setAttribute('r', String(excelRowNumber));
+                const nextRow = getRows().find((candidate) => rowNumber(candidate) > excelRowNumber);
+                sheetData.insertBefore(row, nextRow || null);
+                return row;
+            };
+
+            const currentInventory = [...inventoryData];
+            currentInventory.forEach((item, index) => {
+                const row = ensureRow(sampleExcelRow + index);
+                const stockUnits = Number(item.stockUnits || 0);
+                const unitCost = Number(item.cost || 0);
+                const totalCost = Number(item.value ?? (stockUnits * unitCost));
+                setCellValue(row, mappedColumns.barcode, item.barcode || '');
+                setCellValue(row, mappedColumns.name, item.name || '');
+                setCellValue(row, mappedColumns.description, '');
+                setCellValue(row, mappedColumns.price, Number(item.price || 0));
+                setCellValue(row, mappedColumns.quantity, stockUnits);
+                setCellValue(row, mappedColumns.totalCost, Number.isFinite(totalCost) ? totalCost : 0);
+                setCellValue(row, mappedColumns.cost, unitCost);
+                setCellValue(row, mappedColumns.dateBought, '');
+            });
+
+            const updatedWorksheetXml = new XMLSerializer().serializeToString(xmlDocument);
+            archive[worksheetPath] = new TextEncoder().encode(updatedWorksheetXml);
+            const output = zipSync(archive);
+            const filename = file.name;
+            const saved = await saveBlobFile(
+                new Blob([output.buffer as ArrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+                filename
+            );
+            if (!saved) throw new Error('Your device could not save the populated Excel file.');
+
+            toast({
+                title: 'Full inventory Excel downloaded',
+                description: `${currentInventory.length} products were inserted into the uploaded template.`,
+            });
+        } catch (error) {
+            console.error('Failed to populate initial stock template:', error);
+            toast({
+                variant: 'destructive',
+                title: 'Could not populate Excel template',
+                description: error instanceof Error ? error.message : 'The uploaded template could not be processed.',
             });
         }
     };
@@ -625,6 +846,13 @@ export function InventoryTab({
 
     return (
          <CardContent>
+            <input
+                ref={initialStockTemplateInputRef}
+                type="file"
+                accept=".xlsx"
+                className="hidden"
+                onChange={(event) => void handlePopulateInitialStockTemplate(event)}
+            />
             <div className="flex w-full flex-col items-stretch gap-2 mb-6 sm:flex-row">
                 {!readOnly && (
                     <Button onClick={onAddItem}>
@@ -644,6 +872,14 @@ export function InventoryTab({
                     <DropdownMenuContent align="end">
                     {!readOnly && <DropdownMenuItem onSelect={onImport}><Upload className="mr-2" /> Import Products</DropdownMenuItem>}
                     <DropdownMenuItem onSelect={handleExport}><Download className="mr-2" /> Export Stock File</DropdownMenuItem>
+                    <DropdownMenuItem
+                        onSelect={(event) => {
+                            event.preventDefault();
+                            initialStockTemplateInputRef.current?.click();
+                        }}
+                    >
+                        <FileSpreadsheet className="mr-2" /> Populate Initial Excel Template
+                    </DropdownMenuItem>
                     {!readOnly && (
                         <DropdownMenuItem asChild>
                             <Link href="/dashboard/inventory/audit"><ClipboardList className="mr-2" /> Full Stock Audit</Link>

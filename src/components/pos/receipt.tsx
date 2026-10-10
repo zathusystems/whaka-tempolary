@@ -19,6 +19,7 @@ interface ReceiptProps {
     showFooter?: boolean;
     showItemDetails?: boolean;
     showTaxBreakdown?: boolean;
+    eisEnabled?: boolean;
     copyNumber?: number; // 1 = Original, 2+ = Copy
     elementId?: string;
     enablePrintStyles?: boolean;
@@ -34,6 +35,7 @@ export const Receipt = ({
   showFooter = true,
   showItemDetails = true,
   showTaxBreakdown = true,
+  eisEnabled,
   copyNumber = 1,
   elementId = 'receipt-printable-area',
   enablePrintStyles = true,
@@ -285,8 +287,41 @@ export const Receipt = ({
     }
     return db.sessions.get(sessionId);
   }, [(order as any).sessionId, (order as any).session_id, (order as any).session]);
+  const businessSettingsRecord = useLiveQuery(async () => {
+    const businessId = toTrimmedString(business?.id ?? offlineBusiness?.id);
+    return businessId ? db.businessSettings.get(businessId) : undefined;
+  }, [business?.id, offlineBusiness?.id]);
 
   const resolvedBusiness = business || offlineBusiness || undefined;
+  const readStoredEisEnabled = (): boolean | undefined => {
+    if (typeof window === 'undefined') return undefined;
+    try {
+      const raw = window.localStorage.getItem('handypos-business-settings');
+      if (!raw) return undefined;
+      const settings = JSON.parse(raw) as Record<string, unknown>;
+      const storedBusinessId = toTrimmedString(settings.businessId);
+      if (storedBusinessId && storedBusinessId !== toTrimmedString(resolvedBusiness?.id)) {
+        return undefined;
+      }
+      const value = settings.enableEis ?? settings.enable_eis;
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'string') {
+        if (value.trim().toLowerCase() === 'true') return true;
+        if (value.trim().toLowerCase() === 'false') return false;
+      }
+    } catch {
+      // Ignore malformed local settings and use the other EIS sources.
+    }
+    return undefined;
+  };
+  const configuredEisEnabled =
+    typeof eisEnabled === 'boolean'
+      ? eisEnabled
+      : typeof businessSettingsRecord?.enableEis === 'boolean'
+      ? businessSettingsRecord.enableEis
+      : typeof (resolvedBusiness as any)?.enableEis === 'boolean'
+      ? (resolvedBusiness as any).enableEis
+      : readStoredEisEnabled() ?? false;
   const businessName = resolvedBusiness?.name?.trim() || 'Business Name';
   const businessNameDisplay = businessName.toUpperCase();
   const compactBusinessName = businessNameDisplay.replace(/\s+/g, ' ').trim();
@@ -460,7 +495,7 @@ export const Receipt = ({
   const effectiveShowHeader = showHeader || isFiscalizedReceipt;
   const effectiveShowQRCode = showQRCode || isFiscalizedReceipt;
   const effectiveShowItemDetails = showItemDetails || isFiscalizedReceipt;
-  const effectiveShowTaxBreakdown = showTaxBreakdown || isFiscalizedReceipt;
+  const effectiveShowTaxBreakdown = configuredEisEnabled && (showTaxBreakdown || isFiscalizedReceipt);
   const effectiveShowFooter = showFooter;
   const missingFiscalText = hasSubmittedEisStatus ? 'N/A' : 'PENDING';
   const fiscalInvoiceNumberDisplay = fiscalInvoiceNumber || missingFiscalText;
@@ -898,9 +933,11 @@ export const Receipt = ({
     thermalTextLines.push(
       centerThermal(`CELL: ${businessPhone || 'N/A'}`),
       centerThermal(`EMAIL: ${businessEmail || 'N/A'}`),
-      centerThermal(`TIN: ${sellerTin || 'N/A'}`),
-      centerThermal(vatRegistrationLabel.toUpperCase())
+      centerThermal(`TIN: ${sellerTin || 'N/A'}`)
     );
+    if (configuredEisEnabled) {
+      thermalTextLines.push(centerThermal(vatRegistrationLabel.toUpperCase()));
+    }
     if (isCopyReceipt) thermalTextLines.push(centerThermal(receiptTypeLabel));
     if (taxOfficeLabel) thermalTextLines.push(centerThermal(taxOfficeLabel.toUpperCase()));
     if (pumpName) thermalTextLines.push(centerThermal(`PUMP: ${pumpName.toUpperCase()}`));
@@ -925,7 +962,10 @@ export const Receipt = ({
       const itemDiscount = Math.max(0, toFiniteNumber(item.discount_amount ?? item.discountAmount, 0));
       const itemDiscountName = String(item.discount_name ?? item.discountName ?? 'Discount').trim() || 'Discount';
       thermalTextLines.push(
-        alignThermal(`${formatReceiptQuantity(itemQuantity)} X ${thermalAmount(itemPrice)}`, `${thermalAmount(itemTotal)} ${itemTaxCode}`),
+        alignThermal(
+          `${formatReceiptQuantity(itemQuantity)} X ${thermalAmount(itemPrice)}`,
+          `${thermalAmount(itemTotal)}${configuredEisEnabled ? ` ${itemTaxCode}` : ''}`
+        ),
         compactReceiptText(item.name, 14)
       );
       if (itemDiscount > 0) {
@@ -1061,7 +1101,9 @@ export const Receipt = ({
           <p className={`${metaTextClass} leading-tight`}>CELL: {businessPhone || 'N/A'}</p>
           <p className={`${metaTextClass} leading-tight`}>EMAIL: {businessEmail || 'N/A'}</p>
           <p className={`${bodyTextClass} leading-tight`}>TIN: {sellerTin || 'N/A'}</p>
-          <p className={`receipt-vat-status ${bodyTextClass} font-bold leading-tight`}>{vatRegistrationLabel.toUpperCase()}</p>
+          {configuredEisEnabled && (
+            <p className={`receipt-vat-status ${bodyTextClass} font-bold leading-tight`}>{vatRegistrationLabel.toUpperCase()}</p>
+          )}
           {isCopyReceipt && (
             <p className={`${bodyTextClass} text-center font-bold leading-tight`}>
               {receiptTypeLabel}
@@ -1089,7 +1131,7 @@ export const Receipt = ({
           <span>POS Ref:</span>
           <span className="text-right break-all font-semibold">{posReferenceDisplay}</span>
         </div>
-        {!isFiscalizedReceipt && (
+        {configuredEisEnabled && !isFiscalizedReceipt && (
           <div className="grid grid-cols-[auto_1fr] gap-x-2">
             <span>Receipt Status:</span>
             <span className="text-right font-semibold">{fiscalStatusDisplay}</span>
@@ -1115,7 +1157,9 @@ export const Receipt = ({
               <div key={`${item.id}-${index}`} className="mb-1">
                 <div className="flex items-start justify-between gap-2">
                   <span className="whitespace-nowrap">{formatReceiptQuantity(itemQuantity)} X {formatReceiptAmount(itemPrice)}</span>
-                  <span className="whitespace-nowrap text-right font-semibold">{formatReceiptAmount(itemTotal)} {itemTaxCode}</span>
+                  <span className="whitespace-nowrap text-right font-semibold">
+                    {formatReceiptAmount(itemTotal)}{configuredEisEnabled ? ` ${itemTaxCode}` : ''}
+                  </span>
                 </div>
                 <p className="leading-tight">{compactReceiptText(item.name)}</p>
                 {itemDiscount > 0 && (

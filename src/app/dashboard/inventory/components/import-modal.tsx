@@ -3,12 +3,14 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Loader2, Upload, X, FileText, Download, GitBranch, CheckSquare, Square } from 'lucide-react';
 import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
 import { v4 as uuidv4 } from 'uuid';
 
 import { db, type InventoryItem, type MRAMapping, type PurchaseRecord, type PurchaseOrder, type Supplier } from '@/lib/db';
 import { type BusinessType, unitTypesByBusinessType } from '@/lib/inventory/config';
 import { syncService } from '@/lib/services/sync-service';
 import { createSupplier } from '@/lib/services/supplier-service';
+import { saveBlobFile } from '@/lib/file-download';
 import { isTauriApp } from '@/lib/tauri-init';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
@@ -87,6 +89,48 @@ const BOOLEAN_OPTIONS = ['true', 'false'];
 const BAR_PORTION_NAME_OPTIONS = ['shot', 'tot', 'glass', 'pint', 'bottle', 'can', 'cup', 'measure', 'custom'];
 const MRA_UNIT_MEASURE_OPTIONS = ['unit', 'kg', 'liter', 'meter', 'box', 'pack', 'bottle', 'can', 'carton'];
 
+// This template intentionally contains no MRA/EIS fields. Initial stock is a
+// normal local inventory setup and must remain available when EIS is disabled.
+const INITIAL_STOCK_TEMPLATE_COLUMNS = [
+  'Bar Code',
+  'Product Name',
+  'Product Description',
+  'Unit Price',
+  'Quantity in Stock',
+  'Cost Price',
+  'Date Bought',
+];
+
+const getInitialStockTemplateRows = (businessType: BusinessType): ImportTemplateRow[] => [
+  {
+    'Bar Code': '6001106100551',
+    'Product Name': businessType === 'Bar & Liquor' ? 'Whisky (Bottle)' : 'Windolene',
+    'Product Description': 'Example product - replace this row with your own stock.',
+    'Unit Price': 755,
+    'Quantity in Stock': 36,
+    'Cost Price': 27180,
+    'Date Bought': '2025-05-20',
+  },
+  {
+    'Bar Code': '6001106224295',
+    'Product Name': 'Mr Min',
+    'Product Description': 'Example product - replace this row with your own stock.',
+    'Unit Price': 375,
+    'Quantity in Stock': 22,
+    'Cost Price': 8250,
+    'Date Bought': '2025-05-20',
+  },
+  {
+    'Bar Code': '8850006324424',
+    'Product Name': 'Colgate Triple Action 70 g',
+    'Product Description': 'Example product - replace this row with your own stock.',
+    'Unit Price': 100,
+    'Quantity in Stock': 800,
+    'Cost Price': 80000,
+    'Date Bought': '2025-05-21',
+  },
+];
+
 type ImportTemplateRow = Record<string, string | number | boolean>;
 type TemplateFieldOption = { field: string; options: string[] };
 
@@ -100,6 +144,7 @@ type ImportInventoryRow = InventoryItem & {
   importMraTaxType?: 'standard' | 'zero' | 'exempt';
   importMraTaxRate?: number;
   importMraUnitMeasure?: string;
+  importDateBought?: string;
 };
 
 type InitialStockEntry = {
@@ -109,6 +154,7 @@ type InitialStockEntry = {
   costPerUnit: number;
   taxRate: number;
   taxMethod: 'inclusive' | 'exclusive';
+  receivedDate?: string;
   supplier?: Supplier;
 };
 
@@ -117,14 +163,16 @@ const CSV_FIELD_ALIASES = {
   name: ['name', 'itemname', 'productname'],
   itemType: ['itemtype', 'type', 'producttype'],
   category: ['category', 'itemcategory'],
-  stockUnits: ['stockunits', 'stock', 'quantity', 'qty', 'onhand', 'currentstock', 'current_stock', 'openingstock', 'opening_stock', 'initialstock', 'initial_stock'],
+  stockUnits: ['stockunits', 'stock', 'quantity', 'qty', 'onhand', 'currentstock', 'current_stock', 'openingstock', 'opening_stock', 'initialstock', 'initial_stock', 'quantityinstock', 'quantity_in_stock'],
   unitType: ['unittype', 'unit', 'uom', 'measureunit'],
   reorderLevel: ['reorderlevel', 'reorder', 'minimumstock', 'minstock'],
   cost: ['cost', 'purchasecost', 'buyingprice', 'costperunit'],
-  price: ['price', 'sellingprice', 'saleprice'],
+  totalCost: ['totalcost', 'totalcostprice', 'stockcost', 'costprice', 'cost_price'],
+  price: ['price', 'sellingprice', 'saleprice', 'unitprice', 'unit_price'],
   taxRate: ['taxrate', 'vat', 'vatrate', 'tax', 'taxpercent', 'vatpercent'],
   taxCalculationMethod: ['taxmethod', 'taxcalculationmethod', 'vatmethod', 'vatcalculationmethod', 'taxcalc'],
   value: ['value', 'stockvalue'],
+  dateBought: ['datebought', 'date_bought', 'purchasedate', 'receiveddate', 'received_date'],
   status: ['status', 'stockstatus'],
   supplier: ['supplier', 'suppliername'],
   manufacturer: ['manufacturer', 'maker'],
@@ -361,15 +409,26 @@ const parseInventoryCsvRow = (
   const hasExplicitItemType = String(rawItemType ?? '').trim().length > 0;
   const isRestaurantOrBar = businessType === 'Restaurant' || businessType === 'Bar & Liquor';
   const parsedPrice = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.price));
-  const parsedCost = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.cost));
   const parsedTaxRate = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.taxRate));
   const parsedTaxMethodRaw = getCsvValue(row, CSV_FIELD_ALIASES.taxCalculationMethod);
   const parsedMraTaxRate = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.mraTaxRate));
   const parsedMraProductCode = String(getCsvValue(row, CSV_FIELD_ALIASES.mraProductCode) ?? '').trim();
   const parsedMraProductName = String(getCsvValue(row, CSV_FIELD_ALIASES.mraProductName) ?? '').trim();
   const parsedMraUnitMeasure = String(getCsvValue(row, CSV_FIELD_ALIASES.mraUnitMeasure) ?? '').trim();
+  const parsedDateBought = normalizeExpiryDate(getCsvValue(row, CSV_FIELD_ALIASES.dateBought));
   const parsedRecipe = parseRecipe(getCsvValue(row, CSV_FIELD_ALIASES.recipe));
   const isProduced = parseCsvBoolean(getCsvValue(row, CSV_FIELD_ALIASES.isProduced), false);
+  const stockUnits = parseCsvNumber(getCsvValue(row, CSV_FIELD_ALIASES.stockUnits), 0);
+  const directCost = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.cost));
+  const totalCost = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.totalCost));
+  // The supplied taxpayer template labels the total purchase value as
+  // "Cost Price". Convert it to the unit cost used by inventory and purchase
+  // records; the ordinary `cost` column remains a unit cost.
+  const parsedCost = directCost !== undefined
+    ? directCost
+    : totalCost !== undefined && stockUnits > 0
+      ? Number((totalCost / stockUnits).toFixed(4))
+      : undefined;
   const itemType = hasExplicitItemType
     ? normalizeItemType(rawItemType)
     : isRestaurantOrBar
@@ -379,7 +438,6 @@ const parseInventoryCsvRow = (
           ? 'ingredient'
           : 'sellable'
       : 'sellable';
-  const stockUnits = parseCsvNumber(getCsvValue(row, CSV_FIELD_ALIASES.stockUnits), 0);
   const reorderLevel = parseCsvNumber(getCsvValue(row, CSV_FIELD_ALIASES.reorderLevel), DEFAULT_REORDER_LEVEL);
   const cost = parsedCost;
   const parsedValue = parseCsvOptionalNumber(getCsvValue(row, CSV_FIELD_ALIASES.value));
@@ -436,6 +494,7 @@ const parseInventoryCsvRow = (
     ),
     importMraTaxRate: parsedMraTaxRate !== undefined ? Number(parsedMraTaxRate) : undefined,
     importMraUnitMeasure: parsedMraUnitMeasure || undefined,
+    importDateBought: parsedDateBought,
   };
 };
 
@@ -679,47 +738,133 @@ export const ImportModal = ({
     }
   };
 
+  const applyParsedRows = (rows: CsvRow[]) => {
+    const headers = Array.from(
+      new Set(rows.flatMap((row) => Object.keys(row)).map((header) => normalizeCsvHeader(header)))
+    );
+    setParsedHeaders(headers);
+    const hasNameHeader = headers.some((header) =>
+      CSV_FIELD_ALIASES.name.map((alias) => normalizeCsvHeader(alias)).includes(header)
+    );
+
+    if (!hasNameHeader) {
+      toast({
+        variant: 'destructive',
+        title: 'Invalid inventory format',
+        description: 'File must contain at least a product name column (name/itemName/productName).',
+      });
+      setFile(null);
+      setParsedData([]);
+      setParsedHeaders([]);
+      return;
+    }
+
+    const inventoryItems = rows
+      .map((row) => parseInventoryCsvRow(row, branchId, businessType))
+      .filter((item): item is InventoryItem => item !== null);
+
+    if (inventoryItems.length === 0) {
+      toast({
+        variant: 'destructive',
+        title: 'No valid rows found',
+        description: 'No valid products were detected in the uploaded file.',
+      });
+      setFile(null);
+      setParsedData([]);
+      setParsedHeaders([]);
+      return;
+    }
+
+    setParsedData(inventoryItems);
+  };
+
   const parseFile = (fileToParse: globalThis.File) => {
     setIsParsing(true);
+
+    if (/\.xlsx?$/i.test(fileToParse.name)) {
+      void fileToParse.arrayBuffer()
+        .then((arrayBuffer) => {
+          const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+          const sheet = workbook.Sheets[workbook.SheetNames[0]];
+          if (!sheet) throw new Error('The workbook does not contain a worksheet.');
+          // Some official inventory workbooks leave a title row above the
+          // headers and declare an entire Excel column range. Bound parsing to
+          // actual cells and locate the Product Name header dynamically.
+          const cellAddresses = Object.keys(sheet).filter((key) => !key.startsWith('!'));
+          if (cellAddresses.length === 0) throw new Error('The worksheet is empty.');
+          const decodedCells = cellAddresses.map((address) => XLSX.utils.decode_cell(address));
+          const headerAddress = cellAddresses.find((address) => {
+            const value = (sheet as any)[address]?.v ?? (sheet as any)[address]?.w ?? '';
+            return CSV_FIELD_ALIASES.name.some((alias) => normalizeCsvHeader(alias) === normalizeCsvHeader(String(value)));
+          });
+          if (!headerAddress) throw new Error('Could not find a Product Name or name header.');
+          const headerCell = XLSX.utils.decode_cell(headerAddress);
+          const headerColumns = new Set(
+            decodedCells.filter((cell) => cell.r === headerCell.r).map((cell) => cell.c)
+          );
+          const merges = Array.isArray((sheet as any)['!merges']) ? (sheet as any)['!merges'] : [];
+          const relevantCells = decodedCells.filter((cell) => (
+            cell.r >= headerCell.r && (
+              headerColumns.has(cell.c) || merges.some((merge: XLSX.Range) => (
+                cell.r >= merge.s.r && cell.r <= merge.e.r &&
+                cell.c >= merge.s.c && cell.c <= merge.e.c
+              ))
+            )
+          ));
+          const maxRelevantRow = Math.max(
+            headerCell.r,
+            ...relevantCells.map((cell) => cell.r),
+            ...merges.map((merge: XLSX.Range) => merge.e.r)
+          );
+          const maxRelevantColumn = Math.max(
+            ...Array.from(headerColumns),
+            ...merges.map((merge: XLSX.Range) => merge.e.c)
+          );
+          const compactRange = {
+            s: { r: 0, c: 0 },
+            e: {
+              r: maxRelevantRow,
+              c: maxRelevantColumn,
+            },
+          };
+          const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+            header: 1,
+            range: XLSX.utils.encode_range(compactRange),
+            defval: '',
+            raw: false,
+          });
+          const headerRowIndex = headerCell.r;
+          const headers = matrix[headerRowIndex].map((value) => String(value ?? '').trim());
+          const rows = matrix.slice(headerRowIndex + 1).map((values) =>
+            headers.reduce<CsvRow>((row, header, index) => {
+              if (header) row[header] = values[index] ?? '';
+              return row;
+            }, {})
+          ).filter((row) => Object.values(row).some((value) => String(value ?? '').trim() !== ''));
+          if (rows.length === 0) throw new Error('The worksheet contains headers but no product rows.');
+          applyParsedRows(rows);
+        })
+        .catch((error) => {
+          toast({
+            variant: 'destructive',
+            title: 'Error parsing Excel file',
+            description: error instanceof Error ? error.message : 'The selected workbook could not be read.',
+          });
+          setFile(null);
+          setParsedData([]);
+          setParsedHeaders([]);
+        })
+        .finally(() => setIsParsing(false));
+      return;
+    }
+
     Papa.parse(fileToParse, {
       header: true,
       skipEmptyLines: true,
       transformHeader: (header) => header.trim(),
       complete: (results) => {
-        const headers = (results.meta.fields || []).map((header) => normalizeCsvHeader(header));
-        setParsedHeaders(headers);
-        const hasNameHeader = headers.some((header) =>
-          CSV_FIELD_ALIASES.name.map((alias) => normalizeCsvHeader(alias)).includes(header)
-        );
-
-        if (!hasNameHeader) {
-          toast({
-            variant: 'destructive',
-            title: 'Invalid CSV Format',
-            description: 'File must contain at least a product name column (name/itemName/productName).',
-          });
-          setFile(null);
-          setParsedData([]);
-          setParsedHeaders([]);
-        } else {
-          const rows = Array.isArray(results.data) ? (results.data as CsvRow[]) : [];
-          const inventoryItems = rows
-            .map((row) => parseInventoryCsvRow(row, branchId, businessType))
-            .filter((item): item is InventoryItem => item !== null);
-
-          if (inventoryItems.length === 0) {
-            toast({
-              variant: 'destructive',
-              title: 'No Valid Rows Found',
-              description: 'No valid products were detected in the CSV file.',
-            });
-            setFile(null);
-            setParsedData([]);
-            setParsedHeaders([]);
-          } else {
-            setParsedData(inventoryItems);
-          }
-        }
+        const rows = Array.isArray(results.data) ? (results.data as CsvRow[]) : [];
+        applyParsedRows(rows);
         setIsParsing(false);
       },
       error: (error) => {
@@ -909,6 +1054,89 @@ export const ImportModal = ({
     });
   };
 
+  const handleDownloadInitialStockExcel = async () => {
+    try {
+      const rows = getInitialStockTemplateRows(businessType);
+      const worksheet = XLSX.utils.aoa_to_sheet([
+        [],
+        ['', ...INITIAL_STOCK_TEMPLATE_COLUMNS],
+        ...rows.map((row) => ['', ...INITIAL_STOCK_TEMPLATE_COLUMNS.map((column) => row[column] ?? '')]),
+      ]);
+      const headerStyle = {
+        fill: { patternType: 'solid', fgColor: { rgb: '385724' } },
+        font: { bold: true, color: { rgb: 'FFFFFF' } },
+        alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+      };
+      const noteStyle = {
+        fill: { patternType: 'solid', fgColor: { rgb: 'C00000' } },
+        font: { bold: true, color: { rgb: 'FFFFFF' } },
+        alignment: { vertical: 'top', wrapText: true },
+      };
+      INITIAL_STOCK_TEMPLATE_COLUMNS.forEach((_, index) => {
+        const cell = XLSX.utils.encode_cell({ r: 1, c: index + 1 });
+        worksheet[cell].s = headerStyle;
+      });
+      worksheet['K2'] = { t: 's', v: 'NOTE', s: noteStyle };
+      worksheet['K3'] = {
+        t: 's',
+        v: '1. Replace the three example rows with your real products.\n\n2. Quantity in Stock is the opening quantity to add to inventory.\n\n3. Bar Code is optional when EIS is disabled.\n\n4. Do not delete the header row.',
+        s: noteStyle,
+      };
+      worksheet['!merges'] = [{ s: { r: 2, c: 10 }, e: { r: 13, c: 18 } }];
+      worksheet['!cols'] = [
+        { wch: 3 },
+        { wch: 18 },
+        { wch: 28 },
+        { wch: 42 },
+        { wch: 14 },
+        { wch: 20 },
+        { wch: 14 },
+        { wch: 16 },
+        { wch: 3 },
+        { wch: 3 },
+        { wch: 3 },
+        { wch: 24 },
+        { wch: 12 },
+        { wch: 12 },
+        { wch: 12 },
+        { wch: 12 },
+        { wch: 18 },
+        { wch: 14 },
+        { wch: 24 },
+      ];
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'TAXPAYERINVENTORY');
+      const workbookData = XLSX.write(workbook, { bookType: 'xlsx', type: 'array', cellStyles: true });
+      const normalizedBusinessType = businessType
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-|-$)/g, '');
+      const filename = `initial-stock-${normalizedBusinessType || 'inventory'}.xlsx`;
+      const downloadStarted = await saveBlobFile(
+        new Blob([workbookData], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }),
+        filename
+      );
+
+      if (!downloadStarted) {
+        throw new Error('Your device could not save the Excel file.');
+      }
+
+      toast({
+        title: 'Initial stock Excel downloaded',
+        description: 'Fill in Quantity in Stock, then upload the completed workbook. EIS is not required.',
+      });
+    } catch (error) {
+      console.error('Failed to download initial stock Excel template:', error);
+      toast({
+        variant: 'destructive',
+        title: 'Excel download failed',
+        description: error instanceof Error ? error.message : 'Could not create the Excel template.',
+      });
+    }
+  };
+
   const handleCsvImport = async (): Promise<{
     createdCount: number;
     updatedCount: number;
@@ -922,6 +1150,7 @@ export const ImportModal = ({
     const normalizedHeaderSet = new Set(parsedHeaders.map((header) => normalizeCsvHeader(header)));
     const hasColumn = (field: keyof typeof CSV_FIELD_ALIASES): boolean =>
       CSV_FIELD_ALIASES[field].some((alias) => normalizedHeaderSet.has(normalizeCsvHeader(alias)));
+    const hasCostColumn = hasColumn('cost') || hasColumn('totalCost');
 
     const currentBranchItems = (await getInventoryItemsForBranch(branchId)).filter(
       (item) => item._operation !== 'delete'
@@ -1072,6 +1301,7 @@ export const ImportModal = ({
         importMraTaxType,
         importMraTaxRate,
         importMraUnitMeasure,
+        importDateBought,
         ...parsedItemBase
       } = parsedItem;
       const resolvedMraTaxType = importMraTaxType ?? normalizeMraTaxType(undefined, importMraTaxRate ?? importTaxRate ?? 0);
@@ -1096,12 +1326,12 @@ export const ImportModal = ({
         const nextReorderLevel = hasColumn('reorderLevel')
           ? reorderLevel
           : Number(matchedExistingItem.reorderLevel || DEFAULT_REORDER_LEVEL);
-        const nextCost = hasColumn('cost') ? cost : matchedExistingItem.cost;
+        const nextCost = hasCostColumn ? cost : matchedExistingItem.cost;
         const nextValue = hasColumn('value')
           ? value
           : shouldCreateStockReceipt
             ? matchedExistingItem.value
-            : hasColumn('stockUnits') || hasColumn('cost')
+            : hasColumn('stockUnits') || hasCostColumn
             ? Number((nextStockUnits * Number(nextCost || 0)).toFixed(2))
             : matchedExistingItem.value;
         const nextStatus = hasColumn('status')
@@ -1153,7 +1383,7 @@ export const ImportModal = ({
         updatedCount += 1;
 
         if (shouldCreateStockReceipt) {
-          const receiptCostPerUnit = hasColumn('cost')
+          const receiptCostPerUnit = hasCostColumn
             ? (Number.isFinite(Number(cost)) ? Number(cost) : 0)
             : Number(matchedExistingItem.cost || 0);
 
@@ -1164,6 +1394,9 @@ export const ImportModal = ({
             costPerUnit: receiptCostPerUnit,
             taxRate: normalizeTaxRate(importTaxRate),
             taxMethod: importTaxCalculationMethod ?? 'inclusive',
+            receivedDate: importDateBought
+              ? new Date(`${importDateBought}T12:00:00.000Z`).toISOString()
+              : undefined,
             supplier: resolvedSupplier,
           });
         }
@@ -1206,6 +1439,9 @@ export const ImportModal = ({
             costPerUnit: Number.isFinite(Number(cost)) ? Number(cost) : 0,
             taxRate: normalizeTaxRate(importTaxRate),
             taxMethod: importTaxCalculationMethod ?? 'inclusive',
+            receivedDate: importDateBought
+              ? new Date(`${importDateBought}T12:00:00.000Z`).toISOString()
+              : undefined,
             supplier: resolvedSupplier,
           });
         }
@@ -1338,7 +1574,7 @@ export const ImportModal = ({
           const normalizedCostPerUnit = Number.isFinite(costPerUnit)
             ? Number(costPerUnit.toFixed(4))
             : Number(costPerUnit || 0);
-          const receivedDate = new Date(baseReceivedAt + receivedIndexOffset).toISOString();
+          const receivedDate = entry.receivedDate || new Date(baseReceivedAt + receivedIndexOffset).toISOString();
           receivedIndexOffset += 1;
 
           const product = await db.inventory.get(entry.itemId);
@@ -1621,24 +1857,32 @@ export const ImportModal = ({
         <DialogHeader>
           <DialogTitle>Import Products</DialogTitle>
           <DialogDescription>
-            Import products from a CSV file or copy them from another branch in this business.
+            Import products from CSV or Excel, including initial stock, or copy them from another branch. EIS is optional.
           </DialogDescription>
         </DialogHeader>
         <div className="min-h-0 flex-1 overflow-y-auto pr-1">
           <div className="py-4">
             <Tabs value={importMode} onValueChange={(value) => setImportMode(value as ImportMode)}>
               <TabsList className="grid w-full grid-cols-2">
-                <TabsTrigger value="csv">From CSV</TabsTrigger>
+                <TabsTrigger value="csv">From CSV / Excel</TabsTrigger>
                 <TabsTrigger value="branch">From Branch</TabsTrigger>
               </TabsList>
 
               <TabsContent value="csv" className="space-y-6 pt-4">
-                <div className="flex gap-2">
+                <div className="flex flex-col gap-2 sm:flex-row">
                   <Button variant="outline" className="flex-1" onClick={handleDownloadTemplate}>
                     <Download className="w-4 h-4 mr-2" />
-                    Download Template
+                    Download CSV Template
+                  </Button>
+                  <Button variant="outline" className="flex-1" onClick={handleDownloadInitialStockExcel}>
+                    <Download className="w-4 h-4 mr-2" />
+                    Initial Stock Excel
                   </Button>
                 </div>
+
+                <p className="text-sm text-muted-foreground">
+                  The Initial Stock Excel template is for opening stock setup. Enter quantities in <strong>Quantity in Stock</strong>; no EIS or MRA fields are required.
+                </p>
 
               {!file ? (
                 <div
@@ -1647,10 +1891,10 @@ export const ImportModal = ({
                 >
                   <Upload className="w-8 h-8 text-muted-foreground" />
                   <p className="mt-2 text-sm text-muted-foreground">Click or drag file to this area to upload</p>
-                  <input
+                    <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".csv"
+                    accept=".csv,.xlsx,.xls"
                     className="hidden"
                     onChange={handleFileChange}
                   />

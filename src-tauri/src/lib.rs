@@ -268,7 +268,12 @@ fn save_export_file(
     let sanitized_filename = filename
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+            // Keep normal template filenames (including spaces and brackets)
+            // unchanged while still preventing path traversal and control
+            // characters in the native download path.
+            if ch.is_ascii_alphanumeric()
+                || matches!(ch, '.' | '-' | '_' | ' ' | '(' | ')' | '[' | ']')
+            {
                 ch
             } else {
                 '_'
@@ -314,7 +319,11 @@ fn save_export_file(
         match std::fs::write(&output_path, &bytes) {
             Ok(_) => return Ok(output_path.display().to_string()),
             Err(error) => {
-                last_error = Some(format!("Failed writing {}: {}", output_path.display(), error));
+                last_error = Some(format!(
+                    "Failed writing {}: {}",
+                    output_path.display(),
+                    error
+                ));
             }
         }
     }

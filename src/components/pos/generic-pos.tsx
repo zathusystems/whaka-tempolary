@@ -2747,6 +2747,7 @@ const PaymentDialog = ({
                         showQRCode={receiptDisplaySettings.showQRCode}
                         showItemDetails={receiptDisplaySettings.showItemDetails}
                         showTaxBreakdown={receiptDisplaySettings.showTaxBreakdown}
+                        eisEnabled={eisEnabled}
                         copyNumber={receiptCopyNumber}
                     />
                  </div>
@@ -2769,6 +2770,7 @@ const PaymentDialog = ({
                                 showQRCode
                                 showItemDetails
                                 showTaxBreakdown
+                                eisEnabled={eisEnabled}
                                 copyNumber={1}
                                 elementId="mra-receipt-preview-area"
                             />

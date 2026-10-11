@@ -927,14 +927,10 @@ export const Receipt = ({
     );
     if (sellerAddressLines.length > 0) {
       sellerAddressLines.forEach((line) => thermalTextLines.push(centerThermal(line.toUpperCase())));
-    } else {
-      thermalTextLines.push(centerThermal('ADDRESS: N/A'));
     }
-    thermalTextLines.push(
-      centerThermal(`CELL: ${businessPhone || 'N/A'}`),
-      centerThermal(`EMAIL: ${businessEmail || 'N/A'}`),
-      centerThermal(`TIN: ${sellerTin || 'N/A'}`)
-    );
+    if (businessPhone) thermalTextLines.push(centerThermal(`CELL: ${businessPhone}`));
+    if (businessEmail) thermalTextLines.push(centerThermal(`EMAIL: ${businessEmail}`));
+    if (sellerTin) thermalTextLines.push(centerThermal(`TIN: ${sellerTin}`));
     if (configuredEisEnabled) {
       thermalTextLines.push(centerThermal(vatRegistrationLabel.toUpperCase()));
     }
@@ -1095,12 +1091,10 @@ export const Receipt = ({
                 {line.toUpperCase()}
               </p>
             ))
-          ) : (
-            <p className={`${metaTextClass} leading-tight`}>ADDRESS: N/A</p>
-          )}
-          <p className={`${metaTextClass} leading-tight`}>CELL: {businessPhone || 'N/A'}</p>
-          <p className={`${metaTextClass} leading-tight`}>EMAIL: {businessEmail || 'N/A'}</p>
-          <p className={`${bodyTextClass} leading-tight`}>TIN: {sellerTin || 'N/A'}</p>
+          ) : null}
+          {businessPhone && <p className={`${metaTextClass} leading-tight`}>CELL: {businessPhone}</p>}
+          {businessEmail && <p className={`${metaTextClass} leading-tight`}>EMAIL: {businessEmail}</p>}
+          {sellerTin && <p className={`${bodyTextClass} leading-tight`}>TIN: {sellerTin}</p>}
           {configuredEisEnabled && (
             <p className={`receipt-vat-status ${bodyTextClass} font-bold leading-tight`}>{vatRegistrationLabel.toUpperCase()}</p>
           )}

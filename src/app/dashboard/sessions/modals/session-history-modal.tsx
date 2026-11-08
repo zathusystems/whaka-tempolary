@@ -52,6 +52,8 @@ type HistoryOrder = {
 
 type HistorySession = Session & {
   orders?: HistoryOrder[];
+  /** True when totals came from the server's date-aware summary endpoint. */
+  serverSalesSummary?: boolean;
 };
 
 const INCLUDED_ORDER_STATUSES = new Set(['new', 'preparing', 'ready', 'completed']);
@@ -89,6 +91,10 @@ const sessionHasSalesInRange = (session: HistorySession, dateRange?: DateRange):
     );
   }
 
+  if (session.serverSalesSummary) {
+    return true;
+  }
+
   // Offline/local fallback records do not contain nested orders. In that
   // case, use the session start date so the history still remains usable.
   const sessionDate = session.startedAt || session.closedAt;
@@ -96,6 +102,13 @@ const sessionHasSalesInRange = (session: HistorySession, dateRange?: DateRange):
 };
 
 const getSessionSalesInRange = (session: HistorySession, dateRange?: DateRange): number => {
+  // The summary endpoint has already applied the selected order-date range
+  // and calculated gross totals. Use that value directly instead of falling
+  // back to the session payment totals, which are intentionally all-time.
+  if (session.serverSalesSummary) {
+    return Number.isFinite(Number(session.totalSales)) ? Number(session.totalSales) : 0;
+  }
+
   const orders = Array.isArray(session.orders) ? session.orders : [];
   if (orders.length > 0) {
     const matchingOrders = orders.filter((order) =>
@@ -136,32 +149,40 @@ const normalizeBranchId = (value: string | null): string | null => {
   return null;
 };
 
-const mapBackendSessionToLocal = (session: any, fallbackBranchId: string | null): HistorySession => ({
-  id: String(session.id),
-  branchId: String(session.branch || fallbackBranchId || ''),
-  userId: String(session.user || ''),
-  userName: session.user_name || session.user_email || `User ${session.user}`,
-  userEmail: session.user_email || '',
-  status: String(session.status).toLowerCase() === 'closed' ? 'closed' : 'active',
-  pumpName: session.pump_name ?? session.pumpName ?? undefined,
-  openingFloat: parseFloat(session.opening_float || 0),
-  expectedCash: parseFloat(session.expected_cash || 0),
-  actualCash: session.actual_cash !== null && session.actual_cash !== undefined ? parseFloat(session.actual_cash) : undefined,
-  closingFloat: session.closing_float !== null && session.closing_float !== undefined ? parseFloat(session.closing_float) : undefined,
-  difference: session.difference !== null && session.difference !== undefined ? parseFloat(session.difference) : undefined,
-  totalSales: parseFloat(session.total_sales || 0),
-  totalCashSales: parseFloat(session.total_cash_sales || 0),
-  totalCardSales: parseFloat(session.total_card_sales || 0),
-  totalMobileMoneySales: parseFloat(session.total_mobile_money_sales || 0),
-  totalOnAccountSales: parseFloat(session.total_on_account_sales || 0),
-  totalOtherSales: parseFloat(session.total_other_sales || 0),
-  totalTips: parseFloat(session.total_tips || 0),
-  openingStock: session.opening_stock || [],
-  closingStock: session.closing_stock || [],
-  orders: Array.isArray(session.orders) ? session.orders : [],
-  startedAt: session.started_at || session.startedAt,
-  closedAt: session.closed_at || session.closedAt,
-});
+const mapBackendSessionToLocal = (session: any, fallbackBranchId: string | null): HistorySession => {
+  const hasServerGrossTotal = session.total_gross_sales !== undefined && session.total_gross_sales !== null;
+
+  return {
+    id: String(session.id),
+    branchId: String(session.branch || fallbackBranchId || ''),
+    userId: String(session.user || ''),
+    userName: session.user_name || session.user_email || `User ${session.user}`,
+    userEmail: session.user_email || '',
+    status: String(session.status).toLowerCase() === 'closed' ? 'closed' : 'active',
+    pumpName: session.pump_name ?? session.pumpName ?? undefined,
+    openingFloat: parseFloat(session.opening_float || 0),
+    expectedCash: parseFloat(session.expected_cash || 0),
+    actualCash: session.actual_cash !== null && session.actual_cash !== undefined ? parseFloat(session.actual_cash) : undefined,
+    closingFloat: session.closing_float !== null && session.closing_float !== undefined ? parseFloat(session.closing_float) : undefined,
+    difference: session.difference !== null && session.difference !== undefined ? parseFloat(session.difference) : undefined,
+    // The history summary endpoint returns gross order totals, which are the
+    // same figures used by Reports. Keep the old total_sales fallback for
+    // older backends and offline records.
+    totalSales: parseFloat((hasServerGrossTotal ? session.total_gross_sales : session.total_sales) || 0),
+    totalCashSales: parseFloat(session.total_cash_sales || 0),
+    totalCardSales: parseFloat(session.total_card_sales || 0),
+    totalMobileMoneySales: parseFloat(session.total_mobile_money_sales || 0),
+    totalOnAccountSales: parseFloat(session.total_on_account_sales || 0),
+    totalOtherSales: parseFloat(session.total_other_sales || 0),
+    totalTips: parseFloat(session.total_tips || 0),
+    openingStock: session.opening_stock || [],
+    closingStock: session.closing_stock || [],
+    orders: Array.isArray(session.orders) ? session.orders : [],
+    serverSalesSummary: hasServerGrossTotal,
+    startedAt: session.started_at || session.startedAt,
+    closedAt: session.closed_at || session.closedAt,
+  };
+};
 
 const formatSessionDate = (value?: string) => {
   if (!value) return '-';
@@ -229,16 +250,27 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
     useEffect(() => {
         if (!isOpen) return;
 
+        let requestActive = true;
+
         const fetchClosedSessions = async () => {
             setIsLoading(true);
             try {
                 const normalizedBranchId = normalizeBranchId(activeBranchId);
-                const businessQuery = user?.businessId
-                  ? `?business_id=${encodeURIComponent(String(user.businessId))}`
-                  : '';
-                const initialUrl = normalizedBranchId
-                  ? `/sessions/sessions/closed_list/?branch_id=${encodeURIComponent(normalizedBranchId)}${businessQuery ? `&${businessQuery.slice(1)}` : ''}`
-                  : `/sessions/sessions/closed_list/${businessQuery}`;
+                const query = new URLSearchParams();
+                if (normalizedBranchId) query.set('branch_id', normalizedBranchId);
+                if (user?.businessId) query.set('business_id', String(user.businessId));
+                query.set('summary', '1');
+
+                // Ask the backend to aggregate only the selected sales period.
+                // This avoids downloading every order just to filter it in the
+                // browser and keeps sessions with sales in the range visible
+                // even when their session started earlier.
+                if (dateRange?.from) {
+                  query.set('sales_from', startOfDay(dateRange.from).toISOString());
+                  query.set('sales_to', endOfDay(dateRange.to ?? dateRange.from).toISOString());
+                }
+
+                const initialUrl = `/sessions/sessions/closed_list/?${query.toString()}`;
 
                 console.log('[Sessions History] Fetching sessions from backend:', { activeBranchId, normalizedBranchId, initialUrl });
 
@@ -284,18 +316,25 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                       allSessions.length
                     );
 
+                    if (!requestActive) return;
                     setClosedSessions(backendClosedSessions);
 
-                    for (const session of backendClosedSessions) {
+                    // Do not make the visible history wait for local cache
+                    // writes. Details hydrate their orders when opened.
+                    void Promise.all(backendClosedSessions.map(async (session) => {
                       try {
-                        // Keep the local session cache compact; nested orders
-                        // are only needed for this period comparison view.
-                        const { orders: _orders, ...sessionCacheRecord } = session;
+                        // The server-summary marker is request-specific and
+                        // must not leak into offline fallback calculations.
+                        const {
+                          orders: _orders,
+                          serverSalesSummary: _serverSalesSummary,
+                          ...sessionCacheRecord
+                        } = session;
                         await db.sessions.put(sessionCacheRecord);
                       } catch (dbError) {
                         console.warn('[Sessions History] Error storing backend session in local DB:', dbError);
                       }
-                    }
+                    }));
                 } catch (backendError) {
                     console.warn('[Sessions History] Backend fetch failed, falling back to local DB:', backendError);
 
@@ -325,9 +364,10 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                     }));
 
                     console.log('[Sessions History] Loaded', localSessionsWithOrders.length, 'closed sessions from local DB (fallback mode)');
-                    setClosedSessions(localSessionsWithOrders);
+                    if (requestActive) setClosedSessions(localSessionsWithOrders);
                 }
             } catch (error) {
+                if (!requestActive) return;
                 console.error('[Sessions History] Error fetching closed sessions:', error);
                 toast({ 
                     variant: 'destructive', 
@@ -336,12 +376,22 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                 });
                 setClosedSessions([]);
             } finally {
-                setIsLoading(false);
+                if (requestActive) setIsLoading(false);
             }
         };
 
         fetchClosedSessions();
-    }, [activeBranchId, isOpen, user?.businessId]);
+
+        return () => {
+          requestActive = false;
+        };
+    }, [
+      activeBranchId,
+      isOpen,
+      user?.businessId,
+      dateRange?.from?.getTime(),
+      dateRange?.to?.getTime(),
+    ]);
 
     if (viewingSession) {
         return (

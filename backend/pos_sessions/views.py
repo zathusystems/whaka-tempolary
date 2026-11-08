@@ -4,13 +4,13 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError
 from .models import Session, Order, OrderItem, DiscountRule
-from .serializers import SessionSerializer, OrderSerializer, OrderItemSerializer, DiscountRuleSerializer
+from .serializers import SessionSerializer, SessionSummarySerializer, OrderSerializer, OrderItemSerializer, DiscountRuleSerializer
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 import re
-
 
 def _get_accessible_business_ids(user):
     business_ids = set()
@@ -472,6 +472,15 @@ class SessionViewSet(viewsets.ModelViewSet):
     serializer_class = SessionSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_serializer_class(self):
+        # List consumers only need session totals and metadata. The full
+        # serializer embeds every order/item and becomes increasingly slow as
+        # a branch accumulates sales; detail/history endpoints still return
+        # the complete payload.
+        if self.action in {'list', 'active_list'}:
+            return SessionSummarySerializer
+        return super().get_serializer_class()
+
     def _get_scoped_queryset(
         self,
         include_user_filter=True,
@@ -528,11 +537,58 @@ class SessionViewSet(viewsets.ModelViewSet):
         if branch_id:
             queryset = _apply_branch_filter(queryset, branch_id)
 
+        requested_status = str(self.request.query_params.get('status') or '').strip().lower()
+        if self.action == 'list' and requested_status in {'active', 'closed'}:
+            queryset = queryset.filter(status=requested_status)
+
+        # The sessions page only needs today's closed sessions in its second
+        # request. Honour optional bounds so it does not download the entire
+        # branch history as the database grows.
+        started_from = parse_datetime(str(self.request.query_params.get('started_from') or '').strip())
+        started_to = parse_datetime(str(self.request.query_params.get('started_to') or '').strip())
+        if started_from:
+            if timezone.is_naive(started_from):
+                started_from = timezone.make_aware(started_from)
+            queryset = queryset.filter(started_at__gte=started_from)
+        if started_to:
+            if timezone.is_naive(started_to):
+                started_to = timezone.make_aware(started_to)
+            queryset = queryset.filter(started_at__lte=started_to)
+
         return queryset
 
     def get_queryset(self):
         """Filter sessions by business scope, role, and optional branch."""
-        return self._get_scoped_queryset()
+        queryset = self._get_scoped_queryset()
+        if self.action in {'list', 'active_list'}:
+            valid_orders = Q(orders__status__in=['New', 'Preparing', 'Ready', 'Completed'])
+            return queryset.select_related('user', 'branch').annotate(
+                _session_total_sales=Sum(
+                    'orders__subtotal',
+                    filter=valid_orders,
+                ),
+                _session_cash_sales=Sum(
+                    'orders__total',
+                    filter=valid_orders & Q(orders__payment_method='Cash'),
+                ),
+                _session_card_sales=Sum(
+                    'orders__total',
+                    filter=valid_orders & Q(orders__payment_method='Card'),
+                ),
+                _session_mobile_money_sales=Sum(
+                    'orders__total',
+                    filter=valid_orders & Q(orders__payment_method='Mobile Money'),
+                ),
+                _session_on_account_sales=Sum(
+                    'orders__total',
+                    filter=valid_orders & Q(orders__payment_method='On Account'),
+                ),
+                _session_other_sales=Sum(
+                    'orders__total',
+                    filter=valid_orders & Q(orders__payment_method='Other'),
+                ),
+            ).order_by('-started_at')
+        return queryset
 
     def perform_create(self, serializer):
         """

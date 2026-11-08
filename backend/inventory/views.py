@@ -1691,17 +1691,45 @@ class StockTransferViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
-        """Filter transfers by business"""
+        """Filter transfers by the user's business and optional branch."""
         user = self.request.user
         business_id = self.request.query_params.get('business_id')
-        
+
+        accessible_business_ids = _get_accessible_business_ids(user)
         queryset = StockTransfer.objects.filter(
-            business__owner=user
+            business_id__in=accessible_business_ids
         ).select_related('business', 'from_branch', 'to_branch', 'inventory_item')
-        
+
         if business_id:
             queryset = queryset.filter(business_id=business_id)
-        
+
+        branch_reference = self.request.query_params.get('branch_id')
+        if branch_reference:
+            lookup = _normalize_branch_lookup(branch_reference)
+            branch_queryset = Branch.objects.filter(
+                business_id__in=accessible_business_ids,
+            )
+
+            if isinstance(lookup, int):
+                branch_queryset = branch_queryset.filter(id=lookup)
+            elif isinstance(lookup, str):
+                normalized = lookup.lower()
+                if normalized in {'main', 'main-branch', 'main_branch'}:
+                    branch_queryset = branch_queryset.filter(name__iendswith='Main Branch')
+                else:
+                    branch_queryset = branch_queryset.filter(
+                        Q(slug=lookup) | Q(name__iexact=lookup)
+                    )
+
+            branch_ids = list(branch_queryset.values_list('id', flat=True))
+            if not branch_ids:
+                return queryset.none()
+
+            queryset = queryset.filter(
+                Q(from_branch_id__in=branch_ids) |
+                Q(to_branch_id__in=branch_ids)
+            )
+
         return queryset
 
     def get_serializer_class(self):

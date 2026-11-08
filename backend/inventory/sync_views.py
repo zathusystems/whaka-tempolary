@@ -3,6 +3,7 @@ Main Sync Views - Orchestrates synchronization between frontend and backend
 Imports handlers from specialized sync view modules for each entity type
 """
 
+
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -12,8 +13,8 @@ from datetime import datetime
 from django.db import transaction
 from django.db.models import Q
 
-from .models import Supplier, InventoryItem, PurchaseOrder
-from .serializers import InventoryItemSerializer, PurchaseOrderSerializer
+from .models import Supplier, InventoryItem, PurchaseOrder, StockTransfer
+from .serializers import InventoryItemSerializer, PurchaseOrderSerializer, StockTransferSerializer
 from business.models import Business
 
 # Import handlers from specialized sync modules
@@ -410,13 +411,29 @@ def sync_pull(request):
         
         print(f"[Sync Pull] Found {purchase_orders.count()} updated purchase orders")
         purchase_orders_data = PurchaseOrderSerializer(purchase_orders, many=True).data
+
+        # Stock transfers are shared business records. Include transfers where
+        # the resolved branch is either the source or destination so every
+        # logged-in device can hydrate its local transfer history.
+        stock_transfers = (
+            StockTransfer.objects.filter(
+                business=business,
+                created_at__gte=since_dt,
+            )
+            .filter(Q(from_branch=resolved_branch) | Q(to_branch=resolved_branch))
+            .select_related('from_branch', 'to_branch', 'inventory_item')
+            .order_by('created_at')
+        )
+        print(f"[Sync Pull] Found {stock_transfers.count()} updated stock transfers")
+        stock_transfers_data = StockTransferSerializer(stock_transfers, many=True).data
         
         return Response({
             'pulled_at': timezone.now().isoformat(),
             'changes': {
                 'inventory_items': inventory_data,
                 'suppliers': suppliers_data,
-                'purchase_orders': purchase_orders_data
+                'purchase_orders': purchase_orders_data,
+                'stock_transfers': stock_transfers_data,
             }
         }, status=status.HTTP_200_OK)
         

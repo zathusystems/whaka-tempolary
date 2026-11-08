@@ -88,6 +88,9 @@ const LOCAL_STORAGE_KEYS = {
     ACTIVE_BRANCH: 'handypos-active-branch'
 };
 const BRANCHES_STORAGE_KEY = 'handypos-branches';
+// Session summaries should never hold the whole page hostage when the server
+// or a large order history is slow. Orders are refreshed in the background.
+const SESSION_REQUEST_TIMEOUT_MS = 10000;
 
 const isPlaceholderBranchId = (value?: string | null): boolean => {
     const normalized = String(value ?? '').trim().toLowerCase();
@@ -1952,7 +1955,10 @@ export default function SessionsPage() {
             }
             visitedUrls.add(nextUrl);
 
-            const response = await authFetch.fetch<any>(nextUrl);
+            const response = await authFetch.fetch<any>(nextUrl, {
+                timeoutMs: SESSION_REQUEST_TIMEOUT_MS,
+                maxAttempts: 1,
+            });
             if (Array.isArray(response)) {
                 allSessions.push(...response);
                 break;
@@ -1976,6 +1982,8 @@ export default function SessionsPage() {
             const syncedOrders = await syncSessionOrdersToLocalDb({
                 sessionId: session.id,
                 branchId,
+                timeoutMs: SESSION_REQUEST_TIMEOUT_MS,
+                maxAttempts: 1,
             });
             console.log('[Sessions Page] Loaded', syncedOrders.length, 'orders for session:', session.id);
         } catch (ordersError) {
@@ -1992,56 +2000,15 @@ export default function SessionsPage() {
             let mappedActiveSessions: Session[] = [];
             let mappedCarryoverActiveSessions: Session[] = [];
             let mappedTodayClosedSessions: Session[] = [];
-            let usedBackendData = false;
+            let selectedSessionIdForOrders = '';
 
-            try {
-                const businessQuery = user?.businessId
-                    ? `&business_id=${encodeURIComponent(String(user.businessId))}`
-                    : '';
-                const activeResponse = await authFetch.fetch<any>(
-                    `/sessions/sessions/active_list/?branch_id=${encodeURIComponent(backendBranchId)}${businessQuery}`
-                );
-                const backendActiveSessions = Array.isArray(activeResponse?.results)
-                    ? activeResponse.results
-                    : Array.isArray(activeResponse)
-                    ? activeResponse
-                    : [];
-
-                const mappedAllActiveSessions = backendActiveSessions
-                    .map((session) => mapBackendSessionToLocal(session, branchId))
-                    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
-
-                mappedActiveSessions = mappedAllActiveSessions.filter((session) => isActiveSessionFromCurrentDay(session));
-                mappedCarryoverActiveSessions = mappedAllActiveSessions.filter((session) => isCarryoverActiveSession(session));
-
-                usedBackendData = true;
-            } catch (backendActiveError) {
-                console.warn('[Sessions Page] Backend active_list fetch failed:', backendActiveError);
-            }
-
-            try {
-                const businessQuery = user?.businessId
-                    ? `&business_id=${encodeURIComponent(String(user.businessId))}`
-                    : '';
-                const allSessionsUrl = `/sessions/sessions/?branch_id=${encodeURIComponent(backendBranchId)}${businessQuery}`;
-                const backendAllSessions = await fetchPagedSessions(allSessionsUrl);
-
-                mappedTodayClosedSessions = backendAllSessions
-                    .map((session) => mapBackendSessionToLocal(session, branchId))
-                    .filter((session) => isClosedSessionFromCurrentDay(session))
-                    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
-
-                usedBackendData = true;
-            } catch (backendClosedError) {
-                console.warn('[Sessions Page] Backend full session list fetch failed:', backendClosedError);
-            }
-
-            if (usedBackendData) {
+            const publishSessions = () => {
                 const selectableSessions = mergeSessions([
                     ...mappedActiveSessions,
                     ...mappedTodayClosedSessions,
                     ...mappedCarryoverActiveSessions,
                 ]);
+
                 setActiveSessions(mappedActiveSessions);
                 setCarryoverActiveSessions(mappedCarryoverActiveSessions);
                 setTodayClosedSessions(mappedTodayClosedSessions);
@@ -2061,54 +2028,102 @@ export default function SessionsPage() {
                     selectableSessions[0];
 
                 setActiveSession(selectedSession);
-                await fetchOrdersForSession(selectedSession, branchId);
-                return;
+                if (selectedSession.id !== selectedSessionIdForOrders) {
+                    selectedSessionIdForOrders = selectedSession.id;
+                    // Loading the session is independent from loading its
+                    // sales. Render the session now and hydrate orders behind it.
+                    void fetchOrdersForSession(selectedSession, branchId);
+                }
+            };
+
+            const loadLocalSessions = async () => {
+                const localSessions = branchId
+                    ? (await db.sessions.toArray()).filter(
+                        (session) => normalizeBranchId(session.branchId) === normalizeBranchId(branchId)
+                    )
+                    : [];
+
+                mappedActiveSessions = localSessions
+                    .filter((session) => isActiveSessionFromCurrentDay(session))
+                    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+                mappedCarryoverActiveSessions = localSessions
+                    .filter((session) => isCarryoverActiveSession(session))
+                    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+                mappedTodayClosedSessions = localSessions
+                    .filter((session) => isClosedSessionFromCurrentDay(session))
+                    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+
+                publishSessions();
+                console.log('[Sessions Page] Using local session data while the server is unavailable.');
+            };
+
+            const businessQuery = user?.businessId
+                ? `&business_id=${encodeURIComponent(String(user.businessId))}`
+                : '';
+            const activeUrl =
+                `/sessions/sessions/active_list/?branch_id=${encodeURIComponent(backendBranchId)}${businessQuery}`;
+            const allSessionsUrl =
+                (() => {
+                    const todayStart = new Date();
+                    todayStart.setHours(0, 0, 0, 0);
+                    const todayEnd = new Date(todayStart);
+                    todayEnd.setDate(todayEnd.getDate() + 1);
+                    todayEnd.setMilliseconds(todayEnd.getMilliseconds() - 1);
+                    const periodQuery =
+                        `&status=closed&started_from=${encodeURIComponent(todayStart.toISOString())}` +
+                        `&started_to=${encodeURIComponent(todayEnd.toISOString())}`;
+                    return `/sessions/sessions/?branch_id=${encodeURIComponent(backendBranchId)}${businessQuery}${periodQuery}`;
+                })();
+
+            // Start both requests together. The active list is enough to render
+            // this page; the full list only supplies today's closed sessions.
+            const activeRequest = authFetch.fetch<any>(activeUrl, {
+                timeoutMs: SESSION_REQUEST_TIMEOUT_MS,
+                maxAttempts: 1,
+            });
+            const allSessionsRequest = fetchPagedSessions(allSessionsUrl);
+            let activeResponseReceived = false;
+
+            try {
+                const activeResponse = await activeRequest;
+                const backendActiveSessions = Array.isArray(activeResponse?.results)
+                    ? activeResponse.results
+                    : Array.isArray(activeResponse)
+                    ? activeResponse
+                    : [];
+
+                const mappedAllActiveSessions = backendActiveSessions
+                    .map((session) => mapBackendSessionToLocal(session, branchId))
+                    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+
+                mappedActiveSessions = mappedAllActiveSessions.filter((session) => isActiveSessionFromCurrentDay(session));
+                mappedCarryoverActiveSessions = mappedAllActiveSessions.filter((session) => isCarryoverActiveSession(session));
+                activeResponseReceived = true;
+                publishSessions();
+                // Do not keep the main report behind order synchronization.
+                setIsLoadingSession(false);
+            } catch (backendActiveError) {
+                console.warn('[Sessions Page] Backend active_list fetch failed:', backendActiveError);
+                await loadLocalSessions();
+                setIsLoadingSession(false);
             }
 
-            // Fallback: local DB (offline mode)
-            const localSessions = branchId
-                ? (await db.sessions.toArray()).filter(
-                    (session) => normalizeBranchId(session.branchId) === normalizeBranchId(branchId)
-                )
-                : [];
+            try {
+                const backendAllSessions = await allSessionsRequest;
 
-            const localActiveSessions = localSessions
-                .filter((session) => isActiveSessionFromCurrentDay(session))
-                .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+                mappedTodayClosedSessions = backendAllSessions
+                    .map((session) => mapBackendSessionToLocal(session, branchId))
+                    .filter((session) => isClosedSessionFromCurrentDay(session))
+                    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+                publishSessions();
+            } catch (backendClosedError) {
+                console.warn('[Sessions Page] Backend full session list fetch failed:', backendClosedError);
+            }
 
-            const localCarryoverActiveSessions = localSessions
-                .filter((session) => isCarryoverActiveSession(session))
-                .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
-
-            const localTodayClosedSessions = localSessions
-                .filter((session) => isClosedSessionFromCurrentDay(session))
-                .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
-
-            const selectableSessions = mergeSessions([
-                ...localActiveSessions,
-                ...localTodayClosedSessions,
-                ...localCarryoverActiveSessions,
-            ]);
-            setActiveSessions(localActiveSessions);
-            setCarryoverActiveSessions(localCarryoverActiveSessions);
-            setTodayClosedSessions(localTodayClosedSessions);
-
-            if (selectableSessions.length > 0) {
-                const selectedSession =
-                    selectableSessions.find((session) => session.id === preferredSessionId) ||
-                    localActiveSessions.find((session) => isOwnSession(session)) ||
-                    localActiveSessions[0] ||
-                    localCarryoverActiveSessions.find((session) => isOwnSession(session)) ||
-                    localCarryoverActiveSessions[0] ||
-                    selectableSessions.find((session) => isOwnSession(session)) ||
-                    selectableSessions[0];
-
-                setActiveSession(selectedSession);
-                await fetchOrdersForSession(selectedSession, branchId);
-                console.log('[Sessions Page] Using local session data (offline mode):', selectedSession.id);
-            } else {
-                setActiveSession(null);
-                console.log('[Sessions Page] No active/today-closed sessions found');
+            if (!activeResponseReceived) {
+                // If the active request failed and the full request returned
+                // successfully, publish its closed-session data as well.
+                publishSessions();
             }
         } catch (error) {
             console.error('[Sessions Page] Error fetching active sessions:', error);
@@ -2126,13 +2141,9 @@ export default function SessionsPage() {
         const selectedSession = manageableSessions.find((session) => session.id === sessionId);
         if (!selectedSession || activeSession?.id === selectedSession.id) return;
 
-        setIsLoadingSession(true);
-        try {
-            setActiveSession(selectedSession);
-            await fetchOrdersForSession(selectedSession, activeBranchId);
-        } finally {
-            setIsLoadingSession(false);
-        }
+        setActiveSession(selectedSession);
+        setIsLoadingSession(false);
+        void fetchOrdersForSession(selectedSession, activeBranchId);
     };
 
     const normalizedUserRole = String(user?.role || '').toLowerCase();

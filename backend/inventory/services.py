@@ -26,7 +26,12 @@ class InventoryService:
     @staticmethod
     def _business_eis_enabled(business) -> bool:
         settings_obj = getattr(business, 'settings', None)
-        return bool(getattr(settings_obj, 'enable_eis', False) or getattr(business, 'mra_enrolled', False))
+        # The BusinessSettings toggle is the source of truth for whether POS
+        # operations should call EIS. A business may remain enrolled in MRA
+        # after EIS has been disabled in the application; enrollment alone
+        # must not make ordinary branch transfers require an EIS terminal or
+        # branch-site mappings.
+        return bool(getattr(settings_obj, 'enable_eis', False))
 
     @staticmethod
     def _branch_eis_site_id(branch) -> str:
@@ -468,8 +473,8 @@ class InventoryService:
                 'quantity': str(quantity),
                 'reference': transfer_reference,
             },
-            mra_related=True,
-            mra_reference=transfer_reference,
+            mra_related=bool(eis_transfer_result),
+            mra_reference=transfer_reference if eis_transfer_result else None,
         )
         
         return transfer

@@ -559,6 +559,10 @@ export interface StockTransfer {
     _dirty?: boolean;
     _operation?: 'create' | 'update' | 'delete';
     _synced_at?: string;
+    syncStatus?: 'pending' | 'synced' | 'failed';
+    syncError?: string;
+    syncRetryBlocked?: boolean;
+    syncFailedAt?: string;
 }
 
 export interface WasteRecord {

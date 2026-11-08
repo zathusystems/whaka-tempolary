@@ -167,12 +167,17 @@ const mapBackendOrderToLocal = (
 export const syncSessionOrdersToLocalDb = async ({
   sessionId,
   branchId,
+  timeoutMs,
+  maxAttempts,
 }: {
   sessionId: string;
   branchId: string;
+  timeoutMs?: number;
+  maxAttempts?: number;
 }): Promise<Order[]> => {
   const response = await authFetch.fetch<any>(
-    `/sessions/orders/?session_id=${encodeURIComponent(String(sessionId))}`
+    `/sessions/orders/?session_id=${encodeURIComponent(String(sessionId))}`,
+    { timeoutMs, maxAttempts }
   );
   const backendOrders = Array.isArray(response?.results)
     ? response.results

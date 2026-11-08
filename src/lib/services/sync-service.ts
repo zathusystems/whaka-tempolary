@@ -1,4 +1,4 @@
-import { db, type Order, type Session, type InventoryItem, type PurchaseOrder, type TakeOrder } from '@/lib/db';
+import { db, type Order, type Session, type InventoryItem, type PurchaseOrder, type StockTransfer, type TakeOrder } from '@/lib/db';
 import { authFetch } from '@/lib/auth-fetch';
 import { normalizePurchaseBatchQuantities } from '@/lib/purchase-quantity';
 
@@ -961,13 +961,16 @@ class SyncService {
 
   private isRetryBlockedInventoryError(error: unknown): boolean {
     const message = String(error || '').toLowerCase();
-    return [
-      'insufficient quantity',
-      'insufficient stock',
-      'no inventory transfers were processed',
-      'source',
-      'available',
-    ].some((needle) => message.includes(needle));
+    return (
+      message.includes('insufficient quantity') ||
+      message.includes('insufficient stock') ||
+      message.includes('no inventory transfers were processed') ||
+      /only\s+.+\s+available/.test(message) ||
+      (message.includes('source branch') && message.includes('not found')) ||
+      (message.includes('to branch') && message.includes('not found')) ||
+      (message.includes('item') && message.includes('not found')) ||
+      message.includes('quantity must be positive')
+    );
   }
 
   private async markInventorySyncError(errorItem: any): Promise<void> {
@@ -1285,6 +1288,7 @@ class SyncService {
       console.log('[Sync] Take orders count:', mergedChanges.take_orders?.length || 0);
       console.log('[Sync] Suppliers count:', mergedChanges.suppliers?.length || 0);
       console.log('[Sync] Purchase orders count:', mergedChanges.purchase_orders?.length || 0);
+      console.log('[Sync] Stock transfers count:', mergedChanges.stock_transfers?.length || 0);
 
       // Step 3: Apply server changes to local DB
       if (Object.keys(mergedChanges).length > 0) {
@@ -2075,7 +2079,14 @@ class SyncService {
           await db.stockTransfers.delete(id);
           console.log(`[Sync] Removed deleted stock transfer ${id}`);
         } else {
-          await db.stockTransfers.update(id, { _dirty: false, _operation: undefined });
+          await db.stockTransfers.update(id, {
+            _dirty: false,
+            _operation: undefined,
+            syncStatus: 'synced',
+            syncError: undefined,
+            syncRetryBlocked: false,
+            syncFailedAt: undefined,
+          });
           console.log(`[Sync] Marked stock transfer ${id} as synced`);
         }
         return;
@@ -2459,6 +2470,105 @@ class SyncService {
           }
         }
         console.log(`[Sync] Applied ${changes.inventory_items.length} inventory item changes`);
+      }
+
+      // Apply shared stock transfers. A transfer is visible from both its
+      // source and destination branch, so keep the backend branch IDs in the
+      // local row and only skip rows with unsynced local edits.
+      if (changes.stock_transfers && Array.isArray(changes.stock_transfers) && changes.stock_transfers.length > 0) {
+        for (const transfer of changes.stock_transfers) {
+          try {
+            const convertedTransfer = this.snakeToCamel(transfer);
+            const transferId = String(convertedTransfer.id ?? transfer.id ?? '').trim();
+            if (!transferId) {
+              console.warn('[Sync] Skipping stock transfer without id:', transfer);
+              continue;
+            }
+
+            const existingTransfer = await db.stockTransfers.get(transferId);
+            if (existingTransfer?._dirty) {
+              console.log(`[Sync] Skipping server overwrite for dirty stock transfer ${transferId}`);
+              continue;
+            }
+
+            const fromBranchId = String(
+              convertedTransfer.fromBranch ??
+                convertedTransfer.fromBranchId ??
+                transfer.from_branch ??
+                transfer.from_branch_id ??
+                ''
+            ).trim();
+            const toBranchId = String(
+              convertedTransfer.toBranch ??
+                convertedTransfer.toBranchId ??
+                transfer.to_branch ??
+                transfer.to_branch_id ??
+                ''
+            ).trim();
+            const itemId = String(
+              convertedTransfer.inventoryItem ??
+                convertedTransfer.inventoryItemId ??
+                transfer.inventory_item ??
+                transfer.inventory_item_id ??
+                ''
+            ).trim();
+            const itemName = String(
+              convertedTransfer.inventoryItemName ??
+                convertedTransfer.itemName ??
+                transfer.inventory_item_name ??
+                transfer.item_name ??
+                existingTransfer?.itemName ??
+                'Unknown item'
+            ).trim();
+
+            const mappedTransfer: StockTransfer = {
+              ...(existingTransfer || {}),
+              id: transferId,
+              branchId: String(branchId || existingTransfer?.branchId || fromBranchId).trim(),
+              fromBranchId,
+              fromBranchName: String(
+                convertedTransfer.fromBranchName ??
+                  transfer.from_branch_name ??
+                  existingTransfer?.fromBranchName ??
+                  fromBranchId
+              ),
+              toBranchId,
+              toBranchName: String(
+                convertedTransfer.toBranchName ??
+                  transfer.to_branch_name ??
+                  existingTransfer?.toBranchName ??
+                  toBranchId
+              ),
+              itemId,
+              itemName,
+              quantity: this.toNumber(convertedTransfer.quantity ?? transfer.quantity, 0),
+              initiatedBy: String(
+                convertedTransfer.initiatedBy ??
+                  transfer.initiated_by ??
+                  existingTransfer?.initiatedBy ??
+                  'System'
+              ),
+              createdAt: String(
+                convertedTransfer.createdAt ??
+                  transfer.created_at ??
+                  existingTransfer?.createdAt ??
+                  new Date().toISOString()
+              ),
+              _dirty: false,
+              _operation: undefined,
+              _synced_at: new Date().toISOString(),
+              syncStatus: 'synced',
+              syncError: undefined,
+              syncRetryBlocked: false,
+              syncFailedAt: undefined,
+            };
+
+            await db.stockTransfers.put(mappedTransfer);
+          } catch (error) {
+            console.error(`[Sync] Error applying stock transfer ${transfer?.id}:`, error);
+          }
+        }
+        console.log(`[Sync] Applied ${changes.stock_transfers.length} stock transfer changes`);
       }
 
       // Apply suppliers
@@ -3278,6 +3388,57 @@ class SyncService {
         percent: 100,
         message: error instanceof Error ? error.message : 'Failed to refresh inventory from backend',
       });
+      return false;
+    }
+  }
+
+  /**
+   * Fetch the complete transfer history visible to a branch and merge it into
+   * the local cache. This is used on inventory load and while the Transfers tab
+   * is open so devices can see transfers created by another device.
+   */
+  async fetchAllStockTransfersFromBackend(branchId: string): Promise<boolean> {
+    try {
+      const backendBranchId = this.toBackendBranchId(branchId);
+      const url = `/inventory/transfers/?branch_id=${encodeURIComponent(backendBranchId)}`;
+      const transfers = await this.fetchPaginatedResults<any>(url, 'stock transfers');
+      const backendIds = new Set<string>();
+      const cleanTransfers: any[] = [];
+
+      for (const transfer of transfers) {
+        const transferId = String(transfer?.id ?? '').trim();
+        if (!transferId) continue;
+        backendIds.add(transferId);
+
+        const existingTransfer = await db.stockTransfers.get(transferId);
+        if (existingTransfer?._dirty) {
+          continue;
+        }
+        cleanTransfers.push(transfer);
+      }
+
+      if (cleanTransfers.length > 0) {
+        await this.applyServerChanges({ stock_transfers: cleanTransfers }, branchId);
+      }
+
+      // Remove stale server rows for this branch, but never remove local rows
+      // that are still waiting to be pushed.
+      const branchCandidates = new Set(this.getBranchIdCandidates(branchId));
+      const localTransfers = await db.stockTransfers.toArray();
+      for (const transfer of localTransfers) {
+        const touchesBranch =
+          branchCandidates.has(String(transfer.fromBranchId || '').trim()) ||
+          branchCandidates.has(String(transfer.toBranchId || '').trim());
+        if (!touchesBranch || backendIds.has(String(transfer.id)) || transfer._dirty) {
+          continue;
+        }
+
+        await db.stockTransfers.delete(transfer.id);
+      }
+
+      return true;
+    } catch (error) {
+      console.error('[Sync] Failed to fetch stock transfers from backend:', error);
       return false;
     }
   }

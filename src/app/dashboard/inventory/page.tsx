@@ -590,29 +590,9 @@ export default function InventoryPage() {
       try {
         // Fetch stock transfers from backend
         console.log('[InventoryPage] Fetching stock transfers from backend');
-        const transferResponse = await authFetch.fetch<any>(`/inventory/transfers/?branch_id=${backendBranchId}`);
-        
-        let transfers = [];
-        if (transferResponse && Array.isArray(transferResponse)) {
-          transfers = transferResponse;
-        } else if (transferResponse?.results && Array.isArray(transferResponse.results)) {
-          transfers = transferResponse.results;
-        }
-
-        console.log('[InventoryPage] Received', transfers.length, 'stock transfers from backend');
-        for (const transfer of transfers) {
-          await db.stockTransfers.put({
-            id: transfer.id,
-            fromBranchId: transfer.from_branch,
-            fromBranchName: transfer.from_branch_name,
-            toBranchId: transfer.to_branch,
-            toBranchName: transfer.to_branch_name,
-            itemId: transfer.inventory_item,
-            itemName: transfer.item_name,
-            quantity: parseFloat(transfer.quantity || 0),
-            initiatedBy: transfer.initiated_by,
-            createdAt: transfer.created_at,
-          });
+        const transfersSynced = await syncService.fetchAllStockTransfersFromBackend(branchId);
+        if (!transfersSynced) {
+          console.warn('[InventoryPage] Stock transfer refresh failed; keeping local transfer cache');
         }
       } catch (error) {
         console.error('[InventoryPage] Failed to fetch stock transfers from backend:', error);
@@ -972,14 +952,19 @@ export default function InventoryPage() {
   const stockTransfersData = useLiveQuery(() => {
       if (!activeBranchId) return [];
       if (isWarehouseBranchId(activeBranchId)) return [];
-      return db.stockTransfers
-        .where('fromBranchId')
-        .equals(activeBranchId)
-        .or('toBranchId')
-        .equals(activeBranchId)
-        .reverse()
-        .sortBy('createdAt')
-        .then((data) => data.filter((record) => record._operation !== 'delete'));
+      const branchCandidates = new Set(getBranchIdCandidates(activeBranchId));
+      return db.stockTransfers.toArray().then((data) =>
+        data
+          .filter((record) => {
+            const fromBranchId = String(record.fromBranchId || '').trim();
+            const toBranchId = String(record.toBranchId || '').trim();
+            return (
+              (branchCandidates.has(fromBranchId) || branchCandidates.has(toBranchId)) &&
+              record._operation !== 'delete'
+            );
+          })
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      );
   }, [activeBranchId], []);
 
   const wasteLogData = useLiveQuery(() => {

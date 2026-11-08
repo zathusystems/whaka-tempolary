@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { format } from 'date-fns';
-import { Loader2, MoreHorizontal } from 'lucide-react';
+import type { DateRange } from 'react-day-picker';
+import { endOfDay, format, startOfDay, subDays, startOfMonth } from 'date-fns';
+import { Calendar as CalendarIcon, Loader2, MoreHorizontal } from 'lucide-react';
 
 import { db, type Session } from '@/lib/db';
 import { useCurrency } from '@/hooks/use-currency';
@@ -26,6 +27,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Calendar } from '@/components/ui/calendar';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import SessionDetailDialog from './session-detail-modal';
 
 const LOCAL_STORAGE_KEYS = {
@@ -37,6 +40,78 @@ interface SessionHistoryModalProps {
   onOpenChange: (open: boolean) => void;
   branchId?: string | null;
 }
+
+type HistoryOrder = {
+  status?: string;
+  total?: number | string;
+  gross_amount?: number | string;
+  grossAmount?: number | string;
+  created_at?: string;
+  createdAt?: string;
+};
+
+type HistorySession = Session & {
+  orders?: HistoryOrder[];
+};
+
+const INCLUDED_ORDER_STATUSES = new Set(['new', 'preparing', 'ready', 'completed']);
+
+const getOrderDate = (order: HistoryOrder): Date | null => {
+  const rawDate = order.created_at ?? order.createdAt;
+  if (!rawDate) return null;
+  const parsed = new Date(rawDate);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const getOrderGrossTotal = (order: HistoryOrder): number => {
+  const value = Number(order.total ?? order.gross_amount ?? order.grossAmount ?? 0);
+  return Number.isFinite(value) ? value : 0;
+};
+
+const isDateInRange = (value: Date | null, dateRange?: DateRange): boolean => {
+  if (!dateRange?.from) return true;
+  if (!value) return false;
+
+  const from = startOfDay(dateRange.from).getTime();
+  const to = endOfDay(dateRange.to ?? dateRange.from).getTime();
+  const timestamp = value.getTime();
+  return timestamp >= from && timestamp <= to;
+};
+
+const sessionHasSalesInRange = (session: HistorySession, dateRange?: DateRange): boolean => {
+  if (!dateRange?.from) return true;
+
+  const orders = Array.isArray(session.orders) ? session.orders : [];
+  if (orders.length > 0) {
+    return orders.some((order) =>
+      INCLUDED_ORDER_STATUSES.has(String(order.status || '').toLowerCase()) &&
+      isDateInRange(getOrderDate(order), dateRange)
+    );
+  }
+
+  // Offline/local fallback records do not contain nested orders. In that
+  // case, use the session start date so the history still remains usable.
+  const sessionDate = session.startedAt || session.closedAt;
+  return isDateInRange(sessionDate ? new Date(sessionDate) : null, dateRange);
+};
+
+const getSessionSalesInRange = (session: HistorySession, dateRange?: DateRange): number => {
+  const orders = Array.isArray(session.orders) ? session.orders : [];
+  if (orders.length > 0) {
+    const matchingOrders = orders.filter((order) =>
+      INCLUDED_ORDER_STATUSES.has(String(order.status || '').toLowerCase()) &&
+      isDateInRange(getOrderDate(order), dateRange)
+    );
+
+    // Session History and Reports now use the same gross order total. This
+    // avoids comparing Reports' order totals with the session's net subtotal.
+    if (matchingOrders.length > 0 || dateRange?.from) {
+      return matchingOrders.reduce((sum, order) => sum + getOrderGrossTotal(order), 0);
+    }
+  }
+
+  return getSessionTotalSales(session);
+};
 
 const normalizeBranchId = (value: string | null): string | null => {
   if (!value) return null;
@@ -61,7 +136,7 @@ const normalizeBranchId = (value: string | null): string | null => {
   return null;
 };
 
-const mapBackendSessionToLocal = (session: any, fallbackBranchId: string | null): Session => ({
+const mapBackendSessionToLocal = (session: any, fallbackBranchId: string | null): HistorySession => ({
   id: String(session.id),
   branchId: String(session.branch || fallbackBranchId || ''),
   userId: String(session.user || ''),
@@ -83,6 +158,7 @@ const mapBackendSessionToLocal = (session: any, fallbackBranchId: string | null)
   totalTips: parseFloat(session.total_tips || 0),
   openingStock: session.opening_stock || [],
   closingStock: session.closing_stock || [],
+  orders: Array.isArray(session.orders) ? session.orders : [],
   startedAt: session.started_at || session.startedAt,
   closedAt: session.closed_at || session.closedAt,
 });
@@ -119,9 +195,10 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
     const [viewingSession, setViewingSession] = useState<Session | null>(null);
     const { format: formatCurrency } = useCurrency();
     const { user } = useAuth();
-    const [closedSessions, setClosedSessions] = useState<Session[]>([]);
+    const [closedSessions, setClosedSessions] = useState<HistorySession[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [activeTab, setActiveTab] = useState<'fuel' | 'nonFuel'>('nonFuel');
+    const [dateRange, setDateRange] = useState<DateRange | undefined>();
 
     useEffect(() => {
         if (branchId) {
@@ -211,7 +288,10 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
 
                     for (const session of backendClosedSessions) {
                       try {
-                        await db.sessions.put(session);
+                        // Keep the local session cache compact; nested orders
+                        // are only needed for this period comparison view.
+                        const { orders: _orders, ...sessionCacheRecord } = session;
+                        await db.sessions.put(sessionCacheRecord);
                       } catch (dbError) {
                         console.warn('[Sessions History] Error storing backend session in local DB:', dbError);
                       }
@@ -222,12 +302,30 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                     const localSessions = (await db.sessions.toArray())
                       .filter((session) =>
                         session.status === 'closed' &&
-                        (!activeBranchId || String(session.branchId) === String(activeBranchId))
+                        (!activeBranchId || normalizeBranchId(String(session.branchId)) === normalizeBranchId(activeBranchId))
                       )
                       .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
 
-                    console.log('[Sessions History] Loaded', localSessions.length, 'closed sessions from local DB (fallback mode)');
-                    setClosedSessions(localSessions);
+                    const localOrders = await db.orders.toArray();
+                    const ordersBySession = new Map<string, HistoryOrder[]>();
+                    localOrders.forEach((order) => {
+                      const sessionKey = String(order.sessionId || '').trim();
+                      if (!sessionKey) return;
+                      const sessionOrders = ordersBySession.get(sessionKey) || [];
+                      sessionOrders.push({
+                        status: order.status,
+                        total: order.total,
+                        createdAt: order.createdAt,
+                      });
+                      ordersBySession.set(sessionKey, sessionOrders);
+                    });
+                    const localSessionsWithOrders = localSessions.map((session) => ({
+                      ...session,
+                      orders: ordersBySession.get(String(session.id)) || [],
+                    }));
+
+                    console.log('[Sessions History] Loaded', localSessionsWithOrders.length, 'closed sessions from local DB (fallback mode)');
+                    setClosedSessions(localSessionsWithOrders);
                 }
             } catch (error) {
                 console.error('[Sessions History] Error fetching closed sessions:', error);
@@ -262,8 +360,19 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
         );
     }
 
-    const fuelSessions = closedSessions.filter((session) => hasPumpName(session));
-    const nonFuelSessions = closedSessions.filter((session) => !hasPumpName(session));
+    const filteredSessions = closedSessions.filter((session) => sessionHasSalesInRange(session, dateRange));
+    const fuelSessions = filteredSessions.filter((session) => hasPumpName(session));
+    const nonFuelSessions = filteredSessions.filter((session) => !hasPumpName(session));
+    const totalSalesInRange = filteredSessions.reduce(
+        (sum, session) => sum + getSessionSalesInRange(session, dateRange),
+        0
+    );
+    const dateRangeLabel = dateRange?.from
+        ? dateRange.to
+            ? `${format(dateRange.from, 'LLL dd, y')} - ${format(dateRange.to, 'LLL dd, y')}`
+            : format(dateRange.from, 'LLL dd, y')
+        : 'All closed sessions';
+    const salesColumnLabel = dateRange?.from ? 'Sales in Range' : 'Total Sales';
 
     const renderSessionsTable = (sessions: Session[], emptyMessage: string, showPump: boolean) => (
         <>
@@ -284,8 +393,8 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                                     <MobileInfoRow label="Pump" value={session.pumpName || '-'} />
                                 )}
                                 <MobileInfoRow
-                                    label="Total Sales"
-                                    value={formatCurrency(getSessionTotalSales(session))}
+                                    label={salesColumnLabel}
+                                    value={formatCurrency(getSessionSalesInRange(session, dateRange))}
                                     valueClassName="font-medium"
                                 />
                                 <MobileInfoRow
@@ -319,7 +428,7 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                             <TableHead>Started By</TableHead>
                             {showPump && <TableHead>Pump</TableHead>}
                             <TableHead>Status</TableHead>
-                            <TableHead className="text-right">Total Sales</TableHead>
+                            <TableHead className="text-right">{salesColumnLabel}</TableHead>
                             <TableHead className="text-right">Cash Difference</TableHead>
                             <TableHead className="w-auto text-right">
                                 <span className="sr-only">Actions</span>
@@ -334,7 +443,7 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                                     <TableCell>{session.userName}</TableCell>
                                     {showPump && <TableCell>{session.pumpName || '-'}</TableCell>}
                                     <TableCell><Badge variant="secondary">Closed</Badge></TableCell>
-                                    <TableCell className="text-right font-medium">{formatCurrency(getSessionTotalSales(session))}</TableCell>
+                                    <TableCell className="text-right font-medium">{formatCurrency(getSessionSalesInRange(session, dateRange))}</TableCell>
                                     <TableCell className={`text-right font-medium ${(session.difference || 0) !== 0 ? 'text-destructive' : ''}`}>
                                         {formatCurrency(session.difference || 0)}
                                     </TableCell>
@@ -367,7 +476,9 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
             <DialogContent className="sm:max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
                 <DialogHeader>
                     <DialogTitle>Session History</DialogTitle>
-                    <DialogDescription>Review details from previously closed sessions for this branch.</DialogDescription>
+                    <DialogDescription>
+                        Review closed sessions and compare gross sales with the selected Reports period.
+                    </DialogDescription>
                 </DialogHeader>
                 <div className="flex-1 overflow-y-auto">
                     {isLoading ? (
@@ -375,6 +486,75 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
                         </div>
                     ) : (
+                        <>
+                        <div className="mb-4 flex flex-col gap-3 rounded-lg border bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="rounded-md bg-primary/10 p-2 text-primary">
+                                    <CalendarIcon className="h-4 w-4" />
+                                </div>
+                                <div>
+                                    <p className="text-sm font-medium">Sales period</p>
+                                    <p className="text-xs text-muted-foreground">{dateRangeLabel}</p>
+                                </div>
+                            </div>
+                            <Popover>
+                                <PopoverTrigger asChild>
+                                    <Button variant="outline" className="w-full justify-start text-left sm:w-auto">
+                                        <CalendarIcon className="mr-2 h-4 w-4" />
+                                        {dateRange?.from
+                                            ? dateRange.to
+                                                ? `${format(dateRange.from, 'LLL dd')} - ${format(dateRange.to, 'LLL dd, y')}`
+                                                : format(dateRange.from, 'LLL dd, y')
+                                            : 'Choose date range'}
+                                    </Button>
+                                </PopoverTrigger>
+                                <PopoverContent align="end" className="w-auto p-0">
+                                    <div className="flex flex-wrap gap-2 border-b p-3">
+                                        <Button size="sm" variant={!dateRange ? 'secondary' : 'ghost'} onClick={() => setDateRange(undefined)}>All time</Button>
+                                        <Button size="sm" variant="ghost" onClick={() => {
+                                            const today = new Date();
+                                            setDateRange({ from: startOfDay(today), to: endOfDay(today) });
+                                        }}>Today</Button>
+                                        <Button size="sm" variant="ghost" onClick={() => {
+                                            const yesterday = subDays(new Date(), 1);
+                                            setDateRange({ from: startOfDay(yesterday), to: endOfDay(yesterday) });
+                                        }}>Yesterday</Button>
+                                        <Button size="sm" variant="ghost" onClick={() => setDateRange({ from: startOfDay(subDays(new Date(), 7)), to: endOfDay(new Date()) })}>Last 7 days</Button>
+                                        <Button size="sm" variant="ghost" onClick={() => setDateRange({ from: startOfDay(subDays(new Date(), 30)), to: endOfDay(new Date()) })}>Last 30 days</Button>
+                                        <Button size="sm" variant="ghost" onClick={() => {
+                                            const today = new Date();
+                                            setDateRange({ from: startOfMonth(today), to: endOfDay(today) });
+                                        }}>This month</Button>
+                                    </div>
+                                    <Calendar
+                                        initialFocus
+                                        mode="range"
+                                        selected={dateRange}
+                                        onSelect={setDateRange}
+                                        numberOfMonths={2}
+                                    />
+                                </PopoverContent>
+                            </Popover>
+                        </div>
+
+                        <div className="mb-4 grid gap-3 sm:grid-cols-3">
+                            <div className="rounded-lg border bg-card p-3">
+                                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Sales in period</p>
+                                <p className="mt-1 text-xl font-semibold">{formatCurrency(totalSalesInRange)}</p>
+                            </div>
+                            <div className="rounded-lg border bg-card p-3">
+                                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Sessions</p>
+                                <p className="mt-1 text-xl font-semibold">{filteredSessions.length}</p>
+                            </div>
+                            <div className="rounded-lg border bg-card p-3">
+                                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Breakdown</p>
+                                <p className="mt-1 text-sm font-medium">{fuelSessions.length} fuel · {nonFuelSessions.length} non-pump</p>
+                            </div>
+                        </div>
+
+                        <p className="mb-3 text-xs text-muted-foreground">
+                            Sales are gross order totals, excluding voided and cancelled orders. Sessions with sales in the selected period are included, even if they started earlier.
+                        </p>
                         <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'fuel' | 'nonFuel')}>
                             <TabsList className="mb-4 grid h-auto w-full grid-cols-1 sm:grid-cols-2">
                                 <TabsTrigger value="fuel" className="text-xs sm:text-sm">Fuel Sessions</TabsTrigger>
@@ -395,6 +575,7 @@ export default function SessionHistoryModal({ isOpen, onOpenChange, branchId = n
                                 )}
                             </TabsContent>
                         </Tabs>
+                        </>
                     )}
                 </div>
             </DialogContent>

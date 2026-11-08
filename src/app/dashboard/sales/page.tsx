@@ -41,6 +41,7 @@ import { useForm, useFieldArray } from 'react-hook-form';
 
 import { useReports } from '@/hooks/use-reports';
 import { useAuth } from '@/hooks/use-auth';
+import { useActiveBranch } from '@/hooks/use-active-branch';
 import {
   Card,
   CardContent,
@@ -464,18 +465,10 @@ export default function ReportsPage() {
     const [refundingOrder, setRefundingOrder] = useState<Order | null>(null);
     const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
     const [detailModalOpen, setDetailModalOpen] = useState(false);
-    const [activeBranchId, setActiveBranchId] = React.useState<string | null>(null);
     const [isEisEnabled, setIsEisEnabled] = useState(false);
     const [fiscalYearStartMonth, setFiscalYearStartMonth] = useState(1);
     const { format: formatCurrency } = useCurrency();
-
-    // Get active branch from localStorage
-    React.useEffect(() => {
-        const branchId = localStorage.getItem('handypos-active-branch');
-        if (branchId) {
-            setActiveBranchId(branchId);
-        }
-    }, []);
+    const activeBranchId = useActiveBranch();
 
     React.useEffect(() => {
         if (typeof window === 'undefined') return;
@@ -507,15 +500,39 @@ export default function ReportsPage() {
     const toDateBase = date?.to || date?.from;
     const toDate = toDateBase ? endOfDay(toDateBase).toISOString() : new Date().toISOString();
     
-    // Filter orders by branch and date range (includes all orders for reports)
+    // The local database can contain the same branch under its legacy and
+    // backend IDs (for example BRN-12, branch-12, and 12). Query all of those
+    // IDs so Reports does not silently omit sales that Session History shows.
+    const branchIdCandidates = React.useMemo(() => {
+        const normalized = String(activeBranchId || '').trim();
+        if (!normalized) return [];
+
+        const candidates = new Set([normalized]);
+        const numericMatch = /^(?:brn-|branch-)?(\d+)$/i.exec(normalized);
+        if (numericMatch) {
+            candidates.add(numericMatch[1]);
+            candidates.add(`BRN-${numericMatch[1]}`);
+            candidates.add(`branch-${numericMatch[1]}`);
+        }
+        return Array.from(candidates);
+    }, [activeBranchId]);
+
+    // Filter orders by every equivalent branch ID and the selected date range.
     const allOrders = useLiveQuery(async () => {
-        if (!activeBranchId) return undefined;
-        const orders = await db.orders
-            .where('[branchId+createdAt]')
-            .between([activeBranchId, fromDate], [activeBranchId, toDate], true, true)
-            .toArray();
-        return sortOrdersByMostRecent(orders);
-    }, [activeBranchId, fromDate, toDate]);
+        if (branchIdCandidates.length === 0) return undefined;
+
+        const ordersByBranch = await Promise.all(
+            branchIdCandidates.map((branchId) =>
+                db.orders
+                    .where('[branchId+createdAt]')
+                    .between([branchId, fromDate], [branchId, toDate], true, true)
+                    .toArray()
+            )
+        );
+        const uniqueOrders = new Map<string, Order>();
+        ordersByBranch.flat().forEach((order) => uniqueOrders.set(String(order.id), order));
+        return sortOrdersByMostRecent(Array.from(uniqueOrders.values()));
+    }, [branchIdCandidates, fromDate, toDate]);
 
     const reportOrdersLoading = activeBranchId !== null && allOrders === undefined;
     const { data, loading, error } = useReports(date, allOrders, reportOrdersLoading);

@@ -7,6 +7,7 @@ from .tax_utils import (
     get_default_tax_rate,
     lock_tax_rate_on_use,
 )
+
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 
@@ -593,3 +594,46 @@ class SessionSerializer(serializers.ModelSerializer):
         except Exception as e:
             print('[SessionSerializer] Error creating session:', str(e))
             raise
+
+
+class SessionSummarySerializer(SessionSerializer):
+    """Lightweight representation used by session list endpoints.
+
+    The full serializer embeds every order and order item. That payload grows
+    with every sale and unnecessarily delays the main sessions screen, which
+    loads orders separately only after a session has been selected.
+    """
+
+    def get_fields(self):
+        fields = super().get_fields()
+        fields.pop('orders', None)
+        return fields
+
+    def _get_annotated_total(self, obj, field_name):
+        """Read a total calculated by the list queryset without another query."""
+        value = getattr(obj, field_name, None)
+        return float(value or 0)
+
+    def get_total_sales(self, obj):
+        return self._get_annotated_total(obj, '_session_total_sales')
+
+    def get_total_cash_sales(self, obj):
+        return self._get_annotated_total(obj, '_session_cash_sales')
+
+    def get_total_card_sales(self, obj):
+        return self._get_annotated_total(obj, '_session_card_sales')
+
+    def get_total_mobile_money_sales(self, obj):
+        return self._get_annotated_total(obj, '_session_mobile_money_sales')
+
+    def get_total_on_account_sales(self, obj):
+        return self._get_annotated_total(obj, '_session_on_account_sales')
+
+    def get_total_other_sales(self, obj):
+        return self._get_annotated_total(obj, '_session_other_sales')
+
+    def get_expected_cash(self, obj):
+        cash_sales = getattr(obj, '_session_cash_sales', None)
+        if cash_sales is None:
+            return float(obj.opening_float or 0)
+        return float((obj.opening_float or 0) + cash_sales)

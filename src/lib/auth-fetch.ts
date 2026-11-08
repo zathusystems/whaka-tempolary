@@ -744,9 +744,14 @@ class AuthenticatedFetch {
    */
   async fetch<T = any>(
     url: string,
-    options: RequestInit & { offline?: boolean; timeoutMs?: number; meta?: { domain?: QueueDomain; entityType?: string; entityId?: string; metadata?: Record<string, any> } } = {}
+    options: RequestInit & {
+      offline?: boolean;
+      timeoutMs?: number;
+      maxAttempts?: number;
+      meta?: { domain?: QueueDomain; entityType?: string; entityId?: string; metadata?: Record<string, any> };
+    } = {}
   ): Promise<T> {
-    const { offline = false, timeoutMs, meta, ...fetchOptions } = options;
+    const { offline = false, timeoutMs, maxAttempts, meta, ...fetchOptions } = options;
     const method = (fetchOptions.method || 'GET') as 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
     const fullUrl = url.startsWith('http') ? url : `${API_BASE_URL}${url}`;
 
@@ -759,7 +764,7 @@ class AuthenticatedFetch {
     try {
       // Always attempt to fetch from server (Django is always accessible locally)
       const response = await this.executeFetchWithRetry(fullUrl, fetchOptions, {
-        maxAttempts: method === 'GET' ? 2 : 1,
+        maxAttempts: maxAttempts ?? (method === 'GET' ? 2 : 1),
         label: `${method} ${fullUrl}`,
         timeoutMs,
       });

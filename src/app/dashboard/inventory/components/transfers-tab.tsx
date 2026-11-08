@@ -3,7 +3,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { format } from 'date-fns';
-import { Repeat, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
+import { Repeat, AlertCircle, CheckCircle2, Loader2, RotateCcw } from 'lucide-react';
 
 import { db, type StockTransfer } from '@/lib/db';
 import { Button } from '@/components/ui/button';
@@ -24,6 +24,7 @@ interface TransfersTabProps {
 export function TransfersTab({ stockTransfersData, isMobile, searchTerm, onTransferStock, branchId }: TransfersTabProps) {
     const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
     const [pendingChanges, setPendingChanges] = useState(0);
+    const [retryingTransferId, setRetryingTransferId] = useState<string | null>(null);
     const normalizedSearchTerm = searchTerm.trim().toLowerCase();
 
     const filteredTransfersData = React.useMemo(() => {
@@ -54,15 +55,44 @@ export function TransfersTab({ stockTransfersData, isMobile, searchTerm, onTrans
         setCurrentPage(1);
     }, [normalizedSearchTerm, setCurrentPage]);
 
+    // Refresh the shared transfer history while this tab is open. Transfers
+    // created on another logged-in device are stored on the backend, so a
+    // local-only Dexie query would otherwise remain stale until a full reload.
+    useEffect(() => {
+        const refreshTransfers = () => {
+            void syncService.fetchAllStockTransfersFromBackend(branchId);
+        };
+
+        refreshTransfers();
+        window.addEventListener('focus', refreshTransfers);
+        const interval = setInterval(refreshTransfers, 30000);
+        return () => {
+            window.removeEventListener('focus', refreshTransfers);
+            clearInterval(interval);
+        };
+    }, [branchId]);
+
     // Count pending changes for this branch
     useEffect(() => {
         const countPendingChanges = async () => {
             try {
-                const dirtyRecords = await db.stockTransfers
-                    .where('fromBranchId')
-                    .equals(branchId)
-                    .toArray()
-                    .then(records => records.filter(r => r._dirty));
+                const normalizedBranchId = String(branchId || '').trim();
+                const branchCandidates = new Set<string>([normalizedBranchId]);
+                const numericMatch = /^(?:BRN-|branch-)(\d+)$/i.exec(normalizedBranchId);
+                if (numericMatch) {
+                    branchCandidates.add(numericMatch[1]);
+                }
+                if (/^\d+$/.test(normalizedBranchId)) {
+                    branchCandidates.add(`BRN-${normalizedBranchId}`);
+                    branchCandidates.add(`branch-${normalizedBranchId}`);
+                }
+
+                const dirtyRecords = (await db.stockTransfers.toArray()).filter((record) => {
+                    const touchesBranch =
+                        branchCandidates.has(String(record.fromBranchId || '').trim()) ||
+                        branchCandidates.has(String(record.toBranchId || '').trim());
+                    return touchesBranch && record._dirty;
+                });
                 setPendingChanges(dirtyRecords.length);
             } catch (error) {
                 console.error('[Transfers] Error counting pending changes:', error);
@@ -95,6 +125,80 @@ export function TransfersTab({ stockTransfersData, isMobile, searchTerm, onTrans
         }
     };
 
+    const failedTransfers = React.useMemo(
+        () => (stockTransfersData || []).filter((transfer) => (
+            transfer.syncStatus === 'failed' ||
+            Boolean(transfer.syncError) ||
+            transfer.syncRetryBlocked === true
+        )),
+        [stockTransfersData]
+    );
+
+    const retryTransfer = async (transfer: StockTransfer) => {
+        setRetryingTransferId(transfer.id);
+        try {
+            // The local stock movement already happened when the transfer was
+            // created. Retry only the backend transfer record so stock is not
+            // deducted twice on the device.
+            await db.stockTransfers.update(transfer.id, {
+                _dirty: true,
+                _operation: transfer._operation || 'create',
+                syncStatus: 'pending',
+                syncError: undefined,
+                syncRetryBlocked: false,
+                syncFailedAt: undefined,
+            });
+            await syncService.performFullSync(transfer.fromBranchId || branchId);
+            toast({ title: 'Transfer retry submitted', description: `${transfer.itemName} will sync again.` });
+        } catch (error) {
+            console.error('[Transfers] Retry failed:', error);
+            toast({ variant: 'destructive', title: 'Retry failed', description: 'The transfer could not be queued for retry.' });
+        } finally {
+            setRetryingTransferId(null);
+        }
+    };
+
+    const retryAllFailedTransfers = async () => {
+        if (failedTransfers.length === 0) return;
+        setSyncStatus('syncing');
+        try {
+            await db.transaction('rw', db.stockTransfers, async () => {
+                for (const transfer of failedTransfers) {
+                    await db.stockTransfers.update(transfer.id, {
+                        _dirty: true,
+                        _operation: transfer._operation || 'create',
+                        syncStatus: 'pending',
+                        syncError: undefined,
+                        syncRetryBlocked: false,
+                        syncFailedAt: undefined,
+                    });
+                }
+            });
+            const sourceBranches = Array.from(new Set(
+                failedTransfers
+                    .map((transfer) => transfer.fromBranchId || branchId)
+                    .filter(Boolean)
+            ));
+            for (const sourceBranchId of sourceBranches) {
+                await syncService.performFullSync(sourceBranchId);
+            }
+            setSyncStatus('synced');
+            toast({ title: 'Transfer retries submitted', description: `${failedTransfers.length} failed transfer${failedTransfers.length === 1 ? '' : 's'} queued again.` });
+            setTimeout(() => setSyncStatus('idle'), 3000);
+        } catch (error) {
+            console.error('[Transfers] Retry failed:', error);
+            setSyncStatus('error');
+            toast({ variant: 'destructive', title: 'Retry failed', description: 'The failed transfers could not be queued again.' });
+            setTimeout(() => setSyncStatus('idle'), 3000);
+        }
+    };
+
+    const transferStatus = (transfer: StockTransfer) => {
+        if (transfer.syncStatus === 'failed' || transfer.syncError || transfer.syncRetryBlocked === true) return 'Failed';
+        if (transfer._dirty) return 'Pending';
+        return 'Synced';
+    };
+
     return (
         <CardContent>
             <div className="mb-6 flex flex-wrap items-center gap-2">
@@ -113,6 +217,18 @@ export function TransfersTab({ stockTransfersData, isMobile, searchTerm, onTrans
                     {syncStatus === 'error' && <AlertCircle className="mr-2 h-4 w-4 text-red-600" />}
                     Sync
                 </Button>
+                {failedTransfers.length > 0 && (
+                    <Button
+                        onClick={retryAllFailedTransfers}
+                        disabled={syncStatus === 'syncing'}
+                        variant="outline"
+                        size="sm"
+                        title="Retry failed transfers"
+                    >
+                        <RotateCcw className="mr-2 h-4 w-4" />
+                        Retry failed ({failedTransfers.length})
+                    </Button>
+                )}
                 {pendingChanges > 0 && (
                     <span className="text-xs text-amber-600 bg-amber-50 px-2 py-1 rounded">
                         {pendingChanges} pending
@@ -146,6 +262,19 @@ export function TransfersTab({ stockTransfersData, isMobile, searchTerm, onTrans
                                     <p className="text-xs text-muted-foreground">Initiated By</p>
                                     <p>{transfer.initiatedBy}</p>
                                 </div>
+                                <div>
+                                    <p className="text-xs text-muted-foreground">Status</p>
+                                    <p className={transfer.syncStatus === 'failed' || transfer.syncError || transfer.syncRetryBlocked === true ? 'font-medium text-destructive' : 'font-medium'}>{transferStatus(transfer)}</p>
+                                </div>
+                                {(transfer.syncStatus === 'failed' || transfer.syncError || transfer.syncRetryBlocked === true) && (
+                                    <div className="col-span-2 space-y-2">
+                                        <p className="text-xs text-destructive">{transfer.syncError || 'Transfer sync failed.'}</p>
+                                        <Button size="sm" variant="outline" onClick={() => retryTransfer(transfer)} disabled={retryingTransferId === transfer.id || syncStatus === 'syncing'}>
+                                            {retryingTransferId === transfer.id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RotateCcw className="mr-2 h-4 w-4" />}
+                                            Retry
+                                        </Button>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     ))}
@@ -166,6 +295,8 @@ export function TransfersTab({ stockTransfersData, isMobile, searchTerm, onTrans
                                 <TableHead>From</TableHead>
                                 <TableHead>To</TableHead>
                                 <TableHead>Initiated By</TableHead>
+                                <TableHead>Status</TableHead>
+                                <TableHead>Action</TableHead>
                             </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -177,10 +308,26 @@ export function TransfersTab({ stockTransfersData, isMobile, searchTerm, onTrans
                                     <TableCell>{transfer.fromBranchName}</TableCell>
                                     <TableCell>{transfer.toBranchName}</TableCell>
                                     <TableCell>{transfer.initiatedBy}</TableCell>
+                                    <TableCell>
+                                        <span className={transfer.syncStatus === 'failed' || transfer.syncError || transfer.syncRetryBlocked === true ? 'font-medium text-destructive' : ''}>
+                                            {transferStatus(transfer)}
+                                        </span>
+                                        {(transfer.syncStatus === 'failed' || transfer.syncError || transfer.syncRetryBlocked === true) && transfer.syncError && (
+                                            <p className="mt-1 max-w-xs text-xs text-muted-foreground">{transfer.syncError}</p>
+                                        )}
+                                    </TableCell>
+                                    <TableCell>
+                                        {(transfer.syncStatus === 'failed' || transfer.syncError || transfer.syncRetryBlocked === true) && (
+                                            <Button size="sm" variant="outline" onClick={() => retryTransfer(transfer)} disabled={retryingTransferId === transfer.id || syncStatus === 'syncing'}>
+                                                {retryingTransferId === transfer.id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RotateCcw className="mr-2 h-4 w-4" />}
+                                                Retry
+                                            </Button>
+                                        )}
+                                    </TableCell>
                                 </TableRow>
                             )) : (
                                 <TableRow>
-                                    <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                                    <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
                                         {normalizedSearchTerm ? `No transfers match "${searchTerm.trim()}".` : 'No stock transfers have been recorded.'}
                                     </TableCell>
                                 </TableRow>

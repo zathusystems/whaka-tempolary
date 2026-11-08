@@ -604,6 +604,14 @@ class SessionSummarySerializer(SessionSerializer):
     loads orders separately only after a session has been selected.
     """
 
+    total_gross_sales = serializers.SerializerMethodField()
+
+    class Meta(SessionSerializer.Meta):
+        fields = [
+            field for field in SessionSerializer.Meta.fields
+            if field != 'orders'
+        ] + ['total_gross_sales']
+
     def get_fields(self):
         fields = super().get_fields()
         fields.pop('orders', None)
@@ -616,6 +624,9 @@ class SessionSummarySerializer(SessionSerializer):
 
     def get_total_sales(self, obj):
         return self._get_annotated_total(obj, '_session_total_sales')
+
+    def get_total_gross_sales(self, obj):
+        return self._get_annotated_total(obj, '_session_gross_sales')
 
     def get_total_cash_sales(self, obj):
         return self._get_annotated_total(obj, '_session_cash_sales')

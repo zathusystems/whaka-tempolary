@@ -472,12 +472,22 @@ class SessionViewSet(viewsets.ModelViewSet):
     serializer_class = SessionSerializer
     permission_classes = [IsAuthenticated]
 
+    def _summary_requested(self):
+        """Return whether this request is asking for a lightweight session list."""
+        if self.action in {'list', 'active_list'}:
+            return True
+        if self.action != 'closed_list':
+            return False
+        return str(self.request.query_params.get('summary') or '').strip().lower() in {
+            '1', 'true', 'yes',
+        }
+
     def get_serializer_class(self):
         # List consumers only need session totals and metadata. The full
         # serializer embeds every order/item and becomes increasingly slow as
         # a branch accumulates sales; detail/history endpoints still return
         # the complete payload.
-        if self.action in {'list', 'active_list'}:
+        if self._summary_requested():
             return SessionSummarySerializer
         return super().get_serializer_class()
 
@@ -557,37 +567,71 @@ class SessionViewSet(viewsets.ModelViewSet):
 
         return queryset
 
+    def _get_sales_date_range(self):
+        """Parse optional order-date bounds used by Session History."""
+        sales_from = parse_datetime(str(self.request.query_params.get('sales_from') or '').strip())
+        sales_to = parse_datetime(str(self.request.query_params.get('sales_to') or '').strip())
+
+        if sales_from and timezone.is_naive(sales_from):
+            sales_from = timezone.make_aware(sales_from)
+        if sales_to and timezone.is_naive(sales_to):
+            sales_to = timezone.make_aware(sales_to)
+        return sales_from, sales_to
+
+    def _annotate_summary_queryset(self, queryset, include_sales_date_filter=False):
+        """Annotate session totals without loading nested orders or order items."""
+        valid_orders = Q(orders__status__in=['New', 'Preparing', 'Ready', 'Completed'])
+        sales_orders = valid_orders
+
+        if include_sales_date_filter:
+            sales_from, sales_to = self._get_sales_date_range()
+            if sales_from:
+                sales_orders &= Q(orders__created_at__gte=sales_from)
+            if sales_to:
+                sales_orders &= Q(orders__created_at__lte=sales_to)
+
+            # When a period is selected, return only sessions which actually
+            # had an included sale in that period. This keeps the history list
+            # small and preserves the Reports/session-history date semantics.
+            if sales_from or sales_to:
+                queryset = queryset.filter(sales_orders).distinct()
+
+        return queryset.select_related('user', 'branch').annotate(
+            _session_total_sales=Sum(
+                'orders__subtotal',
+                filter=valid_orders,
+            ),
+            _session_gross_sales=Sum(
+                'orders__total',
+                filter=sales_orders,
+            ),
+            _session_cash_sales=Sum(
+                'orders__total',
+                filter=valid_orders & Q(orders__payment_method='Cash'),
+            ),
+            _session_card_sales=Sum(
+                'orders__total',
+                filter=valid_orders & Q(orders__payment_method='Card'),
+            ),
+            _session_mobile_money_sales=Sum(
+                'orders__total',
+                filter=valid_orders & Q(orders__payment_method='Mobile Money'),
+            ),
+            _session_on_account_sales=Sum(
+                'orders__total',
+                filter=valid_orders & Q(orders__payment_method='On Account'),
+            ),
+            _session_other_sales=Sum(
+                'orders__total',
+                filter=valid_orders & Q(orders__payment_method='Other'),
+            ),
+        ).order_by('-started_at')
+
     def get_queryset(self):
         """Filter sessions by business scope, role, and optional branch."""
         queryset = self._get_scoped_queryset()
         if self.action in {'list', 'active_list'}:
-            valid_orders = Q(orders__status__in=['New', 'Preparing', 'Ready', 'Completed'])
-            return queryset.select_related('user', 'branch').annotate(
-                _session_total_sales=Sum(
-                    'orders__subtotal',
-                    filter=valid_orders,
-                ),
-                _session_cash_sales=Sum(
-                    'orders__total',
-                    filter=valid_orders & Q(orders__payment_method='Cash'),
-                ),
-                _session_card_sales=Sum(
-                    'orders__total',
-                    filter=valid_orders & Q(orders__payment_method='Card'),
-                ),
-                _session_mobile_money_sales=Sum(
-                    'orders__total',
-                    filter=valid_orders & Q(orders__payment_method='Mobile Money'),
-                ),
-                _session_on_account_sales=Sum(
-                    'orders__total',
-                    filter=valid_orders & Q(orders__payment_method='On Account'),
-                ),
-                _session_other_sales=Sum(
-                    'orders__total',
-                    filter=valid_orders & Q(orders__payment_method='Other'),
-                ),
-            ).order_by('-started_at')
+            return self._annotate_summary_queryset(queryset)
         return queryset
 
     def perform_create(self, serializer):
@@ -675,7 +719,14 @@ class SessionViewSet(viewsets.ModelViewSet):
         queryset = self._get_scoped_queryset(
             include_user_filter=True,
             include_manager_full_scope=True,
-        ).filter(status='closed').order_by('-started_at')
+        ).filter(status='closed')
+        if self._summary_requested():
+            queryset = self._annotate_summary_queryset(
+                queryset,
+                include_sales_date_filter=True,
+            )
+        else:
+            queryset = queryset.order_by('-started_at')
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 

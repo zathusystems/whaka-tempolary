@@ -891,3 +891,31 @@ class SessionVisibilityTests(TestCase):
         session_rows = payload.get('results', payload) if isinstance(payload, dict) else payload
         returned_ids = {str(row['id']) for row in session_rows}
         self.assertIn(str(self.closed_session.id), returned_ids)
+
+    def test_closed_history_summary_omits_orders_and_returns_gross_total(self):
+        Order.objects.create(
+            business=self.business,
+            branch=self.branch,
+            session=self.closed_session,
+            order_number=9001,
+            order_type='sale',
+            status='Completed',
+            payment_method='Cash',
+            subtotal=Decimal('100.00'),
+            total=Decimal('116.50'),
+            net_amount=Decimal('100.00'),
+            gross_amount=Decimal('116.50'),
+            vat_amount=Decimal('16.50'),
+        )
+
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(
+            f'/api/sessions/sessions/closed_list/?branch_id={self.branch.id}&summary=1'
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json() if hasattr(response, 'json') else response.data
+        session_rows = payload.get('results', payload) if isinstance(payload, dict) else payload
+        row = next(item for item in session_rows if str(item['id']) == str(self.closed_session.id))
+        self.assertNotIn('orders', row)
+        self.assertEqual(float(row['total_gross_sales']), 116.5)

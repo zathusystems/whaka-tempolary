@@ -94,7 +94,10 @@ const LOCAL_STORAGE_KEYS = {
     BRANCHES: 'handypos-branches'
 };
 
-const SHOW_WASTE_TAB = false;
+// Waste management is a normal inventory workflow. Keep the tab available for
+// inventory managers; the existing permission/warehouse checks below still
+// control who can use it and where it is shown.
+const SHOW_WASTE_TAB = true;
 
 type Branch = {
   id: string;

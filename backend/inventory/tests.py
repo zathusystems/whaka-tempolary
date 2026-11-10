@@ -1,4 +1,5 @@
 from decimal import Decimal
+import uuid
 
 from django.contrib.auth import get_user_model
 from rest_framework import status
@@ -353,3 +354,44 @@ class StockTransferCrossDeviceVisibilityTests(APITestCase):
         transfer_rows = response.data['changes']['stock_transfers']
         self.assertEqual(len(transfer_rows), 1)
         self.assertEqual(str(transfer_rows[0]['id']), str(self.transfer.id))
+
+    def test_sync_transfer_accepts_branch_alias_and_is_idempotent(self):
+        self.client.force_authenticate(user=self.owner)
+        source_item = InventoryItem.objects.get(
+            business=self.business,
+            branch=self.from_branch,
+            name='Cross Device Item',
+        )
+        transfer_id = str(uuid.uuid4())
+        change = {
+            'id': transfer_id,
+            'entity_type': 'StockTransfer',
+            'op': 'create',
+            'data': {
+                'fromBranchId': f'BRN-{self.from_branch.id}',
+                'toBranchId': f'BRN-{self.to_branch.id}',
+                'itemId': str(source_item.id),
+                'itemName': source_item.name,
+                'quantity': 2,
+                'initiatedBy': 'owner@example.com',
+            },
+        }
+        payload = {
+            'branch_id': f'BRN-{self.from_branch.id}',
+            'changes': [change],
+        }
+
+        first_response = self.client.post('/api/inventory/sync/push/', payload, format='json')
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(first_response.data['results']['acknowledged']), 1)
+
+        second_response = self.client.post('/api/inventory/sync/push/', payload, format='json')
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(second_response.data['results']['acknowledged']), 1)
+
+        source_item.refresh_from_db()
+        self.assertEqual(source_item.stock_units, Decimal('6'))
+        self.assertEqual(
+            StockTransfer.objects.filter(id=transfer_id).count(),
+            1,
+        )

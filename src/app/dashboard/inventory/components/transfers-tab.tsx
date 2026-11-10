@@ -149,10 +149,22 @@ export function TransfersTab({ stockTransfersData, isMobile, searchTerm, onTrans
                 syncFailedAt: undefined,
             });
             await syncService.performFullSync(transfer.fromBranchId || branchId);
-            toast({ title: 'Transfer retry submitted', description: `${transfer.itemName} will sync again.` });
+            // A full sync is best-effort and intentionally does not throw when
+            // offline. Refresh the authoritative server list before telling
+            // the user that this retry actually succeeded.
+            await syncService.fetchAllStockTransfersFromBackend(transfer.fromBranchId || branchId);
+            const refreshed = await db.stockTransfers.get(transfer.id);
+            if (!refreshed || refreshed._dirty || refreshed.syncStatus === 'failed' || refreshed.syncError) {
+                throw new Error(refreshed?.syncError || 'The backend rejected the transfer retry.');
+            }
+            toast({ title: 'Transfer synced', description: `${transfer.itemName} is now saved on the server.` });
         } catch (error) {
             console.error('[Transfers] Retry failed:', error);
-            toast({ variant: 'destructive', title: 'Retry failed', description: 'The transfer could not be queued for retry.' });
+            toast({
+                variant: 'destructive',
+                title: 'Retry failed',
+                description: error instanceof Error ? error.message : 'The transfer could not be saved on the server.',
+            });
         } finally {
             setRetryingTransferId(null);
         }
@@ -181,9 +193,23 @@ export function TransfersTab({ stockTransfersData, isMobile, searchTerm, onTrans
             ));
             for (const sourceBranchId of sourceBranches) {
                 await syncService.performFullSync(sourceBranchId);
+                await syncService.fetchAllStockTransfersFromBackend(sourceBranchId);
             }
-            setSyncStatus('synced');
-            toast({ title: 'Transfer retries submitted', description: `${failedTransfers.length} failed transfer${failedTransfers.length === 1 ? '' : 's'} queued again.` });
+            const remainingFailed: StockTransfer[] = [];
+            for (const transfer of failedTransfers) {
+                const refreshed = await db.stockTransfers.get(transfer.id);
+                if (!refreshed || refreshed._dirty || refreshed.syncStatus === 'failed' || refreshed.syncError) {
+                    remainingFailed.push(refreshed || transfer);
+                }
+            }
+            setSyncStatus(remainingFailed.length > 0 ? 'error' : 'synced');
+            toast({
+                variant: remainingFailed.length > 0 ? 'destructive' : 'default',
+                title: remainingFailed.length > 0 ? 'Some transfers still failed' : 'Transfers synced',
+                description: remainingFailed.length > 0
+                    ? `${remainingFailed.length} transfer${remainingFailed.length === 1 ? '' : 's'} still need attention.`
+                    : `${failedTransfers.length} transfer${failedTransfers.length === 1 ? '' : 's'} saved on the server.`,
+            });
             setTimeout(() => setSyncStatus('idle'), 3000);
         } catch (error) {
             console.error('[Transfers] Retry failed:', error);

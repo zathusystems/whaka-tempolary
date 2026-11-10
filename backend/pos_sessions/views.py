@@ -3,6 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import PageNumberPagination
 from .models import Session, Order, OrderItem, DiscountRule
 from .serializers import SessionSerializer, SessionSummarySerializer, OrderSerializer, OrderItemSerializer, DiscountRuleSerializer
 from django.conf import settings
@@ -13,6 +14,10 @@ from django.utils.dateparse import parse_datetime
 import re
 
 def _get_accessible_business_ids(user):
+    if getattr(user, 'is_superuser', False):
+        from business.models import Business
+        return list(Business.objects.values_list('id', flat=True))
+
     business_ids = set()
     user_businesses = getattr(user, 'businesses', None)
     if user_businesses is not None and hasattr(user_businesses, 'values_list'):
@@ -21,6 +26,7 @@ def _get_accessible_business_ids(user):
         from staff.models import Staff
         staff_business_ids = Staff.objects.filter(
             user=user,
+            is_active=True,
             business_id__isnull=False,
         ).values_list('business_id', flat=True)
         business_ids.update(staff_business_ids)
@@ -242,18 +248,42 @@ class OrderViewSet(viewsets.ModelViewSet):
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
 
+    class ReportPagination(PageNumberPagination):
+        # Reports commonly span a month or more. Allow the client to request
+        # a larger page so it does not make dozens of sequential requests,
+        # while retaining a safe upper bound for normal API consumers.
+        page_size = 25
+        page_size_query_param = 'page_size'
+        max_page_size = 500
+
+    pagination_class = ReportPagination
+
     def get_queryset(self):
-        """Filter orders by session and branch"""
+        """Filter orders to the authenticated business and requested period."""
         session_id = self.request.query_params.get('session_id')
         branch_id = self.request.query_params.get('branch_id')
-        
-        queryset = Order.objects.all()
+
+        accessible_business_ids = _get_accessible_business_ids(self.request.user)
+        queryset = Order.objects.filter(
+            business_id__in=accessible_business_ids,
+        ).prefetch_related('items').order_by('-created_at')
         
         if session_id:
             queryset = queryset.filter(session_id=session_id)
         
         if branch_id:
             queryset = _apply_branch_filter(queryset, branch_id)
+
+        created_from = parse_datetime(str(self.request.query_params.get('created_from') or '').strip())
+        created_to = parse_datetime(str(self.request.query_params.get('created_to') or '').strip())
+        if created_from:
+            if timezone.is_naive(created_from):
+                created_from = timezone.make_aware(created_from)
+            queryset = queryset.filter(created_at__gte=created_from)
+        if created_to:
+            if timezone.is_naive(created_to):
+                created_to = timezone.make_aware(created_to)
+            queryset = queryset.filter(created_at__lte=created_to)
         
         return queryset
 

@@ -40,6 +40,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useForm, useFieldArray } from 'react-hook-form';
 
 import { useReports } from '@/hooks/use-reports';
+import { syncBranchOrdersToLocalDb } from '@/lib/session-order-sync';
 import { useAuth } from '@/hooks/use-auth';
 import { useActiveBranch } from '@/hooks/use-active-branch';
 import {
@@ -465,6 +466,9 @@ export default function ReportsPage() {
     const [refundingOrder, setRefundingOrder] = useState<Order | null>(null);
     const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
     const [detailModalOpen, setDetailModalOpen] = useState(false);
+    const [serverReportOrders, setServerReportOrders] = useState<Order[] | null>(null);
+    const [serverReportRefreshComplete, setServerReportRefreshComplete] = useState(false);
+    const [serverReportRefreshError, setServerReportRefreshError] = useState<string | null>(null);
     const [isEisEnabled, setIsEisEnabled] = useState(false);
     const [fiscalYearStartMonth, setFiscalYearStartMonth] = useState(1);
     const { format: formatCurrency } = useCurrency();
@@ -499,6 +503,41 @@ export default function ReportsPage() {
     const fromDate = date?.from ? startOfDay(date.from).toISOString() : new Date(0).toISOString();
     const toDateBase = date?.to || date?.from;
     const toDate = toDateBase ? endOfDay(toDateBase).toISOString() : new Date().toISOString();
+
+    // Reports are shared business data, not device-local data. Refresh the
+    // selected period before calculating KPIs so a device that did not create
+    // the sales gets the same figures as the originating POS.
+    React.useEffect(() => {
+        if (!activeBranchId || !date?.from) return;
+
+        let cancelled = false;
+        setServerReportOrders(null);
+        setServerReportRefreshComplete(false);
+        setServerReportRefreshError(null);
+        void syncBranchOrdersToLocalDb({
+            branchId: activeBranchId,
+            from: fromDate,
+            to: toDate,
+            timeoutMs: 30000,
+            maxAttempts: 1,
+        }).catch((error) => {
+            if (!cancelled) {
+                console.warn('[Reports] Server order refresh failed; using local cache:', error);
+                setServerReportRefreshError('The server could not be reached. Figures below use this device\'s local cache and may not include sales from other devices.');
+                setServerReportRefreshComplete(true);
+            }
+        }).then((orders) => {
+            if (!cancelled && orders) {
+                setServerReportOrders(orders);
+                setServerReportRefreshError(null);
+                setServerReportRefreshComplete(true);
+            }
+        });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [activeBranchId, date?.from, date?.to, fromDate, toDate]);
     
     // The local database can contain the same branch under its legacy and
     // backend IDs (for example BRN-12, branch-12, and 12). Query all of those
@@ -534,22 +573,28 @@ export default function ReportsPage() {
         return sortOrdersByMostRecent(Array.from(uniqueOrders.values()));
     }, [branchIdCandidates, fromDate, toDate]);
 
-    const reportOrdersLoading = activeBranchId !== null && allOrders === undefined;
-    const { data, loading, error } = useReports(date, allOrders, reportOrdersLoading);
+    const reportOrders = serverReportRefreshComplete && serverReportOrders !== null
+        ? serverReportOrders
+        : allOrders;
+    const reportOrdersLoading = activeBranchId !== null && (
+        !serverReportRefreshComplete ||
+        (serverReportOrders === null && allOrders === undefined)
+    );
+    const { data, loading, error } = useReports(date, reportOrders, reportOrdersLoading);
 
-    const orderPagination = usePaginatedItems(allOrders ?? [], 25);
+    const orderPagination = usePaginatedItems(reportOrders ?? [], 25);
 
     // Normalize report orders so charts and KPIs use the same non-voided totals
     const activeOrders = useMemo(() => {
-        if (!allOrders) return undefined;
-        return allOrders
+        if (!reportOrders) return undefined;
+        return reportOrders
             .filter(order => order.status !== 'Voided' && order.status !== 'Cancelled')
             .map(normalizeOrderForReport);
-    }, [allOrders]);
+    }, [reportOrders]);
 
     const normalizedOrdersForEis = useMemo(() => {
-        if (!allOrders) return undefined;
-        return allOrders.map(order => {
+        if (!reportOrders) return undefined;
+        return reportOrders.map(order => {
             const resolvedStatus = resolveEisStatusForOrder(order, isEisEnabled);
             return {
                 ...order,
@@ -557,7 +602,7 @@ export default function ReportsPage() {
                 eisStatus: resolvedStatus,
             };
         });
-    }, [allOrders, isEisEnabled]);
+    }, [reportOrders, isEisEnabled]);
 
     const eisSummary = useMemo(() => {
         if (!normalizedOrdersForEis) return EMPTY_EIS_SUMMARY;
@@ -850,6 +895,15 @@ export default function ReportsPage() {
              <Button variant="outline" onClick={() => void handleExportMraAudit()}><Landmark className="mr-2 h-4 w-4" /> MRA Audit PDF</Button>
         </div>
       </div>
+
+      {serverReportRefreshError ? (
+        <Card className="border-amber-500/50 bg-amber-500/5">
+          <CardContent className="flex items-start gap-3 p-4 text-sm text-amber-900 dark:text-amber-100">
+            <Circle className="mt-0.5 h-4 w-4 shrink-0 fill-current" />
+            <span>{serverReportRefreshError}</span>
+          </CardContent>
+        </Card>
+      ) : null}
       
       <Tabs defaultValue="sales" className="w-full">
         <div className="overflow-x-auto pb-1">
@@ -1021,7 +1075,7 @@ export default function ReportsPage() {
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {!allOrders ? (
+                            {!reportOrders ? (
                                 <TableRow><TableCell colSpan={6} className="text-center"><Loader2 className="animate-spin mx-auto" /></TableCell></TableRow>
                             ) : orderPagination.paginatedItems.map(order => (
                                 <TableRow key={order.id} className={`${order.status === 'Voided' ? 'opacity-60' : ''}`}>

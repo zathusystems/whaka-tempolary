@@ -6,6 +6,8 @@ Handles synchronization of stock transfers between frontend and backend
 from .models import InventoryItem, StockTransfer
 from business.models import Business, Branch
 from .services import InventoryService
+from django.db.models import Q
+import re
 
 
 def _is_valid_uuid(value):
@@ -15,6 +17,27 @@ def _is_valid_uuid(value):
         return True
     except (TypeError, ValueError):
         return False
+
+
+def _resolve_branch(branch_reference, business):
+    """Resolve the branch identifiers used by web, mobile, and desktop clients."""
+    raw = str(branch_reference or '').strip()
+    if not raw:
+        return None
+
+    numeric_match = re.match(r'^(?:BRN-|branch-)(\d+)$', raw, flags=re.IGNORECASE)
+    if numeric_match:
+        raw = numeric_match.group(1)
+
+    branches = Branch.objects.filter(business=business)
+    if raw.isdigit():
+        return branches.filter(id=int(raw)).first()
+
+    normalized = raw.lower()
+    if normalized in {'main', 'main-branch', 'main_branch'}:
+        return branches.filter(name__iendswith='Main Branch').order_by('created_at', 'id').first()
+
+    return branches.filter(Q(slug__iexact=raw) | Q(name__iexact=raw)).first()
 
 
 # ============================================================================
@@ -27,13 +50,26 @@ def handle_create_stock_transfer(transfer_id, data, business, branch_id):
         from django.db import transaction
         from decimal import Decimal
         
-        # Validate from branch exists
-        try:
-            from_branch = Branch.objects.get(id=branch_id, business=business)
-        except Branch.DoesNotExist:
+        # A retry must be idempotent. The first request may have committed on
+        # the server while the device lost its response; never move stock a
+        # second time for the same local transfer UUID.
+        if _is_valid_uuid(transfer_id):
+            existing = StockTransfer.objects.filter(id=transfer_id, business=business).first()
+            if existing:
+                print(f"[Sync Stock] Transfer {transfer_id} already exists; acknowledging retry")
+                return {'success': True, 'server_id': str(existing.id)}
+
+        from_branch = _resolve_branch(
+            # The authenticated sync request's branch is authoritative. The
+            # payload value is only a compatibility fallback for older clients
+            # that did not send branch_id.
+            branch_id or data.get('fromBranchId') or data.get('from_branch_id'),
+            business,
+        )
+        if from_branch is None:
             return {
                 'success': False,
-                'error': f'From branch {branch_id} not found for this business'
+                'error': f'From branch {branch_id} not found for this business',
             }
         
         # Validate to branch exists
@@ -44,23 +80,12 @@ def handle_create_stock_transfer(transfer_id, data, business, branch_id):
                 'error': 'To branch ID is required'
             }
         
-        try:
-            to_branch = Branch.objects.get(id=to_branch_id, business=business)
-        except Branch.DoesNotExist:
+        to_branch = _resolve_branch(to_branch_id, business)
+        if to_branch is None:
             return {
                 'success': False,
                 'error': f'To branch {to_branch_id} not found for this business'
             }
-        
-        # Check if transfer already exists
-        existing = (
-            StockTransfer.objects.filter(id=transfer_id, business=business).first()
-            if _is_valid_uuid(transfer_id)
-            else None
-        )
-        if existing:
-            print(f"[Sync Stock] Transfer {transfer_id} already exists, updating instead")
-            return handle_update_stock_transfer(transfer_id, data, business, branch_id)
         
         # Get inventory item
         item_id = data.get('itemId') or data.get('item_id') or data.get('inventoryItemId') or data.get('inventory_item_id')
@@ -78,26 +103,49 @@ def handle_create_stock_transfer(transfer_id, data, business, branch_id):
                 'error': f'Inventory item {item_id} not found in source branch'
             }
         
-        quantity = Decimal(str(data.get('quantity', 0)))
         try:
-            InventoryService._validate_eis_branch_transfer_mapping(
-                from_branch,
-                to_branch,
-                business,
-            )
-            eis_transfer_result = InventoryService.submit_eis_transfer_if_required(
-                from_branch,
-                to_branch,
-                inventory_item,
-                quantity,
-            )
-        except Exception as exc:
+            quantity = Decimal(str(data.get('quantity', 0)))
+        except Exception:
+            return {'success': False, 'error': 'Quantity must be a valid number'}
+        if quantity <= 0:
+            return {'success': False, 'error': 'Quantity must be positive'}
+        if quantity > inventory_item.stock_units:
             return {
                 'success': False,
-                'error': str(exc),
+                'error': f'Cannot transfer {quantity}. Only {inventory_item.stock_units} available.',
             }
-        
+
         with transaction.atomic():
+            # Lock the source row so concurrent sales/transfers cannot make a
+            # retry overdraw stock between validation and the decrement.
+            inventory_item = InventoryItem.objects.select_for_update().get(id=inventory_item.id)
+            if quantity > inventory_item.stock_units:
+                return {
+                    'success': False,
+                    'error': f'Cannot transfer {quantity}. Only {inventory_item.stock_units} available.',
+                }
+
+            # Submit to EIS only after the locked source stock has been
+            # validated. A concurrent sale must not produce an external EIS
+            # transfer when the local movement cannot be committed.
+            try:
+                InventoryService._validate_eis_branch_transfer_mapping(
+                    from_branch,
+                    to_branch,
+                    business,
+                )
+                eis_transfer_result = InventoryService.submit_eis_transfer_if_required(
+                    from_branch,
+                    to_branch,
+                    inventory_item,
+                    quantity,
+                )
+            except Exception as exc:
+                return {
+                    'success': False,
+                    'error': str(exc),
+                }
+
             # 1. Decrement stock at source branch
             inventory_item.stock_units -= quantity
             inventory_item.value = inventory_item.stock_units * (inventory_item.cost or 0)
@@ -163,6 +211,8 @@ def handle_create_stock_transfer(transfer_id, data, business, branch_id):
             }
             if _is_valid_uuid(transfer_id):
                 transfer_data['id'] = transfer_id
+                # Keep a stable reference for retries and for audit exports.
+                transfer_data['transfer_reference'] = f'TRF-{str(transfer_id).replace("-", "")[:8].upper()}'
             
             transfer = StockTransfer.objects.create(**transfer_data)
             print(f"[Sync Stock] Created stock transfer {transfer_id}")
@@ -187,14 +237,10 @@ def handle_update_stock_transfer(transfer_id, data, business, branch_id):
     try:
         transfer = StockTransfer.objects.get(id=transfer_id, business=business)
         
-        # Update fields if provided
-        if 'quantity' in data:
-            transfer.quantity = float(data['quantity'])
-        if 'initiatedBy' in data:
-            transfer.initiated_by = data['initiatedBy']
-        
-        transfer.save()
-        print(f"[Sync Stock] Updated stock transfer {transfer_id}")
+        # Transfer rows are immutable stock movements. Treat a duplicate
+        # update/retry as an acknowledgement instead of changing quantity
+        # without applying the corresponding inventory movement.
+        print(f"[Sync Stock] Transfer {transfer_id} already exists; acknowledging update")
         
         return {
             'success': True,
